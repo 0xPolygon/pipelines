@@ -2,11 +2,13 @@ name: Security Build
 on:
   push:
     branches:
-      - master # or the name of your main branch
+      - main # or the name of your main and preferred branches
+      - dev
+      - staging # or the name of your main and preferred branches
   workflow_dispatch: {}
   pull_request:
     types: [opened, synchronize, reopened]
-    
+
 jobs:
   sonarcloud:
     name: SonarCloud

@@ -3,36 +3,21 @@
 [![Coverage][Coverage-badge]][Sonar-url]
 [![Vulnerabilities][Vulnerability-badge]][Sonar-url]
 
-# 0xPolygon GitHub Template
-This repo serves as a template for new repositories in the 0xPolygon organization.
-
-# Action Items
-The following actions are required once you create a new repository from this repo:
-- Update this README. Complete the sections to reflect your project
-- Update `CODEOWNERS` file
-- Update `sonar-project.properties` by adding your Sonar project key provided by the Security Team
-- Update badges to reflect your project (badges are located at the bottom of this README)
-- Ensure you are using Issue and PR Templates
-
-## About The Project
-
+# 0xPolygon Pipelines
+This repo serves as the repository for shared pipelines across the Polygon organization. To learn more about using 
+shared pipelines, please see the [Shared Pipelines Documentation](https://docs.github.com/en/actions/creating-actions/sharing-actions-and-workflows-with-your-organization).
 
 ### Built With
 
-[![Node.js 18][Language-badge]][Language-url]
-
+![Static Badge](https://img.shields.io/badge/alcohol-sarcasm-8A2BE2?logo=polygon)
 
 ## Getting Started
 
 ### Local Development
 
-### Database
-
-### Installation
-
 ## Usage
 
-Use this space to show useful examples of how a project can be used. Additional screenshots, code examples, and demos work well in this space. This is incredibly useful for support personnel when responding to issues related to your application.
+TODO
 
 ## Contributing
 
@@ -49,8 +34,6 @@ This is the place to document your delivery workflow. For example:
 
 ![Email][Email-badge]
 ![Slack][Slack-badge]
-[![Production URL][Production-badge]][Production-url]
-[![Staging URL][Staging-badge]][Staging-url]
 
 
 <!-- MARKDOWN LINKS AND IMAGES (update/replace as needed for your application) -->
@@ -60,8 +43,8 @@ This is the place to document your delivery workflow. For example:
 [Sonar-url]: https://sonarqube.polygon.technology/dashboard?id=TODO
 [Language-badge]: https://img.shields.io/badge/Nodejs-18.0-informational
 [Language-url]: https://nodejs.org/en
-[Email-badge]: https://img.shields.io/badge/Email-team_email_address-informational?logo=gmail
-[Slack-badge]: https://img.shields.io/badge/Slack-team_ChannelName-informational?logo=slack
+[Email-badge]: https://img.shields.io/badge/Email-devops@polygon.technology-informational?logo=gmail
+[Slack-badge]: https://img.shields.io/badge/Slack-team_devops-informational?logo=slack
 [Production-badge]: https://img.shields.io/badge/Production_URL-polygon.technology-informational
 [Production-url]: https://link.to/prod
 [Staging-badge]: https://img.shields.io/badge/Staging_URL-staging.polygon.technology-informational
