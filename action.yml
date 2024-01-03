@@ -1,0 +1,140 @@
+name: 'GCP Build Pipeline'
+description: 'Build and push Docker image to Google Cloud Artifact Registry'
+inputs:
+  workload_identity_provider:
+    description: 'Full identifier of Workload Identity Provider (e.g., project number, pool name, provider name).'
+    required: true
+  service_account:
+    description: 'Email address or unique identifier of the Google Cloud service account for which to generate credentials.'
+    required: true
+  gar_location:
+    description: 'Google Cloud Artifact Registry location.'
+    required: true
+  docker_image:
+    description: 'Full name of the Docker image.'
+    required: true
+  dockerfile_name:
+    description: 'Name of the Dockerfile.'
+    required: true
+    default: 'Dockerfile'
+  dockerfile_path:
+    description: 'Path to the Dockerfile.'
+    required: true
+    default: '.'
+  critical_count:
+    description: 'Critical vulnerabilities count.'
+    required: true
+    default: '5'
+  helm_values_path:
+    description: 'Path to the Helm values file for configuration.'
+    required: true
+    default: './helm-charts/values.yaml'
+  attestor:
+    description: 'Name of the attestor to be used for signing the docker images.'
+    required: true
+  attestor_project:
+    description: 'Google Cloud Platform (GCP) project where the attestor is located.'
+    required: true
+  keyversion_project:
+    description: 'GCP project where the key version is stored.'
+    required: true
+  keyversion_location:
+    description: 'Location/region of the key version.'
+    required: true
+  keyversion_keyring:
+    description: 'Keyring associated with the key version.'
+    required: true
+  keyversion_key:
+    description: 'Key associated with the key version.'
+    required: true
+
+runs:
+  using: "composite"
+  steps:
+    - uses: actions/checkout@v4
+    - uses: google-github-actions/setup-gcloud@v1
+    
+    - id: auth
+      uses: google-github-actions/auth@v1
+      with:
+          token_format: "access_token"
+          workload_identity_provider: ${{ inputs.workload_identity_provider }}
+          service_account: ${{ inputs.service_account }}
+    
+    - id: docker-auth
+      uses: docker/login-action@v1
+      with:
+        username: "oauth2accesstoken"
+        password: ${{ steps.auth.outputs.access_token }}
+        registry: ${{ inputs.gar_location }}-docker.pkg.dev
+    
+    - id: build-docker-image
+      run: |-
+        docker build -t "${{ inputs.docker_image }}:${{ github.sha }}" -f ${{ inputs.dockerfile_name }} ${{ inputs.dockerfile_path }}
+      shell: bash
+      
+    - id: push-docker-image
+      run: |-        
+        docker push "${{ inputs.docker_image }}:${{ github.sha }}"
+      shell: bash
+    
+    - id: scan-vulnerabilities
+      run: |-
+        (gcloud artifacts docker images scan "${{ inputs.docker_image }}:${{ github.sha }}" --format="value(response.scan)" --remote --quiet) > ./scan_id.txt
+      shell: bash
+      
+    - id: check-critical-vulnerabilities
+      run: |-
+        #!/bin/bash
+        # Check if the scan_id.txt file exists
+        if [ ! -f ./scan_id.txt ]; then
+            echo "Error: scan_id.txt not found."
+            exit 1
+        fi
+        # Use gcloud to list vulnerabilities and check for CRITICAL severity
+        severity=$(gcloud artifacts docker images list-vulnerabilities \
+                        "$(cat ./scan_id.txt)" \
+                        --format="value(vulnerability.effectiveSeverity)")
+        
+        # Check if CRITICAL vulnerability is found
+        chk=$(echo "$severity" | grep -c "CRITICAL")
+        if [ "$chk" -gt ${{ inputs.critical_count }} ]; then
+          echo "Failed vulnerability check for CRITICAL level"
+            exit 1
+        else
+            echo "No CRITICAL vulnerability found. Congratulations!"
+            exit 0
+        fi
+      shell: bash
+    
+    - id: sign-docker-image
+      run: |-
+        export CLOUDSDK_CORE_DISABLE_PROMPTS=1
+        gcloud components install beta --quiet
+        
+        DIGEST=$(gcloud container images describe ${{ inputs.docker_image }}:${{ github.sha }} --format='get(image_summary.digest)')
+
+        gcloud beta container binauthz attestations sign-and-create \
+          --artifact-url="${{ inputs.docker_image }}@${DIGEST}" \
+          --attestor="${{ inputs.attestor }}" \
+          --attestor-project="${{ inputs.attestor_project }}" \
+          --keyversion-project="${{ inputs.keyversion_project }}" \
+          --keyversion-location="${{ inputs.keyversion_location }}" \
+          --keyversion-keyring="${{ inputs.keyversion_keyring }}" \
+          --keyversion-key="${{ inputs.keyversion_key }}" \
+          --keyversion="1"
+      shell: bash
+
+    - id: update-helm-values
+      run: |-
+        DIGEST=$(gcloud container images describe ${{ inputs.docker_image }}:${{ github.sha }} \
+              --format='get(image_summary.digest)')
+
+        sed -i "s|image:.*|image: ${{ inputs.docker_image }}@${DIGEST}|" ${{ inputs.helm_values_path }}
+      shell: bash
+
+    - id: push-back
+      uses: stefanzweifel/git-auto-commit-action@v5
+      with:
+        commit_message: Apply automatic changes to Update image repository in Helm values
+        file_pattern: ${{ inputs.helm_values_path }}
