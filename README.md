@@ -50,7 +50,7 @@ To use this workflow, provide the required inputs when triggering the workflow r
 
     steps:
     - id: custom-action
-      uses: 0xPolygon/gcp-build-pipeline-action@v1
+      uses: 0xPolygon/pipelines@v1
       with:
         workload_identity_provider: ${{ env.WIF_PROVIDER }}
         service_account: ${{ env.WIF_SERVICE_ACCOUNT }}
