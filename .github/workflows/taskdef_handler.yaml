@@ -4,9 +4,6 @@ on:
       app_name:
         required: true
         type: string
-      taskdef_file:
-        required: true
-        type: string
       account_number:
         required: true
         type: string
@@ -15,6 +12,17 @@ on:
         type: string
       cluster_name:
         required: true
+        type: string
+      taskdef_file_vars:
+        required: true
+        type: string
+      taskdef_file_script:
+        required: false
+        default: ".github/taskdefinition_template/taskdef_creator.py"
+        type: string
+      taskdef_file_template:
+        required: false
+        default: ".github/taskdefinition_template/taskdef_template.json"
         type: string
       aws_region:
         required: false
@@ -36,6 +44,16 @@ jobs:
     steps:
       - name: Checkout
         uses: actions/checkout@v3
+
+      - name: Create taskdef file dynamically using parameters passed
+        run: |
+          ls -lrt
+          export PIPENV_PIPFILE=.github/taskdefinition_template/Pipfile
+          python -m pip install --upgrade pip && \
+          pip install pipenv && \
+          pipenv install && \
+          pipenv run python ${{ inputs.taskdef_file_script }} \
+            ${{ inputs.taskdef_file_vars }} ${{ inputs.taskdef_file_template }}
 
       - name: Configure AWS credentials
         uses: aws-actions/configure-aws-credentials@v1
@@ -59,11 +77,15 @@ jobs:
           docker push $ECR_REGISTRY/$ECR_REPOSITORY:$IMAGE_TAG
           echo "image=$ECR_REGISTRY/$ECR_REPOSITORY:$IMAGE_TAG" >> $GITHUB_OUTPUT
 
+      - name: Extract directory path
+        run: |
+          echo "TASKDEF_FILE=$(dirname "${{ inputs.taskdef_file_template }}")/${{ inputs.app_name }}.json" >> $GITHUB_ENV
+
       - name: Fill in the new image ID in the Amazon ECS task definition
         id: task-def
         uses: aws-actions/amazon-ecs-render-task-definition@v1
         with:
-          task-definition: ${{ inputs.taskdef_file }}
+          task-definition: "${{ env.TASKDEF_FILE }}"
           container-name: ${{ inputs.app_name }}
           image: ${{ steps.build-image.outputs.image }}
 
