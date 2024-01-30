@@ -66,7 +66,9 @@ class ReadWorkflowData:
         ecs_task_definition = self.workflow_dict.get("env", {}).get(
             "ECS_TASK_DEFINITION"
         )
-        self.trigger_path.append(ecs_task_definition)  # Trigger on taskdef file changes
+        self.trigger_path.append(
+            ecs_task_definition.replace(".json", ".yaml")
+        )  # Trigger on taskdef file changes
         return ecs_task_definition
 
     def _get_account_number(self):
@@ -333,7 +335,6 @@ class OpenApiCondense:
         """
         workflow_dict = self._read_yaml_file_data(filepath)
         if self._check_if_updated(workflow_dict):
-            print(f"{filepath} updated.")
             return
         try:
             workflow_read_obj = ReadWorkflowData(workflow_dict, filepath)
