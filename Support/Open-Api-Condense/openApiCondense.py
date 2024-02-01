@@ -10,7 +10,7 @@ from pathlib import Path
 
 
 class ReadWorkflowData:
-    """Read workflow data."""
+    """Read github workflow data file"""
 
     def __init__(self, workflow_dict, filepath):
         self.workflow_dict = workflow_dict
@@ -40,13 +40,16 @@ class ReadWorkflowData:
 
     def _get_trigger_path(self):
         trigger_folder = self.workflow_dict.get(True, {}).get("push", {}).get("paths")
-        if len(trigger_folder) == 1:
+        for num, trigger_path in enumerate(trigger_folder):
+            if trigger_path.strip()[0] != "'":
+                trigger_folder[num] = "'" + trigger_path + "'"
+        if len(trigger_folder):
             folder_taskdef = trigger_folder[0].strip("/**")
             taskdef_folder = os.sep.join([folder_taskdef, "taskdef"])
-            trigger_folder.append("!" + taskdef_folder + "/**")
+            trigger_folder.append("'!" + taskdef_folder + "/**'")
             github_workflow_file = self.filepath.split(".github/workflows", 1)[1]
-            trigger_folder.append(".github/workflows" + github_workflow_file)
-        return trigger_folder
+            trigger_folder.append("'.github/workflows" + github_workflow_file + "'")
+        return list(set(trigger_folder))
 
     def _get_region(self):
         return self.workflow_dict.get("env", {}).get("AWS_REGION")
@@ -67,7 +70,7 @@ class ReadWorkflowData:
             "ECS_TASK_DEFINITION"
         )
         self.trigger_path.append(
-            ecs_task_definition.replace(".json", ".yaml")
+            "'" + ecs_task_definition.replace(".json", ".yaml") + "'"
         )  # Trigger on taskdef file changes
         return ecs_task_definition
 
@@ -100,6 +103,8 @@ class ReadWorkflowData:
 
 
 class ReadTaskdefData:
+    """Reads taskdef data related to github workflow"""
+
     def __init__(self, workflow_read_obj):
         self.relative_taskdef_file = workflow_read_obj.task_defintion_file
         self.repo_path = Path(workflow_read_obj.filepath).parent.parent.parent
@@ -233,25 +238,25 @@ class OpenApiCondense:
                 "branches": workflow_read_obj.trigger_branch,
                 "paths": workflow_read_obj.trigger_path,
             },
-            "workflow_dispatch": "",
+            "workflow_dispatch": None,
         }
         taskdef_file_vars = workflow_read_obj.task_defintion_file.replace(
             ".json", ".yaml"
         )
         workflow_dict["jobs"] = {
             "deploy": {
-                "uses": "0xPolygon/pipelines/.github/workflows/ecs_deploy_docker_taskdef.yaml@main"
-            },
-            "with": {
-                "app_name": workflow_read_obj.app_name,
-                "taskdef_file_vars": taskdef_file_vars,
-                "account_number": workflow_read_obj.account_number,
-                "aws_region": workflow_read_obj.region,
-                "environment": workflow_read_obj.env_name,
-                "docker_file": workflow_read_obj.docker_file,
-                "cluster_name": workflow_read_obj.cluster_name,
-            },
-            "secrets": "inherit",
+                "uses": "0xPolygon/pipelines/.github/workflows/ecs_deploy_docker_taskdef.yaml@main",
+                "with": {
+                    "app_name": workflow_read_obj.app_name,
+                    "taskdef_file_vars": taskdef_file_vars,
+                    "account_number": workflow_read_obj.account_number,
+                    "aws_region": workflow_read_obj.region,
+                    "environment": workflow_read_obj.env_name,
+                    "docker_file": workflow_read_obj.docker_file,
+                    "cluster_name": workflow_read_obj.cluster_name,
+                },
+                "secrets": "inherit",
+            }
         }
         desired_key_order = ["name", "on", "jobs"]
         with open(workflow_read_obj.filepath, "w", encoding="utf-8") as file_obj:
