@@ -17,7 +17,28 @@ shared pipelines, please see the [Shared Pipelines Documentation](https://docs.g
 
 ## Usage
 
-TODO
+To use this workflow, provide the required inputs when triggering the workflow run. Ensure that the necessary secrets and permissions are configured in your GitHub repository for GCP authentication and Docker image pushing.
+
+    steps:
+    - id: gcp-build-action
+      uses: 0xPolygon/pipelines@v1
+      with:
+        workload_identity_provider: ${{ env.WIF_PROVIDER }}
+        service_account: ${{ env.WIF_SERVICE_ACCOUNT }}
+        gar_location: ${{ env.GAR_LOCATION }}
+        docker_image: ${{ env.IMAGE_NAME }}
+        dockerfile_name: Dockerfile
+        dockerfile_path: .
+        critical_count: ${{ env.CRITICAL_COUNT }}
+        helm_values_path: './helm-chart/values.yaml'
+        attestor: ${{ env.ATTESTOR }}
+        attestor_project: ${{ env.ATTESTOR_PROJECT_ID }}
+        keyversion_project: ${{ env.ATTESTOR_PROJECT_ID }}
+        keyversion_location: ${{ env.GAR_LOCATION }}
+        keyversion_keyring: ${{ env.KEY_RING }}
+        keyversion_key: ${{ env.KEY }}
+
+Read more info: [gcp-build-pipeline](/docs/gcp-build-pipeline.md)
 
 ## Contributing
 
