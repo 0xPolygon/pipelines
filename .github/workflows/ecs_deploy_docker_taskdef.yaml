@@ -1,0 +1,98 @@
+on:
+  workflow_call:
+    inputs:
+      app_name:
+        required: true
+        type: string
+      account_number:
+        required: true
+        type: string
+      docker_file:
+        required: true
+        type: string
+      cluster_name:
+        required: true
+        type: string
+      taskdef_file_vars:
+        required: true
+        type: string
+      taskdef_file_script:
+        required: false
+        default: ".github/taskdefinition_template/taskdef_creator.py"
+        type: string
+      taskdef_file_template:
+        required: false
+        default: ".github/taskdefinition_template/taskdef_template.json"
+        type: string
+      aws_region:
+        required: false
+        default: "eu-west-1"
+        type: string      
+      environment:
+        required: false
+        default: "staging"
+        type: string
+
+jobs:
+  deploy_workflow:
+    name: Deploy ${{ inputs.app_name }}
+    permissions:
+      id-token: write
+      contents: write
+    environment: ${{ inputs.environment }}
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v3
+
+      - name: Create taskdef file dynamically using parameters passed
+        run: |
+          ls -lrt
+          export PIPENV_PIPFILE=.github/taskdefinition_template/Pipfile
+          python -m pip install --upgrade pip && \
+          pip install pipenv && \
+          pipenv install && \
+          pipenv run python ${{ inputs.taskdef_file_script }} \
+            ${{ inputs.taskdef_file_vars }} ${{ inputs.taskdef_file_template }}
+
+      - name: Configure AWS credentials
+        uses: aws-actions/configure-aws-credentials@v1
+        with:
+          aws-region: ${{ inputs.aws_region }}
+          role-to-assume: arn:aws:iam::${{ inputs.account_number }}:role/${{ inputs.app_name }}-GithubActionsRole
+          role-session-name: GithubActionsSession
+
+      - name: Login to Amazon ECR
+        id: login-ecr
+        uses: aws-actions/amazon-ecr-login@v1
+
+      - name: Build, tag, and push image to Amazon ECR
+        id: build-image
+        env:
+          ECR_REGISTRY: ${{ steps.login-ecr.outputs.registry }}
+          IMAGE_TAG: ${{ github.sha }}
+          ECR_REPOSITORY: ${{ inputs.app_name }}-ecr
+        run: |
+          docker build -t $ECR_REGISTRY/$ECR_REPOSITORY:$IMAGE_TAG -f ${{ inputs.docker_file }} .
+          docker push $ECR_REGISTRY/$ECR_REPOSITORY:$IMAGE_TAG
+          echo "image=$ECR_REGISTRY/$ECR_REPOSITORY:$IMAGE_TAG" >> $GITHUB_OUTPUT
+
+      - name: Extract directory path
+        run: |
+          echo "TASKDEF_FILE=$(dirname "${{ inputs.taskdef_file_template }}")/${{ inputs.app_name }}.json" >> $GITHUB_ENV
+
+      - name: Fill in the new image ID in the Amazon ECS task definition
+        id: task-def
+        uses: aws-actions/amazon-ecs-render-task-definition@v1
+        with:
+          task-definition: "${{ env.TASKDEF_FILE }}"
+          container-name: ${{ inputs.app_name }}
+          image: ${{ steps.build-image.outputs.image }}
+
+      - name: Deploy Amazon ECS task definition
+        uses: aws-actions/amazon-ecs-deploy-task-definition@v1
+        with:
+          task-definition: ${{ steps.task-def.outputs.task-definition }}
+          service: ${{ inputs.app_name }}-ecs-service
+          cluster: ${{ inputs.cluster_name }}
+          wait-for-service-stability: true
