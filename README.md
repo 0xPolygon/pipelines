@@ -1,55 +1,26 @@
-# GCP Build Pipeline
+<!-- PROJECT SHIELDS -->
+![Build][Build-badge]
+[![Coverage][Coverage-badge]][Sonar-url]
+[![Vulnerabilities][Vulnerability-badge]][Sonar-url]
 
-## Overview
-This GitHub Actions workflow sets up a build pipeline for Docker images on Google Cloud Platform (GCP) with the following key features:
+# 0xPolygon Pipelines
+This repo serves as the repository for shared pipelines across the Polygon organization. To learn more about using 
+shared pipelines, please see the [Shared Pipelines Documentation](https://docs.github.com/en/actions/creating-actions/sharing-actions-and-workflows-with-your-organization).
 
-- Building and pushing Docker images to Google Cloud Artifact Registry.
-- Scanning Docker images for vulnerabilities and checking for critical severity.
-- Signing Docker images using Binary Authorization.
-- Updating Helm chart values with the latest Docker image details.
-- Automatically committing changes to the Helm values file.
+### Built With
 
-## Inputs
-The workflow accepts the following parameters:
+![Static Badge](https://img.shields.io/badge/alcohol-sarcasm-8A2BE2?logo=polygon)
 
-- `workload_identity_provider`: Full identifier of the Workload Identity Provider.
-- `service_account`: Email address or unique identifier of the Google Cloud service account.
-- `gar_location`: Google Cloud Artifact Registry location.
-- `docker_image`: Full name of the Docker image.
-- `dockerfile_name`: Name of the Dockerfile (default: 'Dockerfile').
-- `dockerfile_path`: Path to the Dockerfile (default: '.').
-- `critical_count`: Critical vulnerabilities count (default: '5').
-- `helm_values_path`: Path to the Helm values file for configuration (default: './helm-charts/values.yaml').
-- `attestor`: Name of the attestor for signing Docker images.
-- `attestor_project`: GCP project where the attestor is located.
-- `keyversion_project`: GCP project where the key version is stored.
-- `keyversion_location`: Location/region of the key version.
-- `keyversion_keyring`: Keyring associated with the key version.
-- `keyversion_key`: Key associated with the key version.
+## Getting Started
 
-## Workflow Steps
-1. **Checkout Code:** Uses `actions/checkout` to fetch the source code.
-2. **Set up GCP CLI:** Uses `google-github-actions/setup-gcloud` to configure the Google Cloud CLI.
-3. **Authenticate:** Authenticates with GCP using the specified service account and workload identity provider.
-4. **Docker Login:** Logs in to the Google Cloud Artifact Registry using the provided credentials.
-5. **Build Docker Image:** Builds the Docker image with the specified Dockerfile.
-6. **Push Docker Image:** Pushes the Docker image to the Google Cloud Artifact Registry.
-7. **Scan Vulnerabilities:** Scans the pushed Docker image for vulnerabilities.
-8. **Check Critical Vulnerabilities:** Checks if the number of critical vulnerabilities exceeds the specified count.
-9. **Sign Docker Image:** Signs the Docker image using Binary Authorization.
-10. **Update Helm Values:** Updates the Helm chart values with the latest Docker image details.
-11. **Push Back Changes:** Automatically commits changes to the Helm values file.
-
-## Notes
-- The workflow utilizes Google Cloud CLI and Docker commands for building, pushing, and scanning Docker images.
-- Binary Authorization is used to sign Docker images for security.
-- Helm chart values are updated with the latest Docker image details automatically.
+### Local Development
 
 ## Usage
+
 To use this workflow, provide the required inputs when triggering the workflow run. Ensure that the necessary secrets and permissions are configured in your GitHub repository for GCP authentication and Docker image pushing.
 
     steps:
-    - id: custom-action
+    - id: gcp-build-action
       uses: 0xPolygon/pipelines@v1
       with:
         workload_identity_provider: ${{ env.WIF_PROVIDER }}
@@ -66,3 +37,36 @@ To use this workflow, provide the required inputs when triggering the workflow r
         keyversion_location: ${{ env.GAR_LOCATION }}
         keyversion_keyring: ${{ env.KEY_RING }}
         keyversion_key: ${{ env.KEY }}
+
+Read more info: [gcp-build-pipeline](/docs/gcp-build-pipeline.md)
+
+## Contributing
+
+This is the place to document your delivery workflow. For example:
+
+1. Clone the project
+2. Create a feature branch beginning with the ticket number (`git checkout -b INC-7689/update-readme`)
+3. Commit your changes (`git commit -m 'Update README.me with default template`)
+4. Push to the branch (`git push origin INC-7689/update-readme`)
+5. Open a Pull Request
+6. After review and approval, changes are deployed immediately
+
+## Contact
+
+![Email][Email-badge]
+![Slack][Slack-badge]
+
+
+<!-- MARKDOWN LINKS AND IMAGES (update/replace as needed for your application) -->
+[Build-badge]: https://github.com/0xPolygon/learn-api/actions/workflows/main.yml/badge.svg
+[Coverage-badge]: https://sonarqube.polygon.technology/api/project_badges/measure?project=TODO
+[Vulnerability-badge]: https://sonarqube.polygon.technology/api/project_badges/measure?project=TODO
+[Sonar-url]: https://sonarqube.polygon.technology/dashboard?id=TODO
+[Language-badge]: https://img.shields.io/badge/Nodejs-18.0-informational
+[Language-url]: https://nodejs.org/en
+[Email-badge]: https://img.shields.io/badge/Email-devops@polygon.technology-informational?logo=gmail
+[Slack-badge]: https://img.shields.io/badge/Slack-team_devops-informational?logo=slack
+[Production-badge]: https://img.shields.io/badge/Production_URL-polygon.technology-informational
+[Production-url]: https://link.to/prod
+[Staging-badge]: https://img.shields.io/badge/Staging_URL-staging.polygon.technology-informational
+[Staging-url]: https://link.to/staging
