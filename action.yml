@@ -53,6 +53,8 @@ runs:
   steps:
     - uses: actions/checkout@v4
     - uses: google-github-actions/setup-gcloud@v2
+      with:
+        version: '455.0.0'
     
     - id: auth
       uses: google-github-actions/auth@v1
