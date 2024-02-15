@@ -6,7 +6,7 @@ To execute terraform plan across multiple folders (terraform modules) which have
 
 Execute the following command
 ```shell
-python tfPlanAutomate.py --root_dir /Code/terraform-multicloud-resources \
+python tf_plan_automate.py --root_dir /Code/terraform-multicloud-resources \
         --sub_dir aws/prod-applications/eu-west-1/apps
 ```
 This will execute terraform plan on all subdirectories under sub_dir parameter which have 

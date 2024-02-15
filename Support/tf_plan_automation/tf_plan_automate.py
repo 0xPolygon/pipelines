@@ -18,7 +18,9 @@ def get_directories_changed(parent_directory: str):
     """
     os.chdir(parent_directory)
     result = subprocess.run(
-        ["git", "diff", "--name-only", "--exit-code"], stdout=subprocess.PIPE
+        ["git", "diff", "--name-only", "--exit-code"],
+        stdout=subprocess.PIPE,
+        check=False,
     )
     directories_changed = []
     for filepath in result.stdout.decode().splitlines():
@@ -39,7 +41,7 @@ def find_tf_directories(path: str):
         list: Folder path where the terrform files exist under the search path
     """
     tf_folders = []
-    for root, dirs, files in os.walk(path):
+    for root, _, files in os.walk(path):
         for file in files:
             if file.endswith(".tf"):
                 tf_folders.append(root)
@@ -59,7 +61,7 @@ def run_terraform(path, issues_with_folders):
     try:
         os.chdir(path)
         subprocess.run(["terraform", "init"], check=True)
-        result = subprocess.run(["terraform", "plan"], capture_output=True)
+        result = subprocess.run(["terraform", "plan"], capture_output=True, check=False)
         if result.returncode != 0:
             output = result.stdout.decode("utf-8")
             issues_with_folders.append({path: str(output)})
