@@ -52,7 +52,9 @@ runs:
   using: "composite"
   steps:
     - uses: actions/checkout@v4
-    - uses: google-github-actions/setup-gcloud@v1
+    - uses: google-github-actions/setup-gcloud@v2
+      with:
+        version: '455.0.0'
     
     - id: auth
       uses: google-github-actions/auth@v1
@@ -134,7 +136,11 @@ runs:
       shell: bash
 
     - id: push-back
-      uses: stefanzweifel/git-auto-commit-action@v5
-      with:
-        commit_message: Apply automatic changes to Update image repository in Helm values
-        file_pattern: ${{ inputs.helm_values_path }}
+      run: |-
+        git config --global user.email "github-action-bot@polygon.technology.com"
+        git config --global user.name "github-actions[bot]"
+        git pull
+        git add ${{ inputs.helm_values_path }}
+        git commit -m "Apply automatic changes to Update image repository in Helm values"
+        git push -u origin ${{ github.ref_name }}
+      shell: bash
