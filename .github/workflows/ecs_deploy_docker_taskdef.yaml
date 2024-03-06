@@ -27,7 +27,7 @@ on:
       aws_region:
         required: false
         default: "eu-west-1"
-        type: string      
+        type: string
       environment:
         required: false
         default: "staging"
@@ -73,6 +73,11 @@ jobs:
           IMAGE_TAG: ${{ github.sha }}
           ECR_REPOSITORY: ${{ inputs.app_name }}-ecr
         run: |
+          current_dir=$(realpath .)
+          target_dir=$(dirname "$(realpath "${{ inputs.docker_file }}")")
+          if [[ "$current_dir" != "$target_dir" ]]; then
+            cd "$target_dir"
+          fi
           docker build -t $ECR_REGISTRY/$ECR_REPOSITORY:$IMAGE_TAG -f ${{ inputs.docker_file }} .
           docker push $ECR_REGISTRY/$ECR_REPOSITORY:$IMAGE_TAG
           echo "image=$ECR_REGISTRY/$ECR_REPOSITORY:$IMAGE_TAG" >> $GITHUB_OUTPUT
