@@ -100,6 +100,7 @@ jobs:
       - name: Output debug information
         run: |
           echo task-definition: ${{ steps.task-def.outputs.task-definition }}
+          cat ${{ steps.task-def.outputs.task-definition }}
           echo service: ${{ inputs.app_name }}-ecs-service
           echo cluster: ${{ inputs.cluster_name }}
 
