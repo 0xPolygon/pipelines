@@ -88,9 +88,6 @@ jobs:
       - name: Extract directory path
         run: |
           echo "TASKDEF_FILE=$(dirname "${{ inputs.taskdef_file_template }}")/${{ inputs.app_name }}.json" >> $GITHUB_ENV
-          echo "${{ env.TASKDEF_FILE }}"
-          echo ${{ inputs.app_name }}
-          echo ${{ steps.build-image.outputs.image }}
 
       - name: Fill in the new image ID in the Amazon ECS task definition
         id: task-def
@@ -99,6 +96,12 @@ jobs:
           task-definition: "${{ env.TASKDEF_FILE }}"
           container-name: ${{ inputs.app_name }}
           image: ${{ steps.build-image.outputs.image }}
+
+      - name: Output debug information
+        run: |
+          echo task-definition: ${{ steps.task-def.outputs.task-definition }}
+          echo service: ${{ inputs.app_name }}-ecs-service
+          echo cluster: ${{ inputs.cluster_name }}
 
       - name: Deploy Amazon ECS task definition
         uses: aws-actions/amazon-ecs-deploy-task-definition@v1
