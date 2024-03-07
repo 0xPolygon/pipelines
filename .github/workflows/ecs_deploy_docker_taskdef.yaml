@@ -88,6 +88,9 @@ jobs:
       - name: Extract directory path
         run: |
           echo "TASKDEF_FILE=$(dirname "${{ inputs.taskdef_file_template }}")/${{ inputs.app_name }}.json" >> $GITHUB_ENV
+          echo "${{ env.TASKDEF_FILE }}"
+          echo ${{ inputs.app_name }}
+          echo ${{ steps.build-image.outputs.image }}
 
       - name: Fill in the new image ID in the Amazon ECS task definition
         id: task-def
