@@ -77,8 +77,11 @@ jobs:
           target_dir=$(dirname "$(realpath "${{ inputs.docker_file }}")")
           if [[ "$current_dir" != "$target_dir" ]]; then
             cd "$target_dir"
+            docker_file_basename=$(basename "${{ inputs.docker_file }}")
+          else
+            docker_file_basename=$(basename "${{ inputs.docker_file }}")
           fi
-          docker build -t $ECR_REGISTRY/$ECR_REPOSITORY:$IMAGE_TAG -f ${{ inputs.docker_file }} .
+          docker build -t $ECR_REGISTRY/$ECR_REPOSITORY:$IMAGE_TAG -f $docker_file_basename .
           docker push $ECR_REGISTRY/$ECR_REPOSITORY:$IMAGE_TAG
           echo "image=$ECR_REGISTRY/$ECR_REPOSITORY:$IMAGE_TAG" >> $GITHUB_OUTPUT
 
