@@ -18,11 +18,11 @@ on:
         type: string
       taskdef_file_script:
         required: false
-        default: ".github/taskdefinition_template/taskdef_creator.py"
+        default: "Support/taskdef_template/taskdef_creator.py"
         type: string
       taskdef_file_template:
         required: false
-        default: ".github/taskdefinition_template/taskdef_template.json"
+        default: "Support/taskdef_template/taskdef_template.json"
         type: string
       aws_region:
         required: false
@@ -34,6 +34,21 @@ on:
         type: string
 
 jobs:
+  download_support_scripts:
+    if: ${{ ! startsWith(inputs.taskdef_file_script, 'Support/taskdef_template/') }}
+    environment: ${{ inputs.environment }}
+    runs-on: ubuntu-latest
+    steps:
+      - name: Download Repository Code
+        uses: actions/download-artifact@v2
+        with:
+          name: bridge-api-services
+          path: https://github.com/0xPolygon/bridge-api-services/archive/refs/heads/DEVOPS-2732-common-python-module-added.zip
+
+      - name: Extract parent repo code
+        run: |
+          tar -xzf bridge-api-services.tar.gz 'Support/taskdef_template/'
+
   deploy_workflow:
     name: Deploy ${{ inputs.app_name }}
     permissions:
@@ -43,12 +58,16 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - name: Checkout
-        uses: actions/checkout@v3
+        uses: actions/checkout@v3      
 
       - name: Create taskdef file dynamically using parameters passed
         run: |
-          ls -lrt
-          export PIPENV_PIPFILE=.github/taskdefinition_template/Pipfile
+          script_dir=$(dirname ${{ inputs.taskdef_file_script }})
+          if [[ -z "$script_dir" ]]; then
+            echo "Warning: Script name doesn't contain a directory path. Using current directory."
+            script_dir="."
+          fi
+          export PIPENV_PIPFILE=$script_dir/Pipfile
           python -m pip install --upgrade pip && \
           pip install pipenv && \
           pipenv install && \
