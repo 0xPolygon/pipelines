@@ -35,7 +35,7 @@ on:
 
 jobs:
   download_support_scripts:
-    if: ${{ ! startsWith(inputs.taskdef_file_script, 'Support/taskdef_template/') }}
+    if: ${{ inputs.taskdef_file_script == 'Support/taskdef_template/taskdef_creator.py' }}
     environment: ${{ inputs.environment }}
     runs-on: ubuntu-latest
     steps:
