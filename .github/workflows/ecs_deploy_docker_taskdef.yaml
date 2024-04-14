@@ -38,20 +38,28 @@ jobs:
     if: ${{ inputs.taskdef_file_script == 'Support/taskdef_template/taskdef_creator.py' }}
     runs-on: ubuntu-latest
     steps:
+      - name: Checkout Parent Repository
+        uses: actions/checkout@v2
+        with:
+          repository: 0xPolygon/pipelines
+          token: ${{ secrets.GITHUB_TOKEN }}
+          ref: DEVOPS-2732-common-python-module-added
+          path: Support/taskdef_template
       # - name: Download Repository Code
       #   uses: actions/download-artifact@v2
       #   with:
       #     name: bridge-api-services
       #     path: https://github.com/0xPolygon/pipelines/archive/refs/heads/DEVOPS-2732-common-python-module-added.zip
 
-      - name: Download Archive
-        run: |
-          curl -L https://github.com/0xPolygon/pipelines/archive/refs/heads/DEVOPS-2732-common-python-module-added.zip -o code.zip
+      # - name: Download Archive
+      #   run: |
+      #     curl -L https://github.com/0xPolygon/pipelines/archive/refs/heads/DEVOPS-2732-common-python-module-added.zip -o code.zip
 
       - name: Extract parent repo code
         run: |
-          unzip code.zip
           ls -lrt
+          # unzip code.zip
+          # tar -xzf bridge-api-services.tar.gz 'Support/taskdef_template/'
 
   deploy_workflow:
     name: Deploy ${{ inputs.app_name }}
