@@ -53,7 +53,7 @@ jobs:
         with:
           fetch-depth: 0
           repository: 0xPolygon/pipelines
-          ref: DEVOPS-2759-repo-public-update
+          ref: main
           path: ./pipelines
           sparse-checkout: |
             Support/      
