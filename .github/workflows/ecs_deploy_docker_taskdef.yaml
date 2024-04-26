@@ -1,13 +1,10 @@
 on:
   workflow_call:
     inputs:
-      app_name:
-        required: true
-        type: string
       account_number:
         required: true
         type: string
-      docker_file:
+      app_name:
         required: true
         type: string
       cluster_name:
@@ -16,13 +13,20 @@ on:
       taskdef_file_vars:
         required: true
         type: string
+        description: "Taskdef file variables passed from the app repository or use the local"
+      docker_file:
+        required: false
+        type: string
+        default: Dockerfile      
       taskdef_file_script:
         required: false
-        default: ".github/taskdefinition_template/taskdef_creator.py"
+        default: "local"
+        description: "Python script to handle task definition creation handling"
         type: string
       taskdef_file_template:
         required: false
-        default: ".github/taskdefinition_template/taskdef_template.json"
+        default: "local"
+        description: "Taskdef file template passed from the app repository or use the local"
         type: string
       aws_region:
         required: false
@@ -32,6 +36,7 @@ on:
         required: false
         default: "staging"
         type: string
+      
 
 jobs:
   deploy_workflow:
@@ -42,24 +47,54 @@ jobs:
     environment: ${{ inputs.environment }}
     runs-on: ubuntu-latest
     steps:
-      - name: Checkout
+      - name: Checkout Support directory
+        if: ${{ inputs.taskdef_file_script }} == "local"
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+          repository: 0xPolygon/pipelines
+          ref: DEVOPS-2759-repo-public-update
+          path: ./pipelines
+          sparse-checkout: |
+            Support/      
+          
+      - name: Checkout Code Repository
         uses: actions/checkout@v3
+        with:
+          fetch-depth: 0
+          path: ./code
+
+      - name: Set variables
+        run: |
+          if [ "${{ inputs.taskdef_file_script }}" == "local" ]; then
+            echo "taskdef_file_script=pipelines/Support/taskdef_template/taskdef_creator.py" >> $GITHUB_ENV
+            echo "taskdef_file_template=pipelines/Support/taskdef_template/taskdef_template.json" >> $GITHUB_ENV
+          else
+            echo "taskdef_file_script=${{inputs.taskdef_file_script}}" >> $GITHUB_ENV
+            echo "taskdef_file_template=${{inputs.taskdef_file_template}}" >> $GITHUB_ENV
+          fi
 
       - name: Create taskdef file dynamically using parameters passed
         run: |
-          ls -lrt
-          export PIPENV_PIPFILE=.github/taskdefinition_template/Pipfile
-          python -m pip install --upgrade pip && \
-          pip install pipenv && \
-          pipenv install && \
-          pipenv run python ${{ inputs.taskdef_file_script }} \
-            ${{ inputs.taskdef_file_vars }} ${{ inputs.taskdef_file_template }}
+          script_dir="$(dirname ${{ env.taskdef_file_script }})"
+          if [[ -z "$script_dir" ]]; then
+            echo "Warning: Script name doesn't contain a directory path. Using current directory."
+            script_dir="."
+          fi
+          export PIPENV_PIPFILE=$script_dir/Pipfile
+          python -m pip install --upgrade pip
+          pip install pipenv
+          pipenv install
+          pipenv run python ${{ env.taskdef_file_script }} \
+            -pf code/${{ inputs.taskdef_file_vars }} -tt ${{ env.taskdef_file_template }} \
+            -acc ${{ inputs.account_number }} -app ${{ inputs.app_name }}
 
       - name: Configure AWS credentials
-        uses: aws-actions/configure-aws-credentials@v1
+        uses: aws-actions/configure-aws-credentials@v4
         with:
           aws-region: ${{ inputs.aws_region }}
-          role-to-assume: arn:aws:iam::${{ inputs.account_number }}:role/${{ inputs.app_name }}-GithubActionsRole
+          role-to-assume: |
+            arn:aws:iam::${{ inputs.account_number }}:role/${{ inputs.app_name }}-GithubActionsRole
           role-session-name: GithubActionsSession
 
       - name: Login to Amazon ECR
@@ -73,6 +108,7 @@ jobs:
           IMAGE_TAG: ${{ github.sha }}
           ECR_REPOSITORY: ${{ inputs.app_name }}-ecr
         run: |
+          cd code
           current_dir=$(realpath .)
           target_dir=$(dirname "$(realpath "${{ inputs.docker_file }}")")
           if [[ "$current_dir" != "$target_dir" ]]; then
@@ -83,11 +119,8 @@ jobs:
           fi
           docker build -t $ECR_REGISTRY/$ECR_REPOSITORY:$IMAGE_TAG -f $docker_file_basename .
           docker push $ECR_REGISTRY/$ECR_REPOSITORY:$IMAGE_TAG
-          echo "image=$ECR_REGISTRY/$ECR_REPOSITORY:$IMAGE_TAG" >> $GITHUB_OUTPUT
-
-      - name: Extract directory path
-        run: |
-          echo "TASKDEF_FILE=$(dirname "${{ inputs.taskdef_file_template }}")/${{ inputs.app_name }}.json" >> $GITHUB_ENV
+          echo "image=$ECR_REGISTRY/$ECR_REPOSITORY:$IMAGE_TAG" >> $GITHUB_ENV
+          echo "TASKDEF_FILE=$(dirname "${{ env.taskdef_file_template }}")/${{ inputs.app_name }}.json" >> $GITHUB_ENV
 
       - name: Fill in the new image ID in the Amazon ECS task definition
         id: task-def
@@ -95,7 +128,7 @@ jobs:
         with:
           task-definition: "${{ env.TASKDEF_FILE }}"
           container-name: ${{ inputs.app_name }}
-          image: ${{ steps.build-image.outputs.image }}
+          image: ${{ env.image }}
 
       - name: Deploy Amazon ECS task definition
         uses: aws-actions/amazon-ecs-deploy-task-definition@v1
