@@ -116,8 +116,6 @@ class TaskdefCreator:
                     line.split('"valueFrom": "arn:aws:ssm:', 1)[1].strip().rstrip('",')
                 )
 
-                print(f"Update SSM for secret: {secret}")
-
     def create_taskdef_file(self, account_number: str):
         """Create a taskdef file based on the app name"""
         directory = os.path.dirname(self.args.taskdef_template)
