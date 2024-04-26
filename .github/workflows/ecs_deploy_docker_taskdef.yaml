@@ -70,8 +70,8 @@ jobs:
             echo "taskdef_file_script=pipelines/Support/taskdef_template/taskdef_creator.py" >> $GITHUB_ENV
             echo "taskdef_file_template=pipelines/Support/taskdef_template/taskdef_template.json" >> $GITHUB_ENV
           else
-            echo "taskdef_file_script=${{inputs.taskdef_file_script}}" >> $GITHUB_ENV
-            echo "taskdef_file_template=${{inputs.taskdef_file_template}}" >> $GITHUB_ENV
+            echo "taskdef_file_script=code/${{inputs.taskdef_file_script}}" >> $GITHUB_ENV
+            echo "taskdef_file_template=code/${{inputs.taskdef_file_template}}" >> $GITHUB_ENV
           fi
 
       - name: Create taskdef file dynamically using parameters passed
