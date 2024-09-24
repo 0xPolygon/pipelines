@@ -10,19 +10,8 @@
             "logConfiguration": {
                 "logDriver": "awsfirelens",
                 "options": {
-                    "Name": "datadog",
-                    "Host": "http-intake.logs.datadoghq.com",
-                    "dd_service": "$app_name",
-                    "dd_source": "nodejs",
-                    "TLS": "on",
-                    "provider": "ecs"
-                },
-                "secretOptions": [
-                    {
-                        "name": "apiKey",
-                        "valueFrom": "arn:aws:ssm:$region:$account_number:parameter/DATADOG_APIKEY"
-                    }
-                ]
+                    "Name": "OpenTelemetry"
+                }
             },
             "entryPoint": null,
             "portMappings": [
@@ -76,25 +65,60 @@
             }
         },
         {
-            "essential": true,
-            "image": "amazon/aws-for-fluent-bit:stable",
-            "name": "log_router",
+            "essential": false,
+            "name": "otel-collector",
+            "image": "otel/opentelemetry-collector-contrib",
             "firelensConfiguration": {
                 "type": "fluentbit",
-                "options": {
-                    "enable-ecs-log-metadata": "true"
-                }
+                "options": {}
             },
-            "environment": null,
-            "secrets": null,
+            "portMappings": [
+                {
+                    "name": "otel-collector-4317-tcp",
+                    "containerPort": 4317,
+                    "hostPort": 4317,
+                    "protocol": "tcp",
+                    "appProtocol": "grpc"
+                },
+                {
+                    "name": "otel-collector-4318-tcp",
+                    "containerPort": 4318,
+                    "hostPort": 4318,
+                    "protocol": "tcp",
+                    "appProtocol": "grpc"
+                }
+            ],
+            "command": [
+                "--config",
+                "env:SSM_CONFIG"
+            ],
+            "environment": [
+                {
+                    "name": "CORALOGIX_DOMAIN",
+                    "value": "eu2.coralogix.com"
+                },
+                {
+                    "name": "APP_NAME",
+                    "value": "$app_name"
+                }
+            ],
+            "secrets": [
+                {
+                    "name": "SSM_CONFIG",
+                    "valueFrom": "arn:aws:ssm:$region:$account_number:parameter/CORALOGIX/CX_OTEL/config.yaml"
+                },
+                {
+                    "name": "PRIVATE_KEY",
+                    "valueFrom": "arn:aws:ssm:$region:$account_number:parameter/CORALOGIX/PRIVATE_KEY"
+                }
+            ],
+            "user": "0",
             "memoryReservation": 50,
             "resourceRequirements": null,
-            "portMappings": [],
             "environmentFiles": [],
             "mountPoints": null,
             "volumesFrom": null,
             "hostname": null,
-            "user": null,
             "workingDirectory": null,
             "extraHosts": null,
             "logConfiguration": null,
