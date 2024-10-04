@@ -96,10 +96,6 @@
                 {
                     "name": "CORALOGIX_DOMAIN",
                     "value": "eu2.coralogix.com"
-                },
-                {
-                    "name": "APP_NAME",
-                    "value": "$app_name"
                 }
             ],
             "secrets": [
