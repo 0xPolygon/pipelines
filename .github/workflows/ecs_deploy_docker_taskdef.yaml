@@ -36,7 +36,11 @@ on:
         required: false
         default: "staging"
         type: string
-      
+    secrets:
+      build_params_gh_secret_keys:
+        required: false
+        description: "Pass github secrets in json format for supporting docker build"
+
 
 jobs:
   deploy_workflow:
@@ -63,6 +67,19 @@ jobs:
         with:
           fetch-depth: 0
           path: ./code
+
+      - name: Set up secrets
+        run: |
+          if [ -n "${{ secrets.build_params_gh_secret_keys }}" ]; then
+            echo "${{ secrets.build_params_gh_secret_keys }}" > secrets.json
+          fi
+
+      - name: Parse secrets and set environment variables
+        run: |
+          if [ -f secrets.json ]; then
+            echo "Setting environment variables from JSON..."
+            jq -r 'to_entries | .[] | "\(.key)=\(.value)"' secrets.json >> $GITHUB_ENV
+          fi
 
       - name: Set variables
         run: |

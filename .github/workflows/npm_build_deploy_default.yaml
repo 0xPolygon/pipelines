@@ -23,7 +23,11 @@ on:
       environment:
         required: false
         default: "staging"
-        type: string      
+        type: string
+    secrets:
+      build_params_gh_secret_keys:
+        required: false
+        description: "Pass github secrets in json format for supporting docker build"
 
 jobs:
   deploy_workflow:
@@ -52,6 +56,19 @@ jobs:
         uses: actions/setup-node@v2
         with:
           node-version: 20.9.0
+        
+      - name: Set up secrets
+        run: |
+          if [ -n "${{ secrets.build_params_gh_secret_keys }}" ]; then
+            echo "${{ secrets.build_params_gh_secret_keys }}" > secrets.json
+          fi
+
+      - name: Parse secrets and set environment variables
+        run: |
+          if [ -f secrets.json ]; then
+            echo "Setting environment variables from JSON..."
+            jq -r 'to_entries | .[] | "\(.key)=\(.value)"' secrets.json >> $GITHUB_ENV
+          fi
 
       - name: INSTALL
         run: npm install
