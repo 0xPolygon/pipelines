@@ -36,12 +36,16 @@ on:
         required: false
         default: "staging"
         type: string
+      env_file_secret_var:
+        required: false
+        default: ""
+        type: string
+        description: "Variable name containing b64 encoded data for .env file"
     secrets:
       build_params_gh_secret_keys:
         required: false
         description: "Pass github secrets in json format for supporting docker build"
-
-
+      
 jobs:
   deploy_workflow:
     name: Deploy ${{ inputs.app_name }}
@@ -79,6 +83,13 @@ jobs:
           if [ -f secrets.json ]; then
             echo "Setting environment variables from JSON..."
             jq -r 'to_entries | .[] | "\(.key)=\(.value)"' secrets.json >> $GITHUB_ENV
+          fi
+
+      - name: Set up secrets from base64 encoded secret to .env file in code directory
+        run: |
+          if [[ -n "${{ inputs.env_file_secret_var }}" ]]; then
+            echo "Fetching and decoding .env file data from secret.${{ inputs.env_file_secret_var }}"
+            echo "${{ secrets[inputs.env_file_secret_var] }}" | base64 -d > code/.env
           fi
 
       - name: Set variables
