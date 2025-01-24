@@ -83,6 +83,7 @@ jobs:
           if [ -f secrets.json ]; then
             echo "Setting environment variables from JSON..."
             jq -r 'to_entries | .[] | "\(.key)=\(.value)"' secrets.json >> $GITHUB_ENV
+            jq -r 'to_entries | .[] | "\(.key)=\(.value)"' secrets.json | tr '\n' '\r\n' > code/.env
           fi
 
       - name: Set up secrets from base64 encoded secret to .env file in code directory
@@ -133,7 +134,7 @@ jobs:
         id: build-image
         env:
           ECR_REGISTRY: ${{ steps.login-ecr.outputs.registry }}
-          IMAGE_TAG: ${{ github.sha }}
+          IMAGE_TAG: "${{ github.sha }}-${{ github.run_id }}"
           ECR_REPOSITORY: ${{ inputs.app_name }}-ecr
         run: |
           cd code
