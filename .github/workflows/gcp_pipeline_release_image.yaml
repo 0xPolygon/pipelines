@@ -1,0 +1,91 @@
+on:
+  workflow_call:
+    inputs:
+      image_name:
+        required: true
+        type: string
+      environment:
+        required: true
+        type: string
+      dockerfile_path:
+        required: false
+        default: "Dockerfile"
+        type: string
+        description: "Path to the Dockerfile"
+      dockerfile_context:
+        required: false
+        default: "."
+        type: string
+        description: "Context for dockerfile"
+    secrets:
+      build_params_gh_secret_keys:
+        required: false
+        description: "Pass github secrets in json format for supporting docker build"
+
+env:
+  REGISTRY: europe-west2-docker.pkg.dev/prj-polygonlabs-shared-prod/polygonlabs-docker-prod
+  IMAGE_NAME: ${{ inputs.image_name }}
+  OIDC_PROVIDER: projects/23849419004/locations/global/workloadIdentityPools/polygonlabs-shared-prod/providers/oidc-shared-prod
+  OIDC_SERVICE_ACCOUNT: shared-prod-oidc-sa@prj-polygonlabs-shared-prod.iam.gserviceaccount.com
+
+jobs:
+  docker-release-common:
+    name: Build and push docker image to GitHub Container Registry
+    runs-on: ubuntu-latest
+    environment: ${{ inputs.environment }}
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up secrets
+        run: |
+          if [ -n "${{ secrets.build_params_gh_secret_keys }}" ]; then
+            echo "${{ secrets.build_params_gh_secret_keys }}" > secrets.json
+          fi
+
+      - name: Parse secrets and set environment variables
+        run: |
+          if [ -f secrets.json ]; then
+            echo "Setting environment variables from JSON..."
+            jq -r 'to_entries | .[] | "\(.key)=\(.value)"' secrets.json >> $GITHUB_ENV
+            jq -r 'to_entries | .[] | "\(.key)=\(.value)"' secrets.json | tr '\n' '\r\n' > .env
+            echo ".env contents:" && cat .env
+          fi
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Authenticate with GCP via OIDC
+        uses: google-github-actions/auth@v2
+        with:
+          token_format: access_token
+          workload_identity_provider: ${{ env.OIDC_PROVIDER }}
+          service_account: ${{ env.OIDC_SERVICE_ACCOUNT }}
+
+      - name: Configure Artifact Registry authentication
+        run: |
+          echo '{"credHelpers": {"europe-west2-docker.pkg.dev": "gcloud"}}' > ~/.docker/config.json
+
+      - name: Extract metadata (tags, labels) for Docker
+        id: meta
+        uses: docker/metadata-action@v5
+        with:
+          images: ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}
+          tags: |
+            type=ref,event=branch
+            type=ref,event=pr
+            type=semver,pattern={{version}}
+            type=semver,pattern={{major}}.{{minor}}
+          flavor: |
+            latest=false
+
+      - name: Push to GCP Artifact Registry
+        uses: docker/build-push-action@v6
+        with:
+          file: ${{ inputs.dockerfile_path }}
+          context: ${{ inputs.dockerfile_context }}
+          push: true
+          tags: ${{ steps.meta.outputs.tags }}
+          labels: ${{ steps.meta.outputs.labels }}
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
