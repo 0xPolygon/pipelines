@@ -52,6 +52,9 @@ jobs:
             echo ".env contents:" && cat .env
           fi
 
+      - name: Set up QEMU
+        uses: docker/setup-qemu-action@v3
+  
       - name: Set up Docker Buildx
         uses: docker/setup-buildx-action@v3
 
@@ -89,3 +92,4 @@ jobs:
           labels: ${{ steps.meta.outputs.labels }}
           cache-from: type=gha
           cache-to: type=gha,mode=max
+          platforms: linux/amd64,linux/arm64
