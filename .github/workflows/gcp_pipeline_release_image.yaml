@@ -66,12 +66,12 @@ jobs:
           echo 'tag_config<<EOF' >> $GITHUB_OUTPUT
 
           if [ -n "${{ inputs.image_tag }}" ]; then
-            echo "type=raw,value=${{ inputs.image_tag }}" >> $GITHUB_ENV
+            echo "type=raw,value=${{ inputs.image_tag }}" >> $GITHUB_OUTPUT
           else
-            echo "type=ref,event=branch" >> $GITHUB_ENV
-            echo "type=ref,event=pr" >> $GITHUB_ENV
-            echo "type=semver,pattern={{version}}" >> $GITHUB_ENV
-            echo "type=semver,pattern={{major}}.{{minor}}" >> $GITHUB_ENV
+            echo "type=ref,event=branch" >> $GITHUB_OUTPUT
+            echo "type=ref,event=pr" >> $GITHUB_OUTPUT
+            echo "type=semver,pattern={{version}}" >> $GITHUB_OUTPUT
+            echo "type=semver,pattern={{major}}.{{minor}}" >> $GITHUB_OUTPUT
           fi 
 
           echo 'EOF' >> $GITHUB_OUTPUT
