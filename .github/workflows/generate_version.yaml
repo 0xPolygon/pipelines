@@ -1,0 +1,20 @@
+on:
+  workflow_call:
+    outputs:
+      version:
+        value: ${{ jobs.generate-version.outputs.version }}
+
+jobs:
+  generate-version:
+    runs-on: ubuntu-latest
+    outputs:
+      version: ${{ steps.version.outputs.version }}
+    steps:
+      - uses: actions/checkout@v4
+      - id: version
+        run: |
+          SHORT_HASH=$(git rev-parse --short HEAD)
+          RUN_SLUG="${{ github.run_id }}-${{ github.run_number }}"
+          ISO=$(date -Iseconds)
+
+          echo "version=$ISO-$SHORT_HASH-$RUN_SLUG" >> $GITHUB_OUTPUT

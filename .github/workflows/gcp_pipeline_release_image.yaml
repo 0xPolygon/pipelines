@@ -4,7 +4,11 @@ on:
       image_name:
         required: true
         type: string
-        description: "Name of the image to build and push"
+      
+      image_tag:
+        required: false
+        type: string
+
       environment:
         required: false
         type: string
@@ -14,11 +18,13 @@ on:
         default: "Dockerfile"
         type: string
         description: "Path to the Dockerfile"
+
       dockerfile_context:
         required: false
         default: "."
         type: string
         description: "Context for dockerfile"
+
     secrets:
       build_params_gh_secret_keys:
         required: false
@@ -54,6 +60,21 @@ jobs:
             echo ".env contents:" && cat .env
           fi
 
+      - name: Construct metadata tags input
+        id: metadata-tags
+        run: |
+          echo 'tag_config<<EOF' >> $GITHUB_OUTPUT
+
+          if [ -n "${{ inputs.image_tag }}" ]; then
+            echo "type=raw,value=${{ inputs.image_tag }}" >> $GITHUB_OUTPUT
+          else
+            echo "type=ref,event=branch" >> $GITHUB_OUTPUT
+            echo "type=ref,event=pr" >> $GITHUB_OUTPUT
+            echo "type=semver,pattern={{version}}" >> $GITHUB_OUTPUT
+            echo "type=semver,pattern={{major}}.{{minor}}" >> $GITHUB_OUTPUT
+          fi 
+
+          echo 'EOF' >> $GITHUB_OUTPUT
       - name: Set up QEMU
         uses: docker/setup-qemu-action@v3
   
@@ -76,11 +97,7 @@ jobs:
         uses: docker/metadata-action@v5
         with:
           images: ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}
-          tags: |
-            type=ref,event=branch
-            type=ref,event=pr
-            type=semver,pattern={{version}}
-            type=semver,pattern={{major}}.{{minor}}
+          tags: ${{ steps.metadata-tags.outputs.tag_config }}
           flavor: |
             latest=false
 
