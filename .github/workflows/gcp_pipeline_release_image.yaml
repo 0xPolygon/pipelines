@@ -25,6 +25,10 @@ on:
         default: "."
         type: string
         description: "Context for dockerfile"
+      
+      checkout_ref:
+        required: false
+        type: string
 
     secrets:
       build_params_gh_secret_keys:
@@ -44,6 +48,13 @@ jobs:
     environment: ${{ inputs.environment }}
     steps:
       - name: Checkout
+        if: inputs.checkout_ref != ''
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ inputs.checkout_ref }}
+
+      - name: Checkout
+        if: inputs.checkout_ref == ''
         uses: actions/checkout@v4
 
       - name: Set up secrets
