@@ -36,10 +36,8 @@ on:
         description: "Pass github secrets in json format for supporting docker build"
 
 env:
-  REGISTRY: ${{ secrets.GCP_REGISTRY }}
+  REGISTRY: europe-west2-docker.pkg.dev/prj-polygonlabs-shared-prod/polygonlabs-docker-prod
   IMAGE_NAME: ${{ inputs.image_name }}
-  OIDC_PROVIDER: ${{ secrets.OIDC_PROVIDER }}
-  OIDC_SERVICE_ACCOUNT: ${{ secrets.OIDC_SERVICE_ACCOUNT }}
 
 jobs:
   docker-release-common:
@@ -97,8 +95,8 @@ jobs:
         uses: google-github-actions/auth@v2
         with:
           token_format: access_token
-          workload_identity_provider: ${{ env.OIDC_PROVIDER }}
-          service_account: ${{ env.OIDC_SERVICE_ACCOUNT }}
+          workload_identity_provider: ${{ secrets.OIDC_PROVIDER }}
+          service_account: ${{ secrets.OIDC_SERVICE_ACCOUNT }}
 
       - name: Configure Artifact Registry authentication
         run: |
