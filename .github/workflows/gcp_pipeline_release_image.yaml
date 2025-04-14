@@ -36,10 +36,10 @@ on:
         description: "Pass github secrets in json format for supporting docker build"
 
 env:
-  REGISTRY: europe-west2-docker.pkg.dev/prj-polygonlabs-shared-prod/polygonlabs-docker-prod
+  REGISTRY: ${{ secrets.GCP_REGISTRY }}
   IMAGE_NAME: ${{ inputs.image_name }}
-  OIDC_PROVIDER: projects/23849419004/locations/global/workloadIdentityPools/polygonlabs-shared-prod/providers/oidc-shared-prod
-  OIDC_SERVICE_ACCOUNT: shared-prod-oidc-sa@prj-polygonlabs-shared-prod.iam.gserviceaccount.com
+  OIDC_PROVIDER: ${{ secrets.OIDC_PROVIDER }}
+  OIDC_SERVICE_ACCOUNT: ${{ secrets.OIDC_SERVICE_ACCOUNT }}
 
 jobs:
   docker-release-common:
