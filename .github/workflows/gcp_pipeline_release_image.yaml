@@ -91,6 +91,11 @@ jobs:
       - name: Set up Docker Buildx
         uses: docker/setup-buildx-action@v3
 
+      - name: Debug secrets
+        run: |
+          echo "OIDC_PROVIDER=${{ secrets.OIDC_PROVIDER }}"
+          echo "OIDC_SERVICE_ACCOUNT=${{ secrets.OIDC_SERVICE_ACCOUNT }}"
+
       - name: Authenticate with GCP via OIDC
         uses: google-github-actions/auth@v2
         with:
