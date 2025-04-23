@@ -14,7 +14,7 @@
                     "Host": "http-intake.logs.datadoghq.eu",
                     "dd_service": "$app_name",
                     "dd_source": "nodejs",
-                    "dd_tags": "index:$account_number",
+                    "dd_tags": "account_number:$account_number",
                     "TLS": "on",
                     "provider": "ecs"
                 },
