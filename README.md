@@ -1,8 +1,7 @@
 # pipelines
 
-Shared CI/CD workflows and composite actions for the Polygon GitHub orgs
-(`0xPolygon`, `AggLayer`, `maticnetwork`). The contents fall into two
-families:
+Shared CI/CD workflows and composite actions for Polygon repositories.
+The contents fall into two families:
 
 - **Apps Team reusable workflows + composite actions** — prefixed
   `apps-*.yml` in `.github/workflows/` and living under `.github/actions/`.
@@ -129,7 +128,7 @@ should use the GCP pipeline instead.
 
 | Workflow | Purpose |
 |----------|---------|
-| `ecs_deploy_docker_taskdef.yaml` | Build Docker image and deploy to ECS via templated taskdef. Used by `maticnetwork/open-api` apps. |
+| `ecs_deploy_docker_taskdef.yaml` | Build Docker image and deploy to ECS via templated taskdef. |
 | `npm_build_deploy_default.yaml` | npm install + build + Docker image + ECS deploy using the repo's root `Dockerfile`. |
 
 Supporting scripts for the ECS pipeline live under `Support/`

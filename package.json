@@ -1,7 +1,7 @@
 {
-  "name": "apps-team-workflows",
+  "name": "polygon-pipelines",
   "version": "1.0.0",
-  "description": "Shared GitHub Actions reusable workflows and actions for the Polygon Apps Team",
+  "description": "Shared CI/CD workflows and composite actions for Polygon GitHub orgs",
   "type": "module",
   "private": true,
   "packageManager": "pnpm@10.30.3",
@@ -10,7 +10,7 @@
   },
   "repository": {
     "type": "git",
-    "url": "https://github.com/0xPolygon/apps-team-workflows.git"
+    "url": "https://github.com/0xPolygon/pipelines.git"
   },
   "scripts": {
     "prepare": "husky",
