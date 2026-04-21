@@ -29,7 +29,9 @@ jobs:
       - name: Check for changeset
         id: check
         # github.base_ref is the branch this PR targets — works for any default branch name (main, master, etc.)
-        run: pnpm exec changeset status --since=origin/${{ github.base_ref }}
+        env:
+          BASE_REF: ${{ github.base_ref }}
+        run: pnpm exec changeset status --since=origin/$BASE_REF
         continue-on-error: true
 
       - name: Manage changeset comment
