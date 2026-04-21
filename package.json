@@ -1,0 +1,48 @@
+{
+  "name": "apps-team-workflows",
+  "version": "1.0.0",
+  "description": "Shared GitHub Actions reusable workflows and actions for the Polygon Apps Team",
+  "type": "module",
+  "private": true,
+  "packageManager": "pnpm@10.30.3",
+  "engines": {
+    "node": ">=24"
+  },
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/0xPolygon/apps-team-workflows.git"
+  },
+  "scripts": {
+    "prepare": "husky",
+    "lint": "concurrently --group --prefix-colors auto 'pnpm:lint:md' 'pnpm:lint:ts' 'prettier --check .'",
+    "lint:md": "markdownlint-cli2 \"**/*.md\"",
+    "lint:ts": "eslint .",
+    "format": "pnpm run format:md && pnpm run format:ts && prettier --write .",
+    "format:md": "markdownlint-cli2 --fix \"**/*.md\"",
+    "format:ts": "eslint . --fix",
+    "typecheck": "tsc --noEmit",
+    "build:slack-notify": "ncc build packages/slack-notify/src/index.ts -o .github/actions/slack-notify/dist",
+    "build:upsert-changeset-comment": "ncc build packages/upsert-changeset-comment/src/index.ts -o .github/actions/upsert-changeset-comment/dist",
+    "ci:publish": "pnpm exec changeset publish",
+    "test:npm-release": "bash scripts/test-tag-step.sh"
+  },
+  "devDependencies": {
+    "@changesets/cli": "^2.30.0",
+    "@commitlint/cli": "^19.0.0",
+    "@commitlint/config-conventional": "^19.0.0",
+    "@octokit/rest": "^21.0.0",
+    "@polygonlabs/apps-team-lint": "^2.0.0",
+    "@tsconfig/node-ts": "^23.0.0",
+    "@tsconfig/node24": "^24.0.0",
+    "@types/node": "^24.0.0",
+    "@vercel/ncc": "^0.38.0",
+    "concurrently": "^9.2.1",
+    "eslint": "^10.0.0",
+    "eslint-import-resolver-typescript": "^4.4.4",
+    "husky": "^9.0.0",
+    "lint-staged": "^16.2.7",
+    "markdownlint-cli2": "^0.21.0",
+    "prettier": "^3.0.0",
+    "typescript": "^5.0.0"
+  }
+}

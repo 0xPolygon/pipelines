@@ -1,0 +1,5 @@
+{
+  "extends": ["@tsconfig/node24", "@tsconfig/node-ts"],
+  "compilerOptions": { "noEmit": true },
+  "include": ["packages/**/*.ts", ".github/scripts/**/*.ts"]
+}

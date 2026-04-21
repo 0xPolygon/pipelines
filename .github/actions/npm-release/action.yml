@@ -1,0 +1,24 @@
+name: npm release
+description: >
+  Publishes packages to npm, commits an updated lockfile, pushes version tags,
+  creates GitHub Releases, and updates the release PR description.
+  Called from npm-release.yml after changesets/action detects a merged release PR.
+
+inputs:
+  gh_token:
+    description: App token with contents:write and pull-requests:write
+    required: true
+  changeset_pr_number:
+    description: Pull request number of the release PR to annotate (optional)
+    required: false
+    default: ''
+
+runs:
+  using: composite
+  steps:
+    - name: Publish, tag and release
+      shell: bash
+      env:
+        GH_TOKEN: ${{ inputs.gh_token }}
+        CHANGESET_PR_NUMBER: ${{ inputs.changeset_pr_number }}
+      run: bash "$GITHUB_ACTION_PATH/run.sh"

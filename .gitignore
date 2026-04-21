@@ -1,3 +1,8 @@
 .vscode/*
 *.pyc
 .idea
+node_modules/
+dist/
+!.github/actions/*/dist/
+.env*
+*.tsbuildinfo

@@ -1,0 +1,28 @@
+name: Post Slack merge notification
+description: Posts a Slack Block Kit message when a PR is merged
+
+inputs:
+  slack-webhook-url:
+    description: Slack incoming webhook URL
+    required: true
+  is-test:
+    description: Whether this is a test invocation
+    required: false
+    default: 'false'
+  developer-note:
+    description: Optional message to show developers (e.g. restart instructions)
+    required: false
+    default: ''
+
+runs:
+  using: composite
+  steps:
+    - name: Post to Slack
+      shell: bash
+      env:
+        SLACK_URL: ${{ inputs.slack-webhook-url }}
+        IS_TEST: ${{ inputs.is-test }}
+        DEVELOPER_NOTE: ${{ inputs.developer-note }}
+        GITHUB_WORKSPACE: ${{ github.workspace }}
+        ACTION_PATH: ${{ github.action_path }}
+      run: node "$ACTION_PATH/dist/index.js"

@@ -1,0 +1,12 @@
+{
+  "name": "slack-notify",
+  "version": "1.0.0",
+  "private": true,
+  "type": "module",
+  "dependencies": {
+    "@slack/webhook": "^7.0.3"
+  },
+  "devDependencies": {
+    "@octokit/types": "^16.0.0"
+  }
+}

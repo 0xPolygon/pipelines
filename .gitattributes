@@ -1,0 +1,3 @@
+# Hide generated action dists from PR diffs — content is always rebuilt from packages/*/src/index.ts
+.github/actions/slack-notify/dist/** -diff linguist-generated=true
+.github/actions/upsert-changeset-comment/dist/** -diff linguist-generated=true

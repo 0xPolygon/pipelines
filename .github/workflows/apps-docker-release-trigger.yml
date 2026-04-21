@@ -1,0 +1,45 @@
+name: Docker release
+
+on:
+  push:
+    tags:
+      - '*@[0-9]*'
+      - '*/*@[0-9]*'
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: 'Full changeset tag to build (e.g. example-rest-api@1.2.3)'
+        required: true
+        type: string
+
+permissions:
+  contents: read
+  id-token: write
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    outputs:
+      image_name: ${{ steps.docker-test.outputs.image_name }}
+      image_tag: ${{ steps.docker-test.outputs.image_tag }}
+      dockerfile_path: ${{ steps.docker-test.outputs.dockerfile_path }}
+      checkout_ref: ${{ steps.docker-test.outputs.checkout_ref }}
+      should_build: ${{ steps.docker-test.outputs.should_build }}
+    steps:
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
+      - id: docker-test
+        uses: ./.github/actions/docker-test
+        with:
+          tag: ${{ inputs.tag || '' }}
+
+  release:
+    needs: test
+    if: needs.test.outputs.should_build == 'true'
+    uses: ./.github/workflows/apps-docker-release.yml
+    with:
+      image_name: ${{ needs.test.outputs.image_name }}
+      image_tag: ${{ needs.test.outputs.image_tag }}
+      dockerfile_path: ${{ needs.test.outputs.dockerfile_path }}
+      checkout_ref: ${{ needs.test.outputs.checkout_ref }}
+    secrets:
+      build_params_gh_secret_keys: ${{ secrets.build_params_gh_secret_keys }}

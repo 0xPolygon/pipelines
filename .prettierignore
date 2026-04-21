@@ -1,0 +1,13 @@
+# Prettier should not format md files, as we use `markdownlint` for that purpose
+*.md
+dist/
+pnpm-lock.yaml
+
+# Pre-existing pipelines content not owned by the Apps Team — leave as-is
+.github/workflows/codeql.yml
+.github/workflows/ecs_deploy_docker_taskdef.yaml
+.github/workflows/gcp_pipeline_release_image.yaml
+.github/workflows/generate_version.yaml
+.github/workflows/npm_build_deploy_default.yaml
+.github/workflows/security-build.yml
+Support/
