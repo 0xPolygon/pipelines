@@ -1,0 +1,32 @@
+name: PR labeler
+
+on:
+  workflow_call:
+
+permissions:
+  contents: read
+  pull-requests: write
+
+jobs:
+  label:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Label .github-only PRs as do-not-notify
+        env:
+          GH_TOKEN: ${{ github.token }}
+          PR_NUMBER: ${{ github.event.pull_request.number }}
+          REPO: ${{ github.repository }}
+        run: |
+          FILES=$(gh api "repos/${REPO}/pulls/${PR_NUMBER}/files" \
+            --paginate --jq '.[].filename')
+
+          # Check whether any changed file lives outside .github/
+          OUTSIDE=$(echo "$FILES" | grep -v '^\.github/' || true)
+
+          if [ -z "$OUTSIDE" ] && [ -n "$FILES" ]; then
+            echo "All changes are under .github/ — applying do-not-notify"
+            gh pr edit "$PR_NUMBER" --repo "$REPO" --add-label "do-not-notify"
+          else
+            echo "PR contains changes outside .github/ — removing do-not-notify if present"
+            gh pr edit "$PR_NUMBER" --repo "$REPO" --remove-label "do-not-notify" 2>/dev/null || true
+          fi

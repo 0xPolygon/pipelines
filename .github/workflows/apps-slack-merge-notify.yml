@@ -1,0 +1,39 @@
+name: Notify Slack on merge to main
+
+on:
+  workflow_call:
+    inputs:
+      pr-number:
+        type: number
+        required: true
+      is-test:
+        type: boolean
+        required: true
+      developer-note:
+        type: string
+        required: false
+        default: ''
+    secrets:
+      SLACK_WEBHOOK_URL:
+        required: true
+
+permissions:
+  contents: read
+  pull-requests: read
+
+jobs:
+  notify:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Fetch PR data
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          REPOSITORY: ${{ github.repository }}
+          PR_NUMBER: ${{ inputs.pr-number }}
+        run: gh api "/repos/$REPOSITORY/pulls/$PR_NUMBER" > pr.json
+
+      - uses: 0xPolygon/pipelines/.github/actions/slack-notify@main
+        with:
+          slack-webhook-url: ${{ secrets.SLACK_WEBHOOK_URL }}
+          is-test: ${{ inputs.is-test }}
+          developer-note: ${{ inputs.developer-note }}

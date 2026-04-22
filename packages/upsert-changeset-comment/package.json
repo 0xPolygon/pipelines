@@ -1,0 +1,9 @@
+{
+  "name": "upsert-changeset-comment",
+  "version": "1.0.0",
+  "private": true,
+  "type": "module",
+  "dependencies": {
+    "@octokit/rest": "^21.0.0"
+  }
+}
