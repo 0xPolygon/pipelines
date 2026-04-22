@@ -1,0 +1,79 @@
+name: npm release (v2)
+
+# Shadow of `apps-npm-release.yml` used to validate the pinned+patched
+# `npm-release-v2` action in a single consuming repo before flipping the
+# default. A follow-up PR collapses this into `apps-npm-release.yml` and
+# deletes this file; do not adopt in new consumers without coordinating
+# with the team lead.
+
+on:
+  workflow_call:
+    secrets:
+      CHANGESET_RELEASE_BOT_APP_ID:
+        required: true
+      CHANGESET_RELEASE_BOT_APP_PRIVATE_KEY:
+        required: true
+
+permissions:
+  contents: write
+  pull-requests: write
+  id-token: write # required for npm OIDC trusted publishing
+
+jobs:
+  release:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/create-github-app-token@d72941d797fd3113feb6b93fd0dec494b13a2547 # v1
+        id: app-token
+        with:
+          app-id: ${{ secrets.CHANGESET_RELEASE_BOT_APP_ID }}
+          private-key: ${{ secrets.CHANGESET_RELEASE_BOT_APP_PRIVATE_KEY }}
+
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
+        with:
+          fetch-depth: 1
+          token: ${{ steps.app-token.outputs.token }}
+
+      - uses: pnpm/action-setup@41ff72655975bd51cab0327fa583b6e92b6d3061 # v4
+
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
+        with:
+          node-version-file: .nvmrc
+          cache: pnpm
+          registry-url: 'https://registry.npmjs.org'
+          # No node-auth-token — npm auth handled by OIDC
+
+      # The release PR replaces workspace:* with real semver ranges for all
+      # intra-monorepo deps (e.g. ^2.0.0). Those versions don't exist on npm
+      # yet — they're what we're about to publish. --config.link-workspace-packages=true
+      # overrides .npmrc so pnpm resolves those ranges against local workspace
+      # versions instead of the registry, making the install succeed regardless
+      # of which packages are being co-released.
+      - run: pnpm install --no-frozen-lockfile --config.link-workspace-packages=true
+
+      - uses: changesets/action@6a0a831ff30acef54f2c6aa1cbbc1096b066edaf # v1.7.0
+        id: changesets
+        with:
+          # No publish: here — publish is handled in the explicit steps below so
+          # that version tags are only pushed after the lockfile commit. If
+          # publish: were used, changesets/action would push tags during its own
+          # run, before the lockfile is updated, creating a race window where
+          # Docker build triggers could fire against a stale lockfile commit.
+          title: 'changesets: Release / Deploy'
+          commit: 'release: version packages'
+          # github-api mode signs commits with GitHub's GPG key, satisfying the
+          # repository's signed-commits requirement. git-cli (the default) produces
+          # unsigned commits.
+          commitMode: github-api
+        env:
+          GITHUB_TOKEN: ${{ steps.app-token.outputs.token }}
+          # No NPM_TOKEN — using OIDC trusted publishing
+          # changesets/action v1.7.0 only writes auth token to .npmrc when NPM_TOKEN is set;
+          # leaving it unset allows npm to use OIDC automatically
+
+      - name: Publish, tag and release
+        if: steps.changesets.outputs.hasChangesets == 'false'
+        uses: 0xPolygon/pipelines/.github/actions/npm-release-v2@main
+        with:
+          gh_token: ${{ steps.app-token.outputs.token }}
+          changeset_pr_number: ${{ steps.changesets.outputs.pullRequestNumber }}

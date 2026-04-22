@@ -1,0 +1,26 @@
+diff --git a/dist/changesets-cli.cjs.js b/dist/changesets-cli.cjs.js
+index 9f0bd6c5f96011be225269a71365a878cb822bb7..087fe75af678b70e3f198d458bf5770625c8aa68 100644
+--- a/dist/changesets-cli.cjs.js
++++ b/dist/changesets-cli.cjs.js
+@@ -1203,7 +1203,7 @@ async function publish(cwd, {
+   if (untaggedPrivatePackageReleases.length > 0) {
+     logger.success("found untagged projects:");
+     logReleases(untaggedPrivatePackageReleases);
+-    await tagPublish(tool, untaggedPrivatePackageReleases, cwd);
++    if (gitTag) { await tagPublish(tool, untaggedPrivatePackageReleases, cwd); }
+   }
+   if (unsuccessfulNpmPublishes.length > 0) {
+     logger.error("packages failed to publish:");
+diff --git a/dist/changesets-cli.esm.js b/dist/changesets-cli.esm.js
+index d9582bf53eaf55402a6bf96a39589af7854b8f23..b7fabae33bbcae684f343782a973b806c45c1fca 100644
+--- a/dist/changesets-cli.esm.js
++++ b/dist/changesets-cli.esm.js
+@@ -1166,7 +1166,7 @@ async function publish(cwd, {
+   if (untaggedPrivatePackageReleases.length > 0) {
+     success("found untagged projects:");
+     logReleases(untaggedPrivatePackageReleases);
+-    await tagPublish(tool, untaggedPrivatePackageReleases, cwd);
++    if (gitTag) { await tagPublish(tool, untaggedPrivatePackageReleases, cwd); }
+   }
+   if (unsuccessfulNpmPublishes.length > 0) {
+     error("packages failed to publish:");

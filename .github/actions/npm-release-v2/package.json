@@ -1,0 +1,9 @@
+{
+  "name": "npm-release-toolkit",
+  "description": "Pinned toolchain for the npm-release composite action. Runtime-only.",
+  "private": true,
+  "packageManager": "pnpm@10.30.3",
+  "dependencies": {
+    "@changesets/cli": "2.31.0"
+  }
+}
