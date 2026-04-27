@@ -6,11 +6,38 @@ on:
       default_branch:
         description: >
           Repository default branch (e.g. `main`, `master`). Used for the
-          post-publish lockfile commit and pre-tag fast-forward. Override
-          only for repos whose default is not `main`.
+          post-publish lockfile commit (`PATCH refs/heads/<branch>`) and
+          the pre-tag fast-forward fetch.
+
+          Auto-detected from `github.event.repository.default_branch` if
+          left empty (the default). The auto-detection works on every
+          event type that reaches this workflow (`push`,
+          `workflow_dispatch`) and is inherited correctly through the
+          `workflow_call` boundary, so consumers normally do not need
+          to set this. Pass an explicit value only when you need to
+          override the repo's configured default for some reason.
         type: string
         required: false
-        default: main
+        default: ''
+      snapshot_tag:
+        description: >
+          npm dist-tag under which to publish a *throwaway prerelease
+          snapshot* (e.g. `pre-3.9.8`, `canary`, `next-feature-x`).
+          When set, the workflow runs the snapshot job (`changeset
+          version --snapshot <tag>` then `changeset publish --snapshot
+          --tag <tag> --no-git-tag`) instead of the standard release
+          job. Leave empty for a normal `push`-triggered release.
+
+          **Must not be a semver-shaped value** (`3.9.8`, `v3.9.8`,
+          `3.9.8-beta.1`, etc.) — the snapshot path bypasses the
+          release pipeline (no lockfile commit, no git tag, no GitHub
+          Release), so using a real version string would silently
+          publish under that dist-tag without doing the rest of the
+          release. The job validates the input and aborts on a
+          semver-shaped value.
+        type: string
+        required: false
+        default: ''
     secrets:
       CHANGESET_RELEASE_BOT_APP_ID:
         required: true
@@ -24,6 +51,9 @@ permissions:
 
 jobs:
   release:
+    # Standard release flow: changesets PR → publish → tag → GitHub Release.
+    # Skipped when `snapshot_tag` is set — that's a snapshot publish handled below.
+    if: inputs.snapshot_tag == ''
     runs-on: ubuntu-latest
     steps:
       - uses: actions/create-github-app-token@d72941d797fd3113feb6b93fd0dec494b13a2547 # v1
@@ -80,4 +110,85 @@ jobs:
         with:
           gh_token: ${{ steps.app-token.outputs.token }}
           changeset_pr_number: ${{ steps.changesets.outputs.pullRequestNumber }}
-          default_branch: ${{ inputs.default_branch }}
+          # `inputs.default_branch || github.event.repository.default_branch`
+          # — explicit override wins, otherwise auto-detect from the repo's
+          # configured default branch in the event payload.
+          default_branch: ${{ inputs.default_branch || github.event.repository.default_branch }}
+
+  snapshot:
+    # Snapshot publish: bumps versions in-place on the runner (never
+    # committed) and publishes under a custom dist-tag via OIDC. Used to
+    # ship prereleases ahead of a real release tag — e.g. `pre-3.9.8`
+    # consumed by a downstream service while the matching changeset is
+    # still in review.
+    #
+    # Doesn't touch the npm-release composite action: that action commits
+    # a lockfile, pushes git tags, and creates a GitHub Release, none of
+    # which apply to a snapshot. The standard release path remains the
+    # only way to cut a real version.
+    if: inputs.snapshot_tag != ''
+    runs-on: ubuntu-latest
+    steps:
+      # Refuse semver-shaped inputs. The snapshot path bypasses the
+      # release pipeline entirely — using a real version string here
+      # (e.g. `3.9.8`) would publish under that dist-tag without
+      # committing the lockfile, pushing the git tag, or creating a
+      # GitHub Release. Catching this loudly is the whole point of the
+      # `snapshot_tag` rename.
+      - name: Validate snapshot_tag
+        env:
+          SNAPSHOT_TAG: ${{ inputs.snapshot_tag }}
+        shell: bash
+        run: |
+          if [[ "$SNAPSHOT_TAG" =~ ^v?[0-9]+\.[0-9]+\.[0-9]+([+-].*)?$ ]]; then
+            echo "::error title=Invalid snapshot_tag::snapshot_tag '$SNAPSHOT_TAG' looks like a semver release version. The snapshot path bypasses the release pipeline (no lockfile commit, no git tag, no GitHub Release). For a real release, merge the changesets Release / Deploy PR. Use a non-semver dist-tag (e.g. 'pre-3.9.8', 'canary', 'next-feature-x')."
+            exit 1
+          fi
+
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
+        with:
+          fetch-depth: 1
+
+      - uses: pnpm/action-setup@41ff72655975bd51cab0327fa583b6e92b6d3061 # v4
+
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
+        with:
+          node-version-file: .nvmrc
+          cache: pnpm
+          registry-url: 'https://registry.npmjs.org'
+          # No node-auth-token — npm auth handled by OIDC trusted publishing
+
+      # See the comment on the equivalent step in the `release` job: snapshot
+      # version() rewrites workspace:* to e.g. 0.0.0-pre-3.9.8-<timestamp>
+      # for every co-published package, and those versions don't exist on
+      # npm. --config.link-workspace-packages=true keeps the install
+      # resolvable against the local workspace.
+      - run: pnpm install --no-frozen-lockfile --config.link-workspace-packages=true
+
+      - name: Version snapshot
+        # Bumps versions on the runner only — never committed.
+        # `snapshot_tag` is user-controlled (workflow_dispatch input),
+        # so route it through env: rather than `${{ ... }}` to avoid
+        # script injection.
+        env:
+          SNAPSHOT_TAG: ${{ inputs.snapshot_tag }}
+        shell: bash
+        run: pnpm exec changeset version --snapshot "$SNAPSHOT_TAG"
+
+      - name: Publish snapshot
+        # `--snapshot` is intentionally NOT passed to `changeset publish`:
+        # the publish command only destructures `{ otp, tag, gitTag }`
+        # from its flags. In `@changesets/cli` ≤2.30.x `--snapshot` is
+        # silently dropped; in ≥2.31.0 a `validateCommandFlags` step
+        # rejects it as an unknown flag (exit 1). The previous `version`
+        # step is the only place `--snapshot` is meaningful — it
+        # produces the `0.0.0-<tag>-<timestamp>` runner-local version
+        # that publish then ships under the dist-tag below.
+        #
+        # `--no-git-tag` because a snapshot is ephemeral; tagging the
+        # runner state would clutter the repo with disposable refs and
+        # risk triggering downstream tag-driven workflows.
+        env:
+          SNAPSHOT_TAG: ${{ inputs.snapshot_tag }}
+        shell: bash
+        run: pnpm exec changeset publish --tag "$SNAPSHOT_TAG" --no-git-tag
