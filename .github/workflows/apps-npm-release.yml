@@ -176,10 +176,19 @@ jobs:
         run: pnpm exec changeset version --snapshot "$SNAPSHOT_TAG"
 
       - name: Publish snapshot
-        # --no-git-tag because a snapshot is ephemeral; tagging the runner
-        # state would clutter the repo with disposable refs and risk
-        # triggering downstream tag-driven workflows.
+        # `--snapshot` is intentionally NOT passed to `changeset publish`:
+        # the publish command only destructures `{ otp, tag, gitTag }`
+        # from its flags. In `@changesets/cli` ≤2.30.x `--snapshot` is
+        # silently dropped; in ≥2.31.0 a `validateCommandFlags` step
+        # rejects it as an unknown flag (exit 1). The previous `version`
+        # step is the only place `--snapshot` is meaningful — it
+        # produces the `0.0.0-<tag>-<timestamp>` runner-local version
+        # that publish then ships under the dist-tag below.
+        #
+        # `--no-git-tag` because a snapshot is ephemeral; tagging the
+        # runner state would clutter the repo with disposable refs and
+        # risk triggering downstream tag-driven workflows.
         env:
           SNAPSHOT_TAG: ${{ inputs.snapshot_tag }}
         shell: bash
-        run: pnpm exec changeset publish --snapshot --tag "$SNAPSHOT_TAG" --no-git-tag
+        run: pnpm exec changeset publish --tag "$SNAPSHOT_TAG" --no-git-tag
