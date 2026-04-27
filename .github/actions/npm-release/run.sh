@@ -22,17 +22,35 @@ DEFAULT_BRANCH="${DEFAULT_BRANCH:-main}"
 log() { echo "==> $*"; }
 
 # ---------------------------------------------------------------------------
-# 1. Publish
+# 1. Build
+# ---------------------------------------------------------------------------
+log "Building packages"
+# Safety net for consumers that forgot a `prepublishOnly` (or `prepack`)
+# script in their published package's package.json. `dist/` is typically
+# gitignored, so without a build hook the publish ships an empty tarball
+# (just package.json + license + README) — silently broken on first
+# install. matic.js@3.9.9 went out this way; consumers got no compiled
+# code and the package had to be deprecated and republished as 3.9.10.
+#
+# `pnpm -r run --if-present build` runs the `build` script in every
+# workspace package that defines one. Packages without a build script
+# (services, internal-only utilities) are skipped — `--if-present` is
+# the no-op clause. Packages with `prepublishOnly` will run the build
+# again at publish time, which is harmless idempotent work.
+pnpm -r run --if-present build
+
+# ---------------------------------------------------------------------------
+# 2. Publish
 # ---------------------------------------------------------------------------
 log "Publishing packages to npm"
 # We do not pass --no-git-tag: @changesets/cli@2.30.x ignores the flag for
 # private packages (untaggedPrivatePackageReleases calls tagPublish
 # unconditionally). The flag is a no-op — omitting it keeps the intent clear.
-# Spurious local tags created here are deleted in step 3 before retagging.
+# Spurious local tags created here are deleted in step 4 before retagging.
 pnpm exec changeset publish
 
 # ---------------------------------------------------------------------------
-# 2. Regenerate and commit lockfile
+# 3. Regenerate and commit lockfile
 # ---------------------------------------------------------------------------
 log "Regenerating lockfile post-publish"
 # --lockfile-only skips node_modules; only re-resolves entries whose specifier
@@ -75,7 +93,7 @@ else
 fi
 
 # ---------------------------------------------------------------------------
-# 3. Tag published versions
+# 4. Tag published versions
 # ---------------------------------------------------------------------------
 log "Tagging published versions"
 git fetch origin "$DEFAULT_BRANCH" --tags
@@ -107,7 +125,7 @@ for tag in $new_tags; do
 done
 
 # ---------------------------------------------------------------------------
-# 4. Create GitHub Releases
+# 5. Create GitHub Releases
 # ---------------------------------------------------------------------------
 if [[ -n "$new_tags" ]]; then
   log "Creating GitHub Releases"
@@ -121,7 +139,7 @@ if [[ -n "$new_tags" ]]; then
 fi
 
 # ---------------------------------------------------------------------------
-# 5. Annotate the release PR
+# 6. Annotate the release PR
 # ---------------------------------------------------------------------------
 if [[ -n "${CHANGESET_PR_NUMBER:-}" ]]; then
   log "Updating release PR #$CHANGESET_PR_NUMBER description"
