@@ -29,7 +29,25 @@ log "Publishing packages to npm"
 # private packages (untaggedPrivatePackageReleases calls tagPublish
 # unconditionally). The flag is a no-op — omitting it keeps the intent clear.
 # Spurious local tags created here are deleted in step 3 before retagging.
-pnpm exec changeset publish
+#
+# Capture the publish output so we can detect the "nothing was actually
+# published" case. `changeset publish` exits 0 with a warning when every
+# package version is already on npm — and the script used to proceed
+# blindly to tagging + GitHub Release creation, producing a phantom
+# tag/release for a version that doesn't exist on npm. Concrete incident:
+# matic.js#469 (a `3.9.8` left over from a prior deprecated publish on
+# chore/monorepo).
+PUBLISH_LOG=$(mktemp)
+trap 'rm -f "$PUBLISH_LOG"' EXIT
+pnpm exec changeset publish 2>&1 | tee "$PUBLISH_LOG"
+# `set -o pipefail` propagates a non-zero publish exit through the pipe,
+# so a real failure aborts here before the grep.
+
+if grep -q "No unpublished projects to publish" "$PUBLISH_LOG"; then
+  log "No new versions were published — skipping lockfile commit, git tag, and GitHub Release."
+  log "(Every package version on this branch was already on npm. If this is unexpected, the most likely cause is a prior publish at the same version that needs reverting; bump to the next version on a follow-up PR.)"
+  exit 0
+fi
 
 # ---------------------------------------------------------------------------
 # 2. Regenerate and commit lockfile
