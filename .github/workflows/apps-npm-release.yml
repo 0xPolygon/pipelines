@@ -6,11 +6,19 @@ on:
       default_branch:
         description: >
           Repository default branch (e.g. `main`, `master`). Used for the
-          post-publish lockfile commit and pre-tag fast-forward. Override
-          only for repos whose default is not `main`.
+          post-publish lockfile commit (`PATCH refs/heads/<branch>`) and
+          the pre-tag fast-forward fetch.
+
+          Auto-detected from `github.event.repository.default_branch` if
+          left empty (the default). The auto-detection works on every
+          event type that reaches this workflow (`push`,
+          `workflow_dispatch`) and is inherited correctly through the
+          `workflow_call` boundary, so consumers normally do not need
+          to set this. Pass an explicit value only when you need to
+          override the repo's configured default for some reason.
         type: string
         required: false
-        default: main
+        default: ''
       snapshot_tag:
         description: >
           npm dist-tag under which to publish a *throwaway prerelease
@@ -102,7 +110,10 @@ jobs:
         with:
           gh_token: ${{ steps.app-token.outputs.token }}
           changeset_pr_number: ${{ steps.changesets.outputs.pullRequestNumber }}
-          default_branch: ${{ inputs.default_branch }}
+          # `inputs.default_branch || github.event.repository.default_branch`
+          # — explicit override wins, otherwise auto-detect from the repo's
+          # configured default branch in the event payload.
+          default_branch: ${{ inputs.default_branch || github.event.repository.default_branch }}
 
   snapshot:
     # Snapshot publish: bumps versions in-place on the runner (never
