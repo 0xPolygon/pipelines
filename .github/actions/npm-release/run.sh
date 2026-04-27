@@ -12,8 +12,12 @@
 #
 # Optional env vars (passed through from the workflow for the PR description step):
 #   CHANGESET_PR_NUMBER — pull request number of the release PR to annotate
+#   DEFAULT_BRANCH      — repo default branch for the lockfile-commit PATCH
+#                         and pre-tag fast-forward (default: main)
 
 set -euo pipefail
+
+DEFAULT_BRANCH="${DEFAULT_BRANCH:-main}"
 
 log() { echo "==> $*"; }
 
@@ -64,18 +68,18 @@ else
     gh api "repos/$GITHUB_REPOSITORY/git/commits" --input - --jq '.sha')
   log "Lockfile commit: $COMMIT_SHA"
 
-  gh api "repos/$GITHUB_REPOSITORY/git/refs/heads/main" \
+  gh api "repos/$GITHUB_REPOSITORY/git/refs/heads/$DEFAULT_BRANCH" \
     --method PATCH \
     --field sha="$COMMIT_SHA"
-  log "main advanced to $COMMIT_SHA"
+  log "$DEFAULT_BRANCH advanced to $COMMIT_SHA"
 fi
 
 # ---------------------------------------------------------------------------
 # 3. Tag published versions
 # ---------------------------------------------------------------------------
 log "Tagging published versions"
-git fetch origin main --tags
-git merge --ff-only origin/main
+git fetch origin "$DEFAULT_BRANCH" --tags
+git merge --ff-only "origin/$DEFAULT_BRANCH"
 log "Local HEAD now at $(git rev-parse HEAD)"
 
 # Delete spurious local tags created by the @changesets/cli@2.30.x bug

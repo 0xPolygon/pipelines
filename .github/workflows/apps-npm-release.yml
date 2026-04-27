@@ -2,6 +2,15 @@ name: npm release
 
 on:
   workflow_call:
+    inputs:
+      default_branch:
+        description: >
+          Repository default branch (e.g. `main`, `master`). Used for the
+          post-publish lockfile commit and pre-tag fast-forward. Override
+          only for repos whose default is not `main`.
+        type: string
+        required: false
+        default: main
     secrets:
       CHANGESET_RELEASE_BOT_APP_ID:
         required: true
@@ -71,3 +80,4 @@ jobs:
         with:
           gh_token: ${{ steps.app-token.outputs.token }}
           changeset_pr_number: ${{ steps.changesets.outputs.pullRequestNumber }}
+          default_branch: ${{ inputs.default_branch }}

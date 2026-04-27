@@ -12,6 +12,14 @@ inputs:
     description: Pull request number of the release PR to annotate (optional)
     required: false
     default: ''
+  default_branch:
+    description: >
+      Repository default branch — used for the post-publish lockfile commit
+      (PATCH refs/heads/<default_branch>) and the fast-forward fetch before
+      tagging. Override only for repos whose default is not `main`
+      (e.g. matic.js uses `master`).
+    required: false
+    default: main
 
 runs:
   using: composite
@@ -21,4 +29,5 @@ runs:
       env:
         GH_TOKEN: ${{ inputs.gh_token }}
         CHANGESET_PR_NUMBER: ${{ inputs.changeset_pr_number }}
+        DEFAULT_BRANCH: ${{ inputs.default_branch }}
       run: bash "$GITHUB_ACTION_PATH/run.sh"
