@@ -1,17 +1,37 @@
 name: Release
 
 on:
+  # Standard release on merge to the default branch — runs the changesets
+  # version PR cycle, then publishes + tags + releases when that PR merges.
   push:
     branches: [main]
+  # Snapshot publish: bumps versions on the runner only and publishes under
+  # a custom dist-tag via OIDC. Use to ship a *throwaway* prerelease that a
+  # downstream consumer can install ahead of the matching real release.
+  # Must not be a semver-shaped value (`3.9.8`, `v3.9.8`, `3.9.8-beta.1`):
+  # the snapshot path bypasses lockfile commit, git tag, and GitHub Release
+  # creation. The reusable workflow validates and aborts on semver input.
+  workflow_dispatch:
+    inputs:
+      snapshot_tag:
+        description: 'npm dist-tag for snapshot (e.g. canary, pre-3.9.8). Non-semver values only.'
+        required: false
+        default: 'snapshot'
 
 permissions:
   contents: write
   pull-requests: write
-  id-token: write
+  id-token: write # required for npm OIDC trusted publishing
 
 jobs:
   release:
     uses: ./.github/workflows/apps-npm-release.yml
+    # `snapshot_tag` is empty on the `push` event (no `inputs.snapshot_tag`
+    # to forward), so the reusable workflow runs the standard release job.
+    # On `workflow_dispatch`, `inputs.snapshot_tag` is forwarded and the
+    # reusable workflow runs the snapshot job instead.
+    with:
+      snapshot_tag: ${{ inputs.snapshot_tag || '' }}
     secrets:
       CHANGESET_RELEASE_BOT_APP_ID: ${{ secrets.CHANGESET_RELEASE_BOT_APP_ID }}
       CHANGESET_RELEASE_BOT_APP_PRIVATE_KEY: ${{ secrets.CHANGESET_RELEASE_BOT_APP_PRIVATE_KEY }}
