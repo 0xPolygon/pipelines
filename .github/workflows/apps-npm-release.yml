@@ -1,40 +1,39 @@
 name: npm release
 
+# The release flow for Apps Team monorepos using changesets + pnpm deploy.
+#
+# Replaces an earlier bash-script-driven version that committed a
+# regenerated lockfile and tagged it separately. The whole post-publish
+# dance turned out to be solving a problem `pnpm deploy` already solved:
+# Docker bundles workspace source directly, so registry resolution at the
+# release tag is irrelevant — the lockfile commit was a no-op in
+# practice (release histories had zero `chore: update lockfile after
+# publish` entries despite many releases). Removing it lets the workflow
+# collapse to a single `changesets/action` invocation.
+#
+# `createGithubReleases: true` extracts each version's `## <version>`
+# section from the matching package's `CHANGELOG.md` and posts it as the
+# release body — same canonical algorithm as changesets-action's
+# upstream behaviour, no custom port required.
+
 on:
   workflow_call:
     inputs:
-      default_branch:
-        description: >
-          Repository default branch (e.g. `main`, `master`). Used for the
-          post-publish lockfile commit (`PATCH refs/heads/<branch>`) and
-          the pre-tag fast-forward fetch.
-
-          Auto-detected from `github.event.repository.default_branch` if
-          left empty (the default). The auto-detection works on every
-          event type that reaches this workflow (`push`,
-          `workflow_dispatch`) and is inherited correctly through the
-          `workflow_call` boundary, so consumers normally do not need
-          to set this. Pass an explicit value only when you need to
-          override the repo's configured default for some reason.
-        type: string
-        required: false
-        default: ''
       snapshot_tag:
         description: >
           npm dist-tag under which to publish a *throwaway prerelease
           snapshot* (e.g. `pre-3.9.8`, `canary`, `next-feature-x`).
           When set, the workflow runs the snapshot job (`changeset
-          version --snapshot <tag>` then `changeset publish --snapshot
-          --tag <tag> --no-git-tag`) instead of the standard release
-          job. Leave empty for a normal `push`-triggered release.
+          version --snapshot <tag>` then `changeset publish --tag <tag>
+          --no-git-tag`) instead of the standard release job. Leave
+          empty for a normal `push`-triggered release.
 
           **Must not be a semver-shaped value** (`3.9.8`, `v3.9.8`,
           `3.9.8-beta.1`, etc.) — the snapshot path bypasses the
-          release pipeline (no lockfile commit, no git tag, no GitHub
-          Release), so using a real version string would silently
-          publish under that dist-tag without doing the rest of the
-          release. The job validates the input and aborts on a
-          semver-shaped value.
+          release pipeline (no git tag, no GitHub Release), so using a
+          real version string would silently publish under that
+          dist-tag without doing the rest of the release. The job
+          validates the input and aborts on a semver-shaped value.
         type: string
         required: false
         default: ''
@@ -77,43 +76,36 @@ jobs:
           # No node-auth-token — npm auth handled by OIDC
 
       # The release PR replaces workspace:* with real semver ranges for all
-      # intra-monorepo deps (e.g. ^2.0.0). Those versions don't exist on npm
-      # yet — they're what we're about to publish. --config.link-workspace-packages=true
-      # overrides .npmrc so pnpm resolves those ranges against local workspace
-      # versions instead of the registry, making the install succeed regardless
-      # of which packages are being co-released.
+      # intra-monorepo deps (e.g. ^2.0.0). Those versions don't exist on
+      # npm yet — they're what we're about to publish.
+      # --config.link-workspace-packages=true overrides .npmrc so pnpm
+      # resolves those ranges against local workspace versions instead of
+      # the registry, making the install succeed regardless of which
+      # packages are being co-released. --no-frozen-lockfile because
+      # `changeset version` updates package.json but not the lockfile, so
+      # the lockfile is structurally stale at the release-PR merge commit.
       - run: pnpm install --no-frozen-lockfile --config.link-workspace-packages=true
 
       - uses: changesets/action@6a0a831ff30acef54f2c6aa1cbbc1096b066edaf # v1.7.0
-        id: changesets
         with:
-          # No publish: here — publish is handled in the explicit steps below so
-          # that version tags are only pushed after the lockfile commit. If
-          # publish: were used, changesets/action would push tags during its own
-          # run, before the lockfile is updated, creating a race window where
-          # Docker build triggers could fire against a stale lockfile commit.
           title: 'changesets: Release / Deploy'
           commit: 'release: version packages'
-          # github-api mode signs commits with GitHub's GPG key, satisfying the
-          # repository's signed-commits requirement. git-cli (the default) produces
-          # unsigned commits.
+          # github-api mode signs commits with GitHub's GPG key, satisfying
+          # the repository's signed-commits requirement. git-cli (the
+          # default) produces unsigned commits.
           commitMode: github-api
+          # On a push that consumed all changesets (the release-PR merge),
+          # run publish: capture published packages, push their tags, and
+          # create a GitHub Release per tag with the body extracted from
+          # each package's CHANGELOG.md `## <version>` section.
+          publish: pnpm exec changeset publish
+          createGithubReleases: true
         env:
           GITHUB_TOKEN: ${{ steps.app-token.outputs.token }}
-          # No NPM_TOKEN — using OIDC trusted publishing
-          # changesets/action v1.7.0 only writes auth token to .npmrc when NPM_TOKEN is set;
-          # leaving it unset allows npm to use OIDC automatically
-
-      - name: Publish, tag and release
-        if: steps.changesets.outputs.hasChangesets == 'false'
-        uses: 0xPolygon/pipelines/.github/actions/npm-release@main
-        with:
-          gh_token: ${{ steps.app-token.outputs.token }}
-          changeset_pr_number: ${{ steps.changesets.outputs.pullRequestNumber }}
-          # `inputs.default_branch || github.event.repository.default_branch`
-          # — explicit override wins, otherwise auto-detect from the repo's
-          # configured default branch in the event payload.
-          default_branch: ${{ inputs.default_branch || github.event.repository.default_branch }}
+          # No NPM_TOKEN — using OIDC trusted publishing.
+          # changesets/action v1.7.0 only writes auth token to .npmrc when
+          # NPM_TOKEN is set; leaving it unset allows npm to use OIDC
+          # automatically.
 
   snapshot:
     # Snapshot publish: bumps versions in-place on the runner (never
@@ -122,9 +114,8 @@ jobs:
     # consumed by a downstream service while the matching changeset is
     # still in review.
     #
-    # Doesn't touch the npm-release composite action: that action commits
-    # a lockfile, pushes git tags, and creates a GitHub Release, none of
-    # which apply to a snapshot. The standard release path remains the
+    # Independent of the release job: snapshots don't push git tags or
+    # create GitHub Releases. The standard release path remains the
     # only way to cut a real version.
     if: inputs.snapshot_tag != ''
     runs-on: ubuntu-latest
@@ -132,16 +123,15 @@ jobs:
       # Refuse semver-shaped inputs. The snapshot path bypasses the
       # release pipeline entirely — using a real version string here
       # (e.g. `3.9.8`) would publish under that dist-tag without
-      # committing the lockfile, pushing the git tag, or creating a
-      # GitHub Release. Catching this loudly is the whole point of the
-      # `snapshot_tag` rename.
+      # pushing the git tag or creating a GitHub Release. Catching this
+      # loudly is the whole point of the `snapshot_tag` rename.
       - name: Validate snapshot_tag
         env:
           SNAPSHOT_TAG: ${{ inputs.snapshot_tag }}
         shell: bash
         run: |
           if [[ "$SNAPSHOT_TAG" =~ ^v?[0-9]+\.[0-9]+\.[0-9]+([+-].*)?$ ]]; then
-            echo "::error title=Invalid snapshot_tag::snapshot_tag '$SNAPSHOT_TAG' looks like a semver release version. The snapshot path bypasses the release pipeline (no lockfile commit, no git tag, no GitHub Release). For a real release, merge the changesets Release / Deploy PR. Use a non-semver dist-tag (e.g. 'pre-3.9.8', 'canary', 'next-feature-x')."
+            echo "::error title=Invalid snapshot_tag::snapshot_tag '$SNAPSHOT_TAG' looks like a semver release version. The snapshot path bypasses the release pipeline (no git tag, no GitHub Release). For a real release, merge the changesets Release / Deploy PR. Use a non-semver dist-tag (e.g. 'pre-3.9.8', 'canary', 'next-feature-x')."
             exit 1
           fi
 
