@@ -53,5 +53,9 @@ jobs:
       contains(github.event.pull_request.labels.*.name, 'run-e2e')
     uses: 0xPolygon/pipelines/.github/workflows/apps-e2e.yml@main
     with:
-      use_snapshot: ${{ inputs.use_snapshot }}
+      # `inputs.use_snapshot` is null on `pull_request: labeled` events
+      # (no explicit inputs). Passing null to a boolean-typed input on the
+      # called workflow is a startup_failure — guard with the `== null`
+      # check first and default to true (snapshot mode is the PR-CI path).
+      use_snapshot: ${{ inputs.use_snapshot == null && true || inputs.use_snapshot }}
       kurtosis_pos_ref: ${{ inputs.kurtosis_pos_ref || 'main' }}
