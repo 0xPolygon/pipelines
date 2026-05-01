@@ -97,6 +97,18 @@ jobs:
 
       - run: pnpm install --frozen-lockfile
 
+      # TEMP debug — remove before merge. Surfaces the actual values of
+      # the inputs and computed env so we can see what the trigger
+      # forwarded.
+      - name: 'DEBUG: inputs and resolved E2E_USE_SNAPSHOT'
+        run: |
+          echo "inputs.use_snapshot raw: '${{ inputs.use_snapshot }}'"
+          echo "inputs.use_snapshot toJSON: ${{ toJSON(inputs.use_snapshot) }}"
+          echo "inputs.kurtosis_pos_ref: '${{ inputs.kurtosis_pos_ref }}'"
+          echo "E2E_USE_SNAPSHOT env: '$E2E_USE_SNAPSHOT'"
+          echo "(inputs.use_snapshot != null): ${{ inputs.use_snapshot != null }}"
+          echo "(inputs.use_snapshot == false): ${{ inputs.use_snapshot == false }}"
+
       - name: Restore from snapshot
         if: env.E2E_USE_SNAPSHOT == '1'
         id: snapshot
