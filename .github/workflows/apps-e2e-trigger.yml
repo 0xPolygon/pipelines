@@ -1,0 +1,57 @@
+name: e2e
+
+# Canonical e2e trigger. Copy verbatim into a consumer repo's
+# `.github/workflows/e2e-trigger.yml` and adjust only the inputs the
+# consumer needs to override (e.g. `e2e_command`, `cold_start_args_file`).
+# All shared logic lives in `apps-e2e.yml`.
+#
+# Two paths:
+#
+#   - Snapshot mode (`use_snapshot=true`, default): pull the published
+#     snapshot image and restore via the e2e-snapshot-restore composite.
+#     ~30s.
+#   - Cold-start mode (`use_snapshot=false`): clone kurtosis-pos at
+#     `kurtosis_pos_ref` and run the enclave from source. ~10m. Use only
+#     when iterating on a kurtosis-pos branch that hasn't been
+#     snapshotted yet.
+
+on:
+  workflow_dispatch:
+    inputs:
+      use_snapshot:
+        description: 'Restore from the published snapshot image (false = cold-start)'
+        type: boolean
+        required: false
+        default: true
+      kurtosis_pos_ref:
+        description: 'Cold-start mode: git ref of 0xPolygon/kurtosis-pos to clone'
+        required: false
+        default: main
+  # Opt-in per PR via the `run-e2e` label. Subsequent pushes to a labelled
+  # PR re-run automatically.
+  pull_request:
+    types: [labeled, synchronize, reopened]
+
+# One enclave per branch. Two parallel runs would exhaust Docker
+# resources on the runner.
+concurrency:
+  group: e2e-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+  # Mirrors the called workflow's `packages: read`. GitHub fails the
+  # workflow at startup if the trigger's permissions are not a superset
+  # of the called workflow's.
+  packages: read
+
+jobs:
+  e2e:
+    # Skip on PRs that don't carry the label. workflow_dispatch always runs.
+    if: >-
+      github.event_name != 'pull_request' ||
+      contains(github.event.pull_request.labels.*.name, 'run-e2e')
+    uses: 0xPolygon/pipelines/.github/workflows/apps-e2e.yml@main
+    with:
+      use_snapshot: ${{ inputs.use_snapshot }}
+      kurtosis_pos_ref: ${{ inputs.kurtosis_pos_ref || 'main' }}

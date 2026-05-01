@@ -1,0 +1,147 @@
+name: E2E (kurtosis devnet)
+
+# Reusable e2e workflow for repos that integrate against a kurtosis-pos
+# devnet. Two paths:
+#
+#   - Snapshot mode (default): pull the published snapshot image and
+#     restore via the e2e-snapshot-restore composite. Wall-time ~30s.
+#     Use this for any consumer testing against kurtosis-pos main.
+#   - Cold-start mode: clone kurtosis-pos at `kurtosis_pos_ref` and run
+#     the enclave from source. Wall-time ~10min. Reach for this only
+#     when iterating on a kurtosis-pos branch that hasn't been
+#     snapshotted yet.
+#
+# Trigger files in consumer repos are thin: they specify the event
+# (workflow_dispatch + pull_request labeled), forward inputs, and call
+# this workflow with `secrets: inherit`. See apps-e2e-trigger.yml in
+# this repo for the canonical example.
+
+on:
+  workflow_call:
+    inputs:
+      use_snapshot:
+        description: >
+          Restore from the published snapshot image (false = cold-start
+          kurtosis from source).
+        type: boolean
+        required: false
+        default: true
+      kurtosis_pos_ref:
+        description: >
+          Cold-start mode: git ref of 0xPolygon/kurtosis-pos to clone.
+          Snapshot mode: passed to the extract.sh / restore.sh helper
+          clone — should match the ref the snapshot was built with.
+        type: string
+        required: false
+        default: main
+      snapshot_image:
+        description: >
+          Snapshot image reference (full registry/repo:tag). Default
+          points at the lst-api-published snapshot. Override only when
+          the consumer publishes its own snapshot.
+        type: string
+        required: false
+        default: ghcr.io/0xpolygon/lst-api-e2e-snapshot:latest
+      cold_start_args_file:
+        description: >
+          Cold-start mode: path to the kurtosis args file in the
+          consumer's checkout (relative to GITHUB_WORKSPACE).
+        type: string
+        required: false
+        default: kurtosis-params.yml
+      e2e_command:
+        description: >
+          Shell command run by the suite step. Default `pnpm run e2e`
+          assumes the consumer's package.json wires its e2e entrypoint
+          there. Wrap any pre-commands with && (e.g. starting a Firestore
+          emulator) when needed; vitest globalSetup handlers are usually
+          the cleaner home for those.
+        type: string
+        required: false
+        default: pnpm run e2e
+      timeout_minutes:
+        description: >
+          Job timeout. Default 45 covers cold-start (~10m bring-up +
+          ~10m suite + headroom); snapshot runs typically finish under 8.
+        type: number
+        required: false
+        default: 45
+
+# `packages: read` lets the GITHUB_TOKEN pull from GHCR in snapshot mode;
+# ignored by cold-start runs that never touch the registry.
+permissions:
+  contents: read
+  packages: read
+
+jobs:
+  e2e:
+    name: e2e (kurtosis devnet)
+    runs-on: ubuntu-latest
+    timeout-minutes: ${{ inputs.timeout_minutes }}
+    env:
+      # Centralise the snapshot/cold-start switch as an env var so every
+      # downstream step references a single value. `inputs.use_snapshot`
+      # has its own default but consumer triggers may pass `null` from a
+      # pull_request event with no explicit input — guard with a `!= null`
+      # check so the null case doesn't fall through to the slow path.
+      E2E_USE_SNAPSHOT: ${{ (inputs.use_snapshot != null && inputs.use_snapshot == false) && '0' || '1' }}
+    steps:
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
+
+      - uses: pnpm/action-setup@41ff72655975bd51cab0327fa583b6e92b6d3061 # v4
+
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
+        with:
+          node-version-file: .nvmrc
+          cache: pnpm
+
+      - run: pnpm install --frozen-lockfile
+
+      - name: Restore from snapshot
+        if: env.E2E_USE_SNAPSHOT == '1'
+        id: snapshot
+        uses: 0xPolygon/pipelines/.github/actions/e2e-snapshot-restore@main
+        with:
+          image: ${{ inputs.snapshot_image }}
+          kurtosis_pos_ref: ${{ inputs.kurtosis_pos_ref }}
+
+      - name: Cold-start kurtosis
+        if: env.E2E_USE_SNAPSHOT == '0'
+        uses: 0xPolygon/pipelines/.github/actions/e2e-cold-start@main
+        with:
+          kurtosis_pos_ref: ${{ inputs.kurtosis_pos_ref }}
+          args_file: ${{ inputs.cold_start_args_file }}
+
+      - name: Run e2e suite
+        env:
+          E2E_COMMAND: ${{ inputs.e2e_command }}
+        run: bash -c "$E2E_COMMAND"
+
+      # On failure, capture devnet state for post-mortem. Snapshot mode
+      # has a docker-compose stack we know the path to (via the composite
+      # action's compose_file_path output); cold-start has a kurtosis
+      # enclave to dump. `|| true` everywhere so a half-restored run
+      # still produces whatever artefacts it can.
+      - name: Dump devnet on failure
+        if: failure()
+        env:
+          COMPOSE_FILE: ${{ steps.snapshot.outputs.compose_file_path }}
+        run: |
+          mkdir -p /tmp/devnet-dump
+          if [ "${E2E_USE_SNAPSHOT}" = "1" ]; then
+            if [ -f "$COMPOSE_FILE" ]; then
+              docker compose --file "$COMPOSE_FILE" ps > /tmp/devnet-dump/compose-ps.txt 2>&1 || true
+              docker compose --file "$COMPOSE_FILE" logs --no-color > /tmp/devnet-dump/compose-logs.txt 2>&1 || true
+              cp "$COMPOSE_FILE" /tmp/devnet-dump/docker-compose.yaml || true
+            fi
+          else
+            kurtosis enclave dump pos /tmp/devnet-dump/pos || true
+          fi
+
+      - name: Upload devnet dump
+        if: failure()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: devnet-dump-${{ github.run_id }}
+          path: /tmp/devnet-dump
+          retention-days: 7
