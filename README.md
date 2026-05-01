@@ -30,6 +30,7 @@ in its own separate GitHub Actions job with its own runner.
 |----------|---------|-----------------|
 | `apps-ci.yml` | Lint, typecheck, and test on PRs | _(none)_ |
 | `apps-changeset-check.yml` | PR gate: requires a changeset; posts/deletes instructions comment | _(none)_ |
+| `apps-codegen-drift-check.yml` | PR gate: runs `pnpm -r --include-workspace-root run --if-present codegen-drift-check` (no-op when no package defines the script) | _(none)_ |
 | `apps-npm-release.yml` | Changesets release pipeline (version bumps, npm publish, git tags) and on-demand snapshot publish via the `snapshot_tag` input | `CHANGESET_RELEASE_BOT_APP_ID`, `CHANGESET_RELEASE_BOT_APP_PRIVATE_KEY` |
 | `apps-docker-release.yml` | GCP image push on version tag (delegates to `gcp_pipeline_release_image.yaml`) | `build_params_gh_secret_keys` |
 | `apps-pr-labeler.yml` | Labels `.github/`-only PRs as `do-not-notify`; removes label when non-`.github/` changes are added | _(none)_ |
@@ -76,6 +77,35 @@ jobs:
 ```
 
 Repositories with no test env var requirements omit the `env:` block entirely.
+
+### `apps-codegen-drift-check.yml`
+
+A discrete PR gate for "edited the schema but forgot to regenerate" bugs.
+Runs `pnpm -r --include-workspace-root run --if-present codegen-drift-check`
+across the workspace in topological order. Two patterns both work:
+
+- **Root-only** — a repo with no workspace children (e.g. `apps-team-ops`,
+  where `pnpm-workspace.yaml` has no `packages:` field) defines the script
+  at the root. `--include-workspace-root` is required so plain `pnpm -r`
+  doesn't skip it.
+- **Per-package** — a monorepo where each package owns its own check
+  (e.g. an orval client that regenerates from a schemas package's
+  `openapi.json`). Topological order means schemas regenerate before
+  downstream clients — drift produced by one step is visible to the next.
+
+The `codegen-drift-check` convention: regenerate the artifacts in place
+and exit non-zero when `git diff` reports any change.
+
+A separate workflow rather than another step in `actions/ci`, so the
+failure surfaces under its own PR check name — easy to make a required
+status on `main` and trivial to triage at a glance. The `--if-present`
+keeps it a fast green no-op for repos that ship no codegen, so the
+canonical CI trigger can carry the job even before every consumer has
+something to check.
+
+The canonical `apps-ci-trigger.yml` already wires this in as a second
+job alongside `lint-typecheck-test` — adopting team-wide is a single
+trigger file in each consumer repo, not two.
 
 ### `actions/check-dockerfile`
 

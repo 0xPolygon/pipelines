@@ -1,0 +1,47 @@
+name: Codegen drift check
+
+on:
+  workflow_call:
+
+permissions:
+  contents: read
+
+jobs:
+  drift-check:
+    name: Codegen drift check
+    # changeset-release/* branches contain only version bumps and changelog
+    # entries; nothing in them can drift codegen.
+    if: "!startsWith(github.head_ref, 'changeset-release/')"
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
+
+      - uses: pnpm/action-setup@41ff72655975bd51cab0327fa583b6e92b6d3061 # v4
+
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
+        with:
+          node-version-file: .nvmrc
+          cache: pnpm
+
+      - run: pnpm install --frozen-lockfile
+
+      # `pnpm -r --include-workspace-root run --if-present` walks the root
+      # package and every workspace child in topological order, running
+      # `codegen-drift-check` only where it is defined. Two patterns both work:
+      #
+      #   * Root-only: a single repo (e.g. apps-team-ops, where
+      #     pnpm-workspace.yaml has no `packages:` field) defines the script
+      #     at the root. `pnpm -r` alone would skip it — `--include-workspace-root`
+      #     is required.
+      #
+      #   * Per-package: a monorepo where each package owns its own check
+      #     (e.g. an orval client that regenerates from a schemas package's
+      #     openapi.json). Topological order means schemas regenerate before
+      #     downstream clients — drift produced by one step is visible to the
+      #     next.
+      #
+      # No-op for repos that ship no `codegen-drift-check` script anywhere in
+      # the workspace — the workflow becomes a fast green check, which is why
+      # it is safe to wire into the canonical CI trigger even before any
+      # consumer has codegen.
+      - run: pnpm -r --include-workspace-root run --if-present codegen-drift-check
