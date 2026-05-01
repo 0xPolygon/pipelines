@@ -36,6 +36,7 @@ in its own separate GitHub Actions job with its own runner.
 | `apps-slack-merge-notify.yml` | Posts a Slack Block Kit message when a PR is merged | `SLACK_WEBHOOK_URL` |
 | `apps-claude-code-review.yml` | Automated Claude Code PR review | `CLAUDE_API_KEY` |
 | `apps-claude.yml` | Interactive Claude Code agent (triggered by @claude mentions) | `CLAUDE_API_KEY` |
+| `apps-e2e.yml` | Kurtosis-pos devnet e2e harness (snapshot restore + cold-start), with on-failure devnet dump as artefact | _(none)_ |
 
 Trigger file examples for each of the above live alongside them as
 `apps-*-trigger.yml` and also serve as canonical templates for consuming
@@ -55,6 +56,8 @@ system state automatically.
 | `actions/npm-release` | Publish, tag, and release post-changesets merge | No — bash script |
 | `actions/slack-notify` | Post Slack Block Kit message from `pr.json` | Yes — ncc bundle |
 | `actions/upsert-changeset-comment` | Post or remove changeset nag comment on a PR | Yes — ncc bundle |
+| `actions/e2e-snapshot-restore` | Restore a kurtosis-pos devnet from a published GHCR snapshot image | No — pure shell |
+| `actions/e2e-cold-start` | Bring up a kurtosis-pos devnet from source | No — pure shell |
 
 ### `actions/ci`
 
@@ -107,6 +110,15 @@ respectively. Both contain logic that runs across repository boundaries inside a
 reusable workflow context, so they must be compiled ncc bundles (raw
 `.github/scripts/` files are not accessible in the calling repo's workspace).
 See [Adding a new composite action with compiled dist](#adding-a-new-composite-action-with-compiled-dist).
+
+### `actions/e2e-snapshot-restore` and `actions/e2e-cold-start`
+
+Used by `apps-e2e.yml`. Each composite action ships its bash helper next to
+its `action.yml` and references it via `${{ github.action_path }}`, so no ncc
+bundle is needed — composite actions can read sibling files even when called
+cross-repo. Consumers should call `apps-e2e.yml` rather than the composites
+directly; the workflow handles the snapshot/cold-start switch and on-failure
+devnet artefact upload.
 
 ---
 
