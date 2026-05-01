@@ -53,9 +53,16 @@ jobs:
       contains(github.event.pull_request.labels.*.name, 'run-e2e')
     uses: 0xPolygon/pipelines/.github/workflows/apps-e2e.yml@main
     with:
-      # `inputs.use_snapshot` is null on `pull_request: labeled` events
-      # (no explicit inputs). Passing null to a boolean-typed input on the
-      # called workflow is a startup_failure — guard with the `== null`
-      # check first and default to true (snapshot mode is the PR-CI path).
-      use_snapshot: ${{ inputs.use_snapshot == null && true || inputs.use_snapshot }}
+      # Snapshot mode is the strong default. Cold-start is opt-in via
+      # an explicit `use_snapshot=false` workflow_dispatch — every other
+      # case (null on `pull_request: labeled`, true, "true", and a
+      # "false" string passed via `gh workflow run -f`) resolves to
+      # snapshot. The naive `inputs.use_snapshot == null && true ||
+      # inputs.use_snapshot` looks correct but `false || false` in GH
+      # Actions doesn't reliably round-trip a literal boolean false
+      # through workflow_call's typed input — the called workflow saw
+      # `use_snapshot: true` empirically. Compare against the boolean
+      # AND the string explicitly so an explicit cold-start dispatch
+      # actually flips the bit.
+      use_snapshot: ${{ inputs.use_snapshot != false && inputs.use_snapshot != 'false' }}
       kurtosis_pos_ref: ${{ inputs.kurtosis_pos_ref || 'main' }}
