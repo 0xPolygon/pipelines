@@ -86,20 +86,6 @@ jobs:
       # the lockfile is structurally stale at the release-PR merge commit.
       - run: pnpm install --no-frozen-lockfile --config.link-workspace-packages=true
 
-      # Safety net for consumers that forgot a `prepublishOnly` (or
-      # `prepack`) script in their published package's package.json.
-      # `dist/` is typically gitignored, so without a build hook the
-      # publish ships an empty tarball (just package.json + license +
-      # README) — silently broken on first install. matic.js@3.9.9 went
-      # out this way; consumers got no compiled code and the package
-      # had to be deprecated and republished as 3.9.10. Building here
-      # unconditionally guards every consumer against the same trap.
-      # `--if-present` skips packages without a `build` script (services,
-      # internal-only utilities). Packages that already have a publish
-      # lifecycle hook will run their own build again — idempotent
-      # against a clean tree.
-      - run: pnpm -r run --if-present build
-
       - uses: changesets/action@6a0a831ff30acef54f2c6aa1cbbc1096b066edaf # v1.7.0
         with:
           title: 'changesets: Release / Deploy'
@@ -178,11 +164,6 @@ jobs:
           SNAPSHOT_TAG: ${{ inputs.snapshot_tag }}
         shell: bash
         run: pnpm exec changeset version --snapshot "$SNAPSHOT_TAG"
-
-      # See the equivalent step in the `release` job: a snapshot
-      # publish is just as exposed to the missing-`prepublishOnly`
-      # trap as a real release, so apply the same workflow-level guard.
-      - run: pnpm -r run --if-present build
 
       - name: Publish snapshot
         # `--snapshot` is intentionally NOT passed to `changeset publish`:
