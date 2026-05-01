@@ -51,6 +51,7 @@ system state automatically.
 | Action | Purpose | Has compiled dist? |
 |--------|---------|-------------------|
 | `actions/ci` | Checkout, install, lint, typecheck, test | No — pure shell |
+| `actions/check-dockerfile` | Pre-flight gate: resolve a changeset tag and report whether the package ships a Dockerfile | No — pure shell |
 | `actions/docker-test` | Resolve service from tag, build image, start container, run tests, stop | No — pure shell |
 | `actions/npm-release` | Publish, tag, and release post-changesets merge | No — bash script |
 | `actions/slack-notify` | Post Slack Block Kit message from `pr.json` | Yes — ncc bundle |
@@ -75,6 +76,51 @@ jobs:
 ```
 
 Repositories with no test env var requirements omit the `env:` block entirely.
+
+### `actions/check-dockerfile`
+
+Resolves a changeset tag to a workspace package directory and reports whether
+that package contains a `Dockerfile`. Triggers that pay for expensive setup
+(Firestore emulator, OIDC auth, fixture seeding) before invoking `docker-test`
+use this as a pre-flight to short-circuit library-only release tags
+(`spol-contracts-sdk@…`, `spol-db@…`) — the trigger gates every
+Dockerfile-dependent step on `steps.gate.outputs.has_dockerfile == 'true'`.
+
+`docker-test` already returns `should_build=false` for the same library case,
+but it does so after `actions/checkout`, `pnpm install`, and the buildx setup
+have run. For triggers with no expensive pre-test steps (e.g. the
+`example-rest-api` template) this action is unnecessary; reach for it only
+when the trigger has setup that's wasted on a library tag.
+
+Self-contained — does its own `actions/checkout` and `pnpm/action-setup`,
+matching the `docker-test` convention. Discovers the package directory via
+`pnpm --filter ls --json`, so it works regardless of workspace layout
+(`packages/*`, `apps/*`, nested, root-level — anything `pnpm-workspace.yaml`
+declares). Outputs `has_dockerfile`, `service`, and `package_dir`.
+
+```yaml
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    env:
+      FIRESTORE_EMULATOR_HOST: 172.17.0.1:8080
+      # ... other env vars
+    steps:
+      - id: gate
+        uses: 0xPolygon/pipelines/.github/actions/check-dockerfile@main
+        with:
+          tag: ${{ inputs.tag || '' }}
+
+      - if: steps.gate.outputs.has_dockerfile == 'true'
+        run: docker compose -f ./docker-compose.test.yml up -d --wait
+
+      - id: docker-test
+        if: steps.gate.outputs.has_dockerfile == 'true'
+        uses: 0xPolygon/pipelines/.github/actions/docker-test@main
+        with:
+          tag: ${{ inputs.tag || '' }}
+          test_vars: FIRESTORE_EMULATOR_HOST # ...
+```
 
 ### `actions/docker-test`
 

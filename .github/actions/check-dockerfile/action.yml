@@ -1,0 +1,102 @@
+name: Check Dockerfile
+description: >
+  Resolves a changeset tag to a workspace package directory and reports whether
+  it ships a Dockerfile. Designed as a fast pre-flight gate for docker-release
+  trigger files that pay for expensive setup (Firestore emulator, OIDC auth,
+  fixture seeding) before invoking docker-test — when the tag points to a
+  library package with no Dockerfile, the trigger can short-circuit every
+  Dockerfile-dependent step via `if: steps.<id>.outputs.has_dockerfile == 'true'`.
+
+  Discovers the package directory via `pnpm --filter ls`, so it works regardless
+  of workspace layout (`packages/*`, `apps/*`, deeply nested, root-level, etc.).
+  Self-contained: does its own `actions/checkout` and `pnpm/action-setup`,
+  matching the convention used by `actions/docker-test`. Callers do not need a
+  prior checkout — though re-checking out before the gate is harmless if the
+  caller needs the workspace for other steps too.
+
+inputs:
+  tag:
+    description: >
+      Full changeset tag (e.g. @scope/pkg@1.2.3 or pkg@1.2.3). Omit on
+      tag-push triggers — the action falls back to GITHUB_REF_NAME, which
+      matches the convention used by actions/docker-test.
+    required: false
+    default: ''
+
+outputs:
+  has_dockerfile:
+    description: "'true' if the resolved package directory contains a Dockerfile, else 'false'."
+    value: ${{ steps.check.outputs.has_dockerfile }}
+  service:
+    description: Package name extracted from the tag (e.g. @scope/pkg). Empty if the tag is malformed.
+    value: ${{ steps.check.outputs.service }}
+  package_dir:
+    description: Workspace package directory relative to repo root. Empty when no package matches.
+    value: ${{ steps.check.outputs.package_dir }}
+
+runs:
+  using: composite
+  steps:
+    # No `ref:` — checkout the workflow's triggering ref, which on the
+    # intended `push: tags:` consumer is the released tag itself. The gate
+    # only needs the workspace package layout (`pnpm-workspace.yaml`,
+    # `packages/*/package.json`), not the exact tagged tree, so resolving
+    # against `github.ref` is equivalent for the lookup and avoids treating
+    # `inputs.tag` as a checkout ref (CodeQL `actions/untrusted-checkout`).
+    - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
+
+    - uses: pnpm/action-setup@41ff72655975bd51cab0327fa583b6e92b6d3061 # v4
+
+    - id: check
+      shell: bash
+      env:
+        TAG_INPUT: ${{ inputs.tag }}
+      # `pnpm --filter <name> ls --depth=-1 --json` reads pnpm-workspace.yaml
+      # directly and returns the matched package's metadata as a JSON array
+      # (`[{name, version, path, private}]`) — empty array when no match.
+      # No `pnpm install` required, and no assumption about where packages
+      # live in the workspace (`packages/*`, `apps/*`, nested, root, etc.).
+      #
+      # `${TAG%@*}` strips the trailing `@<version>` to recover the package
+      # name. The shortest-match form preserves the leading `@` of a scoped
+      # name (`@scope/pkg@1.2.3` → `@scope/pkg`); a longest-match `${TAG%%@*}`
+      # would corrupt scoped packages.
+      run: |
+        set -euo pipefail
+
+        REF="${TAG_INPUT:-${GITHUB_REF_NAME:-}}"
+        if [ -z "$REF" ]; then
+          echo "No tag input and GITHUB_REF_NAME is unset — cannot resolve a package." >&2
+          exit 2
+        fi
+
+        SERVICE="${REF%@*}"
+        echo "Tag:     $REF"
+        echo "Service: $SERVICE"
+        echo "service=$SERVICE" >> "$GITHUB_OUTPUT"
+
+        ABS_DIR=$(pnpm --filter "$SERVICE" ls --depth=-1 --json 2>/dev/null \
+          | jq -r '.[0].path // empty')
+
+        if [ -z "$ABS_DIR" ]; then
+          echo "No workspace package matches '$SERVICE' — has_dockerfile=false."
+          {
+            echo "has_dockerfile=false"
+            echo "package_dir="
+          } >> "$GITHUB_OUTPUT"
+          exit 0
+        fi
+
+        # Make the absolute path repo-relative so the output matches what
+        # docker-test emits for `dockerfile_path`.
+        PKG_DIR="${ABS_DIR#"${GITHUB_WORKSPACE}"/}"
+        echo "Directory: $PKG_DIR"
+        echo "package_dir=$PKG_DIR" >> "$GITHUB_OUTPUT"
+
+        if [ -f "$ABS_DIR/Dockerfile" ]; then
+          echo "Dockerfile present — has_dockerfile=true."
+          echo "has_dockerfile=true" >> "$GITHUB_OUTPUT"
+        else
+          echo "No Dockerfile at $PKG_DIR/Dockerfile — has_dockerfile=false."
+          echo "has_dockerfile=false" >> "$GITHUB_OUTPUT"
+        fi
