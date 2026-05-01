@@ -100,14 +100,19 @@ jobs:
       - name: Restore from snapshot
         if: env.E2E_USE_SNAPSHOT == '1'
         id: snapshot
-        uses: 0xPolygon/pipelines/.github/actions/e2e-snapshot-restore@main
+        # TEMP: pinned to feature branch for cross-repo pre-merge testing.
+        # Reverts to @main before review/merge — see commit
+        # "test: pin composite refs to feature branch" for the diff to undo.
+        uses: 0xPolygon/pipelines/.github/actions/e2e-snapshot-restore@feat/apps-e2e-shared-workflow
         with:
           image: ${{ inputs.snapshot_image }}
           kurtosis_pos_ref: ${{ inputs.kurtosis_pos_ref }}
 
       - name: Cold-start kurtosis
         if: env.E2E_USE_SNAPSHOT == '0'
-        uses: 0xPolygon/pipelines/.github/actions/e2e-cold-start@main
+        # TEMP: pinned to feature branch for cross-repo pre-merge testing.
+        # Reverts to @main before review/merge.
+        uses: 0xPolygon/pipelines/.github/actions/e2e-cold-start@feat/apps-e2e-shared-workflow
         with:
           kurtosis_pos_ref: ${{ inputs.kurtosis_pos_ref }}
           args_file: ${{ inputs.cold_start_args_file }}
