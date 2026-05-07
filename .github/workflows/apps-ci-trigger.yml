@@ -15,3 +15,11 @@ jobs:
     steps:
       - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
       - uses: ./.github/actions/ci
+
+  drift-check:
+    # Discrete PR-check status separate from lint/typecheck/test so a drift
+    # failure is identifiable at a glance and can be made required on `main`
+    # independently. No-op for repos that ship no `codegen-drift-check`
+    # script anywhere in the workspace, so this job is safe to keep in the
+    # canonical trigger even before any consumer has codegen.
+    uses: ./.github/workflows/apps-codegen-drift-check.yml
