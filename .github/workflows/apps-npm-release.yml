@@ -37,6 +37,24 @@ on:
         type: string
         required: false
         default: ''
+      tag_only:
+        description: >
+          When `true`, run `pnpm exec changeset tag` instead of
+          `pnpm exec changeset publish`. The Version Packages PR flow is
+          unchanged; on its merge, changesets/action creates per-package
+          git tags but skips `npm publish` entirely.
+
+          For repos that use changesets for version tracking and
+          tag-driven downstream deploys, but are not npm-published
+          (e.g. subgraph monorepos where the canonical revision id is
+          the Graph Studio version label, not an npm registry version).
+
+          Snapshot publishing is incompatible with this mode — setting
+          both `snapshot_tag` and `tag_only` causes the snapshot job to
+          be skipped.
+        type: boolean
+        required: false
+        default: false
     secrets:
       CHANGESET_RELEASE_BOT_APP_ID:
         required: true
@@ -98,7 +116,12 @@ jobs:
           # run publish: capture published packages, push their tags, and
           # create a GitHub Release per tag with the body extracted from
           # each package's CHANGELOG.md `## <version>` section.
-          publish: pnpm exec changeset publish
+          #
+          # In `tag_only` mode, `pnpm exec changeset tag` only creates
+          # the per-package git tags and skips `npm publish` — used by
+          # repos that drive tag-triggered deploys from the same
+          # changeset versions but don't publish to a registry.
+          publish: ${{ inputs.tag_only && 'pnpm exec changeset tag' || 'pnpm exec changeset publish' }}
           createGithubReleases: true
         env:
           GITHUB_TOKEN: ${{ steps.app-token.outputs.token }}
@@ -117,7 +140,11 @@ jobs:
     # Independent of the release job: snapshots don't push git tags or
     # create GitHub Releases. The standard release path remains the
     # only way to cut a real version.
-    if: inputs.snapshot_tag != ''
+    #
+    # Skipped under `tag_only: true` — snapshots only make sense when
+    # there's an npm registry to publish to. A `tag_only` repo asking
+    # for a snapshot is a config error, not a runtime fallback.
+    if: inputs.snapshot_tag != '' && !inputs.tag_only
     runs-on: ubuntu-latest
     steps:
       # Refuse semver-shaped inputs. The snapshot path bypasses the
