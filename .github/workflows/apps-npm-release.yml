@@ -162,6 +162,14 @@ jobs:
         # script injection.
         env:
           SNAPSHOT_TAG: ${{ inputs.snapshot_tag }}
+          # `changeset version` runs the repo's configured changelog formatter.
+          # Repos on @changesets/changelog-github call the GitHub API (via
+          # @changesets/get-github-info) and need a token, or `changeset version`
+          # aborts. Read-only `github.token` suffices — the snapshot job never
+          # commits or pushes (--no-git-tag). The release job sets this on the
+          # changesets/action step; the snapshot job runs `changeset version`
+          # directly and must set it too.
+          GITHUB_TOKEN: ${{ github.token }}
         shell: bash
         run: pnpm exec changeset version --snapshot "$SNAPSHOT_TAG"
 
