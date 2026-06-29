@@ -16,3 +16,8 @@ jobs:
     uses: ./.github/workflows/apps-claude-code-review.yml
     secrets:
       CLAUDE_API_KEY: ${{ secrets.CLAUDE_API_KEY }}
+      # Optional: enables team-standards context in the review. Provide a
+      # read-only app's credentials and an APPS_TEAM_CONTEXT_SOURCES secret.
+      TEAM_CONTEXT_APP_ID: ${{ secrets.APPS_TEAM_CONTEXT_APP_ID }}
+      TEAM_CONTEXT_APP_PRIVATE_KEY: ${{ secrets.APPS_TEAM_CONTEXT_APP_PRIVATE_KEY }}
+      TEAM_CONTEXT_SOURCES: ${{ secrets.APPS_TEAM_CONTEXT_SOURCES }}
