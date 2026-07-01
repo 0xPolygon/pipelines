@@ -17,6 +17,7 @@ runs:
       if: "!startsWith(github.head_ref, 'changeset-release/')"
       with:
         node-version-file: .nvmrc
+        check-latest: true
         cache: pnpm
     - run: pnpm install --frozen-lockfile
       if: "!startsWith(github.head_ref, 'changeset-release/')"
