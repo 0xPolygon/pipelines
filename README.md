@@ -195,7 +195,6 @@ See [Adding a new composite action with compiled dist](#adding-a-new-composite-a
 | `gcp_pipeline_release_image.yaml` | Canonical Docker image build + push to GCP Artifact Registry with OIDC auth. The Apps Team `apps-docker-release.yml` delegates to this. |
 | `generate_version.yaml` | Produces a deterministic version string `<iso-date>-<short-sha>-<run-id>-<run-number>` for consumers that need a build identifier. |
 | `codeql.yml` | GitHub CodeQL security scanning. Generic template — consumers customise language matrix. |
-| `security-build.yml` | SonarCloud scan (`SONAR_TOKEN`) on push to `main`/`dev`/`staging` and on PRs. |
 
 ### Deprecated / Legacy (AWS/ECS)
 
