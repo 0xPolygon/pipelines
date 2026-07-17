@@ -35,6 +35,9 @@ jobs:
         with:
           anthropic_api_key: ${{ secrets.CLAUDE_API_KEY }}
           show_full_output: false
+          # The action refuses non-human actors by default; allow claude[bot] so
+          # PRs it authors still get reviewed.
+          allowed_bots: claude
           claude_args: |
             --model claude-opus-4-6
           plugin_marketplaces: 'https://github.com/anthropics/claude-code.git'
