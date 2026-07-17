@@ -87,7 +87,7 @@ jobs:
       # the lockfile is structurally stale at the release-PR merge commit.
       - run: pnpm install --no-frozen-lockfile --config.link-workspace-packages=true
 
-      - uses: changesets/action@6a0a831ff30acef54f2c6aa1cbbc1096b066edaf # v1.7.0
+      - uses: changesets/action@a45c4d594aa4e2c509dc14a9f2b3b67ba3780d0d # v1.9.0
         with:
           title: 'changesets: Release / Deploy'
           commit: 'release: version packages'
@@ -104,7 +104,7 @@ jobs:
         env:
           GITHUB_TOKEN: ${{ steps.app-token.outputs.token }}
           # No NPM_TOKEN — using OIDC trusted publishing.
-          # changesets/action v1.7.0 only writes auth token to .npmrc when
+          # changesets/action v1.9.0 only writes auth token to .npmrc when
           # NPM_TOKEN is set; leaving it unset allows npm to use OIDC
           # automatically.
 
