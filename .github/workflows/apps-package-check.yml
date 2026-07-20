@@ -1,0 +1,43 @@
+name: Package check
+
+on:
+  workflow_call:
+
+permissions:
+  contents: read
+
+jobs:
+  package-check:
+    name: Package check
+    # changeset-release/* branches contain only version bumps and changelog
+    # entries; they can't change a package's file layout or exports.
+    if: "!startsWith(github.head_ref, 'changeset-release/')"
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
+
+      - uses: pnpm/action-setup@41ff72655975bd51cab0327fa583b6e92b6d3061 # v4
+
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
+        with:
+          node-version-file: .nvmrc
+          check-latest: true
+          cache: pnpm
+
+      - run: pnpm install --frozen-lockfile
+
+      # `check:package` lints the *packed artifact* (publint packs the package
+      # and validates that `exports`/`main`/`types`/`bin` resolve to files that
+      # actually ship), so the compiled output must exist first. The root
+      # `build` script — where one exists — runs workspace packages in
+      # topological order; `--if-present` keeps this a no-op for repos with
+      # nothing to compile.
+      - run: pnpm run --if-present build
+
+      # Same walk as codegen-drift-check: `check:package` is defined per
+      # publishable package (or at the root of a single-package repo), never
+      # only at the workspace root, so a bare root `pnpm run` would miss it.
+      # No-op for repos that ship no `check:package` script anywhere — a fast
+      # green check, safe to wire into the canonical CI trigger before every
+      # consumer has a publishable package.
+      - run: pnpm -r --include-workspace-root run --if-present check:package

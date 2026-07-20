@@ -23,3 +23,10 @@ jobs:
     # script anywhere in the workspace, so this job is safe to keep in the
     # canonical trigger even before any consumer has codegen.
     uses: ./.github/workflows/apps-codegen-drift-check.yml
+
+  package-check:
+    # Publish-artifact hygiene (publint via each publishable package's
+    # `check:package` script) — same discrete-status rationale as
+    # drift-check, and the same no-op behaviour for repos with no
+    # publishable package.
+    uses: ./.github/workflows/apps-package-check.yml

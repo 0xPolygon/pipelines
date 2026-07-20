@@ -31,6 +31,7 @@ in its own separate GitHub Actions job with its own runner.
 | `apps-ci.yml` | Lint, typecheck, and test on PRs | _(none)_ |
 | `apps-changeset-check.yml` | PR gate: requires a changeset; posts/deletes instructions comment | _(none)_ |
 | `apps-codegen-drift-check.yml` | PR gate: runs `pnpm -r --include-workspace-root run --if-present codegen-drift-check` (no-op when no package defines the script) | _(none)_ |
+| `apps-package-check.yml` | PR gate: builds, then runs `pnpm -r --include-workspace-root run --if-present check:package` — publish-artifact hygiene via [publint](https://publint.dev) (no-op when no package defines the script) | _(none)_ |
 | `apps-npm-release.yml` | Changesets release pipeline (version bumps, npm publish, git tags) and on-demand snapshot publish via the `snapshot_tag` input | `CHANGESET_RELEASE_BOT_APP_ID`, `CHANGESET_RELEASE_BOT_APP_PRIVATE_KEY` |
 | `apps-docker-release.yml` | GCP image push on version tag (delegates to `gcp_pipeline_release_image.yaml`) | `build_params_gh_secret_keys` |
 | `apps-pr-labeler.yml` | Labels `.github/`-only PRs as `do-not-notify`; removes label when non-`.github/` changes are added | _(none)_ |
@@ -106,6 +107,30 @@ something to check.
 The canonical `apps-ci-trigger.yml` already wires this in as a second
 job alongside `lint-typecheck-test` — adopting team-wide is a single
 trigger file in each consumer repo, not two.
+
+### `apps-package-check.yml`
+
+A discrete PR gate for publish-artifact hygiene — the class of bug where a
+package builds and tests green but ships broken: an `exports`/`main`/`types`/
+`bin` entry pointing at a file that isn't packed, wrong ESM/CJS format,
+mis-ordered `types` conditions, or a `files` set that silently drops
+`CHANGELOG.md`/`MIGRATION.md`. Runs `pnpm run --if-present build` (so the
+compiled output the pack would ship actually exists), then
+`pnpm -r --include-workspace-root run --if-present check:package`.
+
+The `check:package` convention: each **publishable** package defines the
+script and it validates the packed artifact — currently
+[publint](https://publint.dev) (`"check:package": "publint"` with `publint`
+as a devDependency); more artifact checks (e.g. `attw`) can be appended
+later without renaming the script. It is deliberately _not_ part of
+`pnpm run lint`: publint packs the package, which is publish-readiness
+work, not the fast pre-commit loop. Non-publishable packages simply omit
+the script — `--if-present` keeps the job a fast green no-op, so it is
+safe in the canonical CI trigger before any consumer has a publishable
+package.
+
+See `apps-team-ts-template` (`packages/example-db`) for the canonical
+consumer wiring.
 
 ### `actions/check-dockerfile`
 
