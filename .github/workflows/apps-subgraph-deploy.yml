@@ -1,0 +1,169 @@
+name: Subgraph deploy
+
+# Shared reusable workflow for deploying a single subgraph package from a
+# subgraph monorepo to The Graph Studio. Encapsulates the full pipeline:
+# checkout -> pnpm install -> prepare (mustache-render the manifest from the
+# per-network json) -> graph codegen -> graph build -> graph deploy with a
+# Studio version label and slug.
+#
+# Called from a per-subgraph trigger workflow that owns the event-routing:
+# typically one `push: tags: [<subgraph>@*]` job for changeset-tag
+# auto-deploys (testnet) and one `workflow_dispatch` job for manual reruns
+# and mainnet deploys (gated by environment reviewers). See
+# 0xPolygon/subgraphs for the canonical trigger shape.
+#
+# The version label passed to `graph deploy` is derived inside the workflow:
+#   - On `push` (tag), from `${GITHUB_REF_NAME##*@}` (the tag suffix after
+#     the `@`). Matches the changeset version that produced the tag.
+#   - On `workflow_dispatch`, from the subgraph's `package.json#version`.
+#     Reads from `<subgraph>/package.json` so a manual rerun can't drift
+#     from the last changeset-tagged version.
+#
+# Studio slug naming: testnet slugs carry a network suffix
+# (e.g. `pos-checkpoints-sepolia`); mainnet slugs match the subgraph dir
+# name (e.g. `pos-checkpoints`). This matches Studio's per-account
+# slot-management convention where the bare slug is the mainnet
+# production deployment.
+
+on:
+  workflow_call:
+    inputs:
+      subgraph:
+        description: >
+          Subgraph package directory name at the repo root
+          (e.g. `pos-checkpoints`). Must contain a `package.json` with a
+          `version` field and the `prepare:<network>` / `codegen` /
+          `build` scripts. The directory is also used as the Studio
+          slug stem.
+        type: string
+        required: true
+      network:
+        description: >
+          Target network name (e.g. `sepolia`, `amoy`, `ethereum`,
+          `polygon`). Must be one of the network names the subgraph's
+          `package.json` defines a `prepare:<network>` script for.
+          Determines both the testnet/mainnet slug shape and which
+          `networks/<network>.json` file the manifest is rendered from.
+        type: string
+        required: true
+      environment:
+        description: >
+          GitHub environment to bind the deploy job to. Scope the
+          `GRAPH_STUDIO_DEPLOY_KEY` secret per `(subgraph, network)`
+          via environment-scoped secrets; mainnet environments should
+          carry reviewer protection to gate production deploys.
+        type: string
+        required: true
+    secrets:
+      GRAPH_STUDIO_DEPLOY_KEY:
+        description: >
+          Deploy key for the target Studio slug. Scoped per
+          environment so each (subgraph, network) pair carries its
+          own key.
+        required: true
+
+permissions:
+  contents: read
+
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+    environment: ${{ inputs.environment }}
+    steps:
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
+
+      - uses: pnpm/action-setup@41ff72655975bd51cab0327fa583b6e92b6d3061 # v4
+
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
+        with:
+          node-version-file: .nvmrc
+          cache: pnpm
+
+      - run: pnpm install --frozen-lockfile
+
+      - name: Compute Studio version label
+        id: version
+        # Tag-push: ${{ github.ref_name }} is `<subgraph>@<version>`; strip
+        # everything up to and including the last `@` to get the version.
+        # Dispatch: read the version from the subgraph's package.json so a
+        # manual rerun can't drift from the last changeset-tagged version.
+        # Fallback (other events, e.g. local act invocations): the commit
+        # short SHA — never used by production paths but keeps the
+        # workflow re-runnable in edge contexts.
+        env:
+          SUBGRAPH: ${{ inputs.subgraph }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          case "$GITHUB_EVENT_NAME" in
+            push)
+              label="${GITHUB_REF_NAME##*@}"
+              ;;
+            workflow_dispatch)
+              label="$(jq -r .version "$SUBGRAPH/package.json")"
+              ;;
+            *)
+              label="$(git rev-parse --short HEAD)"
+              ;;
+          esac
+          echo "label=$label" >> "$GITHUB_OUTPUT"
+
+      - name: Compute Studio slug
+        id: slug
+        # Testnet slugs carry a network suffix (pos-checkpoints-sepolia);
+        # mainnet slugs match the subgraph dir name (pos-checkpoints).
+        # An unrecognised network fails the job early rather than
+        # producing a malformed slug Studio would reject.
+        env:
+          SUBGRAPH: ${{ inputs.subgraph }}
+          NETWORK: ${{ inputs.network }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          case "$NETWORK" in
+            sepolia|amoy|holesky|hoodi)
+              slug="${SUBGRAPH}-${NETWORK}"
+              ;;
+            ethereum|polygon)
+              slug="${SUBGRAPH}"
+              ;;
+            *)
+              echo "::error title=Unknown network::Network '$NETWORK' is not recognised. Expected one of: sepolia, amoy, holesky, hoodi, ethereum, polygon."
+              exit 1
+              ;;
+          esac
+          echo "slug=$slug" >> "$GITHUB_OUTPUT"
+
+      - name: Prepare manifest
+        env:
+          NETWORK: ${{ inputs.network }}
+        working-directory: ${{ inputs.subgraph }}
+        shell: bash
+        run: pnpm run "prepare:${NETWORK}"
+
+      - name: Generate AssemblyScript bindings
+        working-directory: ${{ inputs.subgraph }}
+        run: pnpm exec graph codegen
+
+      - name: Build WASM
+        working-directory: ${{ inputs.subgraph }}
+        run: pnpm exec graph build
+
+      - name: Deploy to The Graph Studio
+        # `--deploy-key` inline avoids `graph auth` (writes a stateful
+        # per-user config file). graph-cli 0.95.0 dropped the `--studio`
+        # flag from `graph auth` anyway, so the two-step auth+deploy
+        # pattern is no longer supported.
+        env:
+          GRAPH_STUDIO_DEPLOY_KEY: ${{ secrets.GRAPH_STUDIO_DEPLOY_KEY }}
+          VERSION_LABEL: ${{ steps.version.outputs.label }}
+          SLUG: ${{ steps.slug.outputs.slug }}
+        working-directory: ${{ inputs.subgraph }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          pnpm exec graph deploy \
+            --node https://api.studio.thegraph.com/deploy/ \
+            --deploy-key "$GRAPH_STUDIO_DEPLOY_KEY" \
+            --version-label "$VERSION_LABEL" \
+            "$SLUG"
