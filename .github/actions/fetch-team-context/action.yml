@@ -1,0 +1,44 @@
+name: Fetch review context
+description: Fetch read-only files from configured source repositories with a short-lived app token, for use as review context.
+inputs:
+  app-id:
+    description: GitHub App ID.
+    required: true
+  private-key:
+    description: GitHub App private key.
+    required: true
+  sources:
+    description: >
+      Newline list of `repo:path[,path...]` to fetch from the 0xPolygon org
+      (paths ending in `/` are directories).
+    required: true
+  output-dir:
+    description: Directory to write the fetched files into.
+    required: false
+    default: review-context
+runs:
+  using: composite
+  steps:
+    # The dedicated app is installed only on the source repos with contents:read,
+    # so the minted token is already least-privilege — no extra scoping needed.
+    - id: app-token
+      uses: actions/create-github-app-token@d72941d797fd3113feb6b93fd0dec494b13a2547 # v1
+      with:
+        app-id: ${{ inputs.app-id }}
+        private-key: ${{ inputs.private-key }}
+        owner: 0xPolygon
+        permission-contents: read
+    - name: Fetch
+      shell: bash
+      env:
+        GH_TOKEN: ${{ steps.app-token.outputs.token }}
+        SOURCES: ${{ inputs.sources }}
+        OUTPUT_DIR: ${{ inputs.output-dir }}
+        ACTION_PATH: ${{ github.action_path }}
+      run: bash "$ACTION_PATH/fetch.sh"
+    - name: Revoke token
+      if: always()
+      shell: bash
+      env:
+        GH_TOKEN: ${{ steps.app-token.outputs.token }}
+      run: gh api --method DELETE /installation/token || true

@@ -5,18 +5,74 @@ on:
     secrets:
       CLAUDE_API_KEY:
         required: true
+      # Optional team-context credentials. If absent, the review still runs,
+      # just without injected standards.
+      TEAM_CONTEXT_APP_ID:
+        required: false
+      TEAM_CONTEXT_APP_PRIVATE_KEY:
+        required: false
+      # Newline list of `repo:path[,path...]` to fetch.
+      TEAM_CONTEXT_SOURCES:
+        required: false
 
 permissions: {}
 
+# Run conditions (claude-review inherits via `needs`): same-repo PRs only, skip
+# changeset-release branches, skip the disable-claude-code-review label.
+
 jobs:
-  claude-review:
-    # Only run on PRs from the same repository (not forks) to avoid API costs on external contributions.
-    # Skip changeset-release branches — those are automated version-bump PRs, not code to review.
-    # Skip PRs labelled disable-claude-code-review.
+  # Job 1 — fetches review context with a short-lived, read-only token and hands
+  # it to job 2 as an artifact. No PR content is checked out here, and the token
+  # is never passed to the review job.
+  fetch-context:
     if: >-
       github.event.pull_request.head.repo.full_name == github.repository &&
       !startsWith(github.head_ref, 'changeset-release/') &&
       !contains(github.event.pull_request.labels.*.name, 'disable-claude-code-review')
+    runs-on: ubuntu-latest
+    permissions: {}
+    steps:
+      - id: guard
+        name: Detect whether team-context inputs were provided
+        shell: bash
+        env:
+          APP_ID: ${{ secrets.TEAM_CONTEXT_APP_ID }}
+          SOURCES: ${{ secrets.TEAM_CONTEXT_SOURCES }}
+        run: |
+          if [[ -n "$APP_ID" && -n "$SOURCES" ]]; then
+            echo "enabled=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "enabled=false" >> "$GITHUB_OUTPUT"
+            echo "::notice::Team context not configured — review will run without injected standards."
+          fi
+      - name: Prepare context dir
+        shell: bash
+        # Always produce an artifact so job 2's download never fails. The marker
+        # is non-hidden because upload-artifact excludes dotfiles by default.
+        run: |
+          mkdir -p review-context
+          touch review-context/placeholder
+      - name: Fetch review context
+        if: steps.guard.outputs.enabled == 'true'
+        # TODO(before merge): switch @feat/... back to @main. The branch ref lets
+        # this PR self-test the action before it exists on main; reusable
+        # workflows resolve composite actions by full path, not local ./.
+        uses: 0xPolygon/pipelines/.github/actions/fetch-team-context@feat/claude-review-team-context
+        with:
+          app-id: ${{ secrets.TEAM_CONTEXT_APP_ID }}
+          private-key: ${{ secrets.TEAM_CONTEXT_APP_PRIVATE_KEY }}
+          sources: ${{ secrets.TEAM_CONTEXT_SOURCES }}
+          output-dir: review-context
+      - name: Upload context artifact
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: review-context
+          path: review-context
+          retention-days: 1
+
+  # Job 2 — the review. Separate runner; not given the team-context credentials.
+  claude-review:
+    needs: fetch-context
     runs-on: ubuntu-latest
     permissions:
       contents: read
@@ -29,6 +85,35 @@ jobs:
         uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
         with:
           fetch-depth: 1
+      - name: Download review context
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
+        with:
+          name: review-context
+          path: .review-context
+      - name: Inject team standards into CLAUDE.md
+        shell: bash
+        # Load the standards natively via CLAUDE.md so they're guaranteed in the
+        # review's context; any other fetched docs stay on disk for on-demand reads.
+        run: |
+          std="$(find .review-context -type f -name team-standards.md | head -1)"
+          if [[ -z "$std" ]]; then
+            echo "::warning::No team standards in context — reviewing without them."
+            exit 0
+          fi
+          {
+            echo ""
+            echo "<!-- BEGIN injected team standards (CI review only; not committed) -->"
+            echo "# Team standards (injected for this review)"
+            echo ""
+            echo "These team standards govern this review. Additional reference material"
+            echo "(rationale docs and a service dependency graph for cross-repo impact)"
+            echo "is available on disk under \`.review-context/\` — consult it as needed."
+            echo ""
+            cat "$std"
+            echo ""
+            echo "<!-- END injected team standards -->"
+          } >> CLAUDE.md
+          echo "Injected $(wc -l < "$std") lines of team standards into CLAUDE.md"
       - name: Run Claude Code Review
         id: claude-review
         uses: anthropics/claude-code-action@df37d2f0760a4b5683a6e617c9325bc1a36443f6 # v1
