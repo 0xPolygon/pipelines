@@ -31,7 +31,7 @@ in its own separate GitHub Actions job with its own runner.
 | `apps-ci.yml` | Lint, typecheck, and test on PRs | _(none)_ |
 | `apps-changeset-check.yml` | PR gate: requires a changeset; posts/deletes instructions comment | _(none)_ |
 | `apps-codegen-drift-check.yml` | PR gate: runs `pnpm -r --include-workspace-root run --if-present codegen-drift-check` (no-op when no package defines the script) | _(none)_ |
-| `apps-npm-release.yml` | Changesets release pipeline (version bumps, npm publish, git tags) and on-demand snapshot publish via the `snapshot_tag` input | `CHANGESET_RELEASE_BOT_APP_ID`, `CHANGESET_RELEASE_BOT_APP_PRIVATE_KEY` |
+| `apps-npm-release.yml` | Changesets release pipeline (version bumps, npm publish, git tags), on-demand snapshot publish via the `snapshot_tag` input, and an optional `ci:postversion` hook for consumers that must mirror the released version elsewhere (see below) | `CHANGESET_RELEASE_BOT_APP_ID`, `CHANGESET_RELEASE_BOT_APP_PRIVATE_KEY` |
 | `apps-docker-release.yml` | GCP image push on version tag (delegates to `gcp_pipeline_release_image.yaml`) | `build_params_gh_secret_keys` |
 | `apps-pr-labeler.yml` | Labels `.github/`-only PRs as `do-not-notify`; removes label when non-`.github/` changes are added | _(none)_ |
 | `apps-slack-merge-notify.yml` | Posts a Slack Block Kit message when a PR is merged | `SLACK_WEBHOOK_URL` |
@@ -106,6 +106,54 @@ something to check.
 The canonical `apps-ci-trigger.yml` already wires this in as a second
 job alongside `lint-typecheck-test` — adopting team-wide is a single
 trigger file in each consumer repo, not two.
+
+### `apps-npm-release.yml`: the `ci:postversion` hook
+
+The release job always runs `changeset version` itself — never a
+consumer-defined replacement. Immediately afterward, in the same
+version window, it runs `pnpm -r --include-workspace-root run
+--if-present ci:postversion` — the same recursive `--if-present` form
+`apps-codegen-drift-check.yml` uses — so a hook can live at the repo
+root, in an individual workspace package, or in both at once. Its file
+mutations land in the same Version Packages PR as the version bump. For
+repos where the released version must also be mirrored into another
+file — for example, a Claude Code plugin marketplace mirroring
+`package.json` versions into each plugin's `.claude-plugin/plugin.json`
+— `ci:postversion` is where that mirroring step goes. `ci:postversion`
+must not run `changeset version` itself; the workflow always owns that
+call, so a hook can't accidentally produce a silent no-op release by
+forgetting to call it.
+
+Because changesets computes the changed-package set only _after_ the
+version script returns, `ci:postversion` scripts run on every release
+regardless of whether their own package was bumped — they must be
+idempotent (safe to run when nothing in that package changed).
+
+Every hook is guaranteed to run only after `changeset version`
+completes, but hooks have no guaranteed order relative to each other —
+pnpm runs them in topological order (dependencies before dependents)
+with its own concurrency for independent packages, and the workspace
+root has no privileged position. Hooks must therefore be mutually
+conflict-free (no two hooks write the same files, none depends on
+another's output); a root hook writing into package directories is
+fine as long as no package declares a competing hook over those same
+files. A repo needing a guaranteed sequence must orchestrate it inside
+its own root hook rather than relying on `-r` ordering.
+
+No workflow input controls this; it's detected from the checked-out
+repo, same convention as `ci:publish`. The workflow writes a small
+runner-local wrapper script that runs `changeset version`, then an
+unconditional log line before the recursive `--if-present` run — pnpm's
+own per-package output is the record of which hooks actually ran, and
+a typo'd script name simply produces no output for that package rather
+than a silent, invisible skip. `pnpm -r` aborts on the first failing
+hook, and the wrapper's `set -e` propagates that failure to the job
+before anything is committed or pushed. For a repo with no
+`ci:postversion` script anywhere in the workspace, the wrapper is
+behaviorally identical to running `changeset version` alone. The
+snapshot job is unaffected — it runs `changeset version --snapshot`
+directly, not through the wrapper, and a snapshot is a throwaway
+prerelease with nothing to mirror.
 
 ### `actions/check-dockerfile`
 

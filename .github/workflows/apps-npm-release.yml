@@ -15,6 +15,39 @@ name: npm release
 # section from the matching package's `CHANGELOG.md` and posts it as the
 # release body — same canonical algorithm as changesets-action's
 # upstream behaviour, no custom port required.
+#
+# Convention: the release job always runs `changeset version`; immediately
+# afterward it runs `ci:postversion` — via `pnpm -r --include-workspace-root
+# run --if-present ci:postversion`, the same recursive `--if-present` form
+# `apps-codegen-drift-check.yml` uses — in whichever workspace package(s)
+# declare it (root, individual packages, or both). For repos that must
+# mirror the released version into another file (e.g. a Claude Code plugin
+# marketplace mirroring package.json into plugin.json), that's where the
+# mirroring step goes. Contract: `ci:postversion` must NOT run `changeset
+# version` itself — the workflow always owns that call; the hook only runs
+# after it, so its file mutations land in the same Version Packages PR.
+# This workflow never invokes a consumer's `ci:version` script directly
+# and never skips `changeset version` — a hook that forgot to call it
+# could otherwise produce a silent no-op release. Because changesets only
+# computes the changed-package set AFTER the version script returns,
+# `ci:postversion` scripts run on EVERY release regardless of whether
+# their own package was bumped — they must be idempotent (safe to run
+# when nothing in that package changed). No workflow input controls any
+# of this; it's detected from the checked-out repo, same pattern as the
+# `ci:publish` script.
+#
+# Ordering: every hook is guaranteed to run only AFTER `changeset
+# version` completes — never before, never concurrently with it — but
+# hooks have NO guaranteed order relative to EACH OTHER: pnpm runs them
+# in topological order (dependencies before dependents) with its own
+# concurrency for independent packages, and `--include-workspace-root`
+# gives the root no privileged position. Hooks must therefore be
+# mutually conflict-free (no two hooks write the same files, and no
+# hook depends on another's output) as well as idempotent — a root hook
+# writing into package directories is fine as long as no package
+# declares a competing hook over those same files. A repo needing a
+# guaranteed sequence must orchestrate it inside its own root hook
+# rather than relying on `-r` ordering.
 
 on:
   workflow_call:
@@ -66,6 +99,34 @@ jobs:
           fetch-depth: 1
           token: ${{ steps.app-token.outputs.token }}
 
+      # changesets/action's `version:` input is exec'd via @actions/exec,
+      # which tokenizes the string and spawns the first token directly
+      # (verified: actions/toolkit packages/exec/src/exec.ts —
+      # `tr.argStringToArray(commandLine)` feeding a `ToolRunner` that
+      # spawns the tool; NOT passed through a shell). A compound command
+      # like `changeset version && pnpm run --if-present ci:postversion`
+      # would fail — `&&` is just a literal argv token to a tool that
+      # doesn't understand it. A runner-local wrapper script, invoked as
+      # `bash <path>`, is the only way to sequence "run changeset version,
+      # then optionally run the consumer's hook" as one `version:` value.
+      #
+      # This step writes that wrapper. It's a step here (not a
+      # `.github/scripts/` file in this repo) for the same reason the old
+      # detection step was inline: this reusable workflow's checkout has
+      # no `repository:` override, so it checks out the CALLING repo —
+      # a file living in this repo's own `.github/scripts/` would never
+      # be present on the runner during this workflow's execution.
+      - name: Write changesets version wrapper
+        shell: bash
+        run: |
+          cat <<'SCRIPT' > "$RUNNER_TEMP/changesets-version.sh"
+          #!/usr/bin/env bash
+          set -e
+          pnpm exec changeset version
+          echo "running ci:postversion in every workspace package that declares it (--if-present)"
+          pnpm -r --include-workspace-root run --if-present ci:postversion
+          SCRIPT
+
       - uses: pnpm/action-setup@41ff72655975bd51cab0327fa583b6e92b6d3061 # v4
 
       - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
@@ -95,10 +156,32 @@ jobs:
           # the repository's signed-commits requirement. git-cli (the
           # default) produces unsigned commits.
           commitMode: github-api
+          # Always routes through the wrapper above — for every consumer,
+          # not just ones with a ci:postversion script. For a repo with
+          # none, the wrapper is `changeset version` + a silent
+          # `--if-present` no-op: behaviorally identical to passing no
+          # `version:` at all. `set -e` in the wrapper means a failing
+          # `changeset version` (or a failing hook) still fails this step
+          # loudly — verified changesets/action v1.9.0 commits the
+          # working tree AFTER this whole script returns (src/git.ts
+          # `pushChanges`: github-api mode's `commitChangesFromRepo` uses
+          # `addFromDirectory: this.cwd`, commented "emulate `git add .`";
+          # git-cli mode calls `commitAll` → literal `git add .`), so a
+          # hook's file mutations land in the same Version Packages PR.
+          version: bash ${{ runner.temp }}/changesets-version.sh
           # On a push that consumed all changesets (the release-PR merge),
           # run publish: capture published packages, push their tags, and
           # create a GitHub Release per tag with the body extracted from
           # each package's CHANGELOG.md `## <version>` section.
+          #
+          # publish stays hardcoded to `changeset publish` ON PURPOSE —
+          # this is NOT symmetric with the version-step convention above.
+          # A survey of consumers found ci:publish scripts that predate
+          # this workflow and have drifted from it (extra build steps
+          # this workflow's own install/build steps already cover), so
+          # delegating publish to them would be a fleet-wide behavior
+          # change, not a feature. Don't "fix" this asymmetry without
+          # auditing every consumer's ci:publish script first.
           publish: pnpm exec changeset publish
           createGithubReleases: true
         env:
@@ -118,6 +201,11 @@ jobs:
     # Independent of the release job: snapshots don't push git tags or
     # create GitHub Releases. The standard release path remains the
     # only way to cut a real version.
+    #
+    # The ci:postversion convention (see the release job) deliberately
+    # does NOT apply here: this job runs `changeset version --snapshot`
+    # directly, not through the wrapper, and a snapshot is a throwaway
+    # prerelease — nothing needs mirroring.
     if: inputs.snapshot_tag != ''
     runs-on: ubuntu-latest
     steps:
