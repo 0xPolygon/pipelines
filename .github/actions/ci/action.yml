@@ -1,10 +1,12 @@
 name: CI
 description: >
-  Lint, typecheck, and test a pnpm Node.js project. Runs in the calling
-  job's environment, so env vars composed from secrets in the trigger file
-  are automatically available to the test step without any special passing.
-  Skipped automatically on changeset-release/* branches — those branches
-  contain only version bumps and changelog entries, never code changes.
+  Lint, typecheck, and test a pnpm Node.js project, and verify every
+  publishable package rebuilds on publish (prepublishOnly presence gate).
+  Runs in the calling job's environment, so env vars composed from secrets in
+  the trigger file are automatically available to the test step without any
+  special passing. Skipped automatically on changeset-release/* branches —
+  those branches contain only version bumps and changelog entries, never code
+  changes.
 
 runs:
   using: composite
@@ -19,6 +21,14 @@ runs:
         node-version-file: .nvmrc
         check-latest: true
         cache: pnpm
+    # Fail fast (before install) if any publishable package that compiles lacks a
+    # build-linked `prepublishOnly`. This is a presence check, NOT a build: it
+    # never builds anything, it just refuses to let a package be published
+    # without the one hook that rebuilds it on every publish path (CI and local).
+    - name: Verify prepublishOnly hooks
+      if: "!startsWith(github.head_ref, 'changeset-release/')"
+      run: node "${{ github.action_path }}/verify-prepublish-hooks.mjs"
+      shell: bash
     - run: pnpm install --frozen-lockfile
       if: "!startsWith(github.head_ref, 'changeset-release/')"
       shell: bash
