@@ -2,6 +2,16 @@ name: Claude Code Review
 
 on:
   workflow_call:
+    inputs:
+      mode:
+        description: >-
+          'comment' (default) posts an informational, non-blocking review
+          comment. 'approve' has Claude submit an actual `gh pr review
+          --approve`/`--request-changes` verdict, which counts toward
+          branch-protection required reviews.
+        required: false
+        type: string
+        default: 'comment'
     secrets:
       CLAUDE_API_KEY:
         required: true
@@ -13,8 +23,11 @@ jobs:
     # Only run on PRs from the same repository (not forks) to avoid API costs on external contributions.
     # Skip changeset-release branches — those are automated version-bump PRs, not code to review.
     # Skip PRs labelled disable-claude-code-review.
+    # Skip drafts — most relevant to mode: approve, where an approval verdict
+    # on unfinished work would be meaningless.
     if: >-
       github.event.pull_request.head.repo.full_name == github.repository &&
+      github.event.pull_request.draft == false &&
       !startsWith(github.head_ref, 'changeset-release/') &&
       !contains(github.event.pull_request.labels.*.name, 'disable-claude-code-review')
     runs-on: ubuntu-latest
@@ -29,8 +42,9 @@ jobs:
         uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
         with:
           fetch-depth: 1
-      - name: Run Claude Code Review
-        id: claude-review
+
+      - name: Run Claude Code Review (comment)
+        if: inputs.mode == 'comment'
         uses: anthropics/claude-code-action@df37d2f0760a4b5683a6e617c9325bc1a36443f6 # v1
         with:
           anthropic_api_key: ${{ secrets.CLAUDE_API_KEY }}
@@ -43,5 +57,45 @@ jobs:
           plugin_marketplaces: 'https://github.com/anthropics/claude-code.git'
           plugins: 'code-review@claude-code-plugins'
           prompt: '/code-review:code-review --comment'
+          additional_permissions: |
+            actions: read
+
+      # Claude approves or requests changes directly via `gh pr review` (see
+      # the prompt below), so it needs Bash access to the gh subcommands that
+      # read the diff/existing reviews and submit its verdict.
+      - name: Run Claude Code Review (approve)
+        if: inputs.mode == 'approve'
+        uses: anthropics/claude-code-action@df37d2f0760a4b5683a6e617c9325bc1a36443f6 # v1
+        with:
+          anthropic_api_key: ${{ secrets.CLAUDE_API_KEY }}
+          allowed_bots: claude
+          claude_args: |
+            --model claude-sonnet-4-6
+            --max-turns 60
+            --allowedTools "Read,Grep,Glob,Bash(gh pr diff:*),Bash(gh pr view:*),Bash(gh pr review:*),Bash(gh api:*)"
+          prompt: |
+            You are reviewing pull request #${{ github.event.pull_request.number }} in ${{ github.repository }}.
+
+            Step 1: Check for a prior review from you
+            1. Get your own login: `gh api user --jq '.login'`
+            2. List existing reviews: `gh api repos/${{ github.repository }}/pulls/${{ github.event.pull_request.number }}/reviews`
+            3. If your latest review is `APPROVED`, new commits have made it stale — dismiss it now, before reviewing, so the PR is never mergeable on the strength of an approval that predates the current code: `gh api repos/${{ github.repository }}/pulls/${{ github.event.pull_request.number }}/reviews/{id}/dismissals --method PUT -f message="New commits pushed since approval; re-reviewing" -f event="DISMISS"`
+            4. If your latest review is `CHANGES_REQUESTED`, do **NOT** dismiss it — it must keep blocking the merge until you have actually confirmed the issues are fixed. Your verdict in Step 3 will supersede it automatically (GitHub treats a reviewer's latest review as their current state). Keep its body in mind — you'll need to check whether those specific issues are now fixed.
+
+            Step 2: Review the diff
+            1. Read the full diff: `gh pr diff ${{ github.event.pull_request.number }}`
+            2. Read `AGENTS.md` / `CLAUDE.md` conventions if you need to judge whether the diff follows them.
+            3. If you have a standing `CHANGES_REQUESTED` review from Step 1:
+               - Check whether each issue from that review's body is now fixed by the new commits.
+               - Check whether the new commits introduce any new problems.
+               - Do not re-litigate parts of the diff you already reviewed and had no issue with.
+            4. Otherwise (first review, or the prior review was an approval), check for real, actionable problems: bugs and logic errors, security issues, missing error handling that could cause silent failures, and violations of this repo's conventions.
+            5. Be strict but concise. Only flag things that actually matter — no nitpicks, no praise.
+
+            Step 3: Submit exactly one verdict
+            - No unresolved problems: `gh pr review ${{ github.event.pull_request.number }} --approve -b "Approved."` If you had a standing `CHANGES_REQUESTED` review, this approval supersedes it — do not dismiss it separately.
+            - Unresolved or new problems: `gh pr review ${{ github.event.pull_request.number }} --request-changes -b "Changes needed:\n- issue 1\n- issue 2"` (one line per issue, no elaboration). List every issue that is still open, including carried-over ones from your previous review — this review replaces it as your current verdict.
+
+            You must end by running exactly one `gh pr review` command. Never dismiss a `CHANGES_REQUESTED` review — the only dismissal you ever perform is the stale-approval one in Step 1.
           additional_permissions: |
             actions: read

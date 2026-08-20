@@ -14,5 +14,10 @@ permissions:
 jobs:
   claude-review:
     uses: ./.github/workflows/apps-claude-code-review.yml
+    # Default mode is 'comment' (informational only). Pass mode: approve to
+    # have Claude submit a real gh pr review --approve/--request-changes
+    # verdict that counts toward branch-protection required reviews:
+    # with:
+    #   mode: approve
     secrets:
       CLAUDE_API_KEY: ${{ secrets.CLAUDE_API_KEY }}
