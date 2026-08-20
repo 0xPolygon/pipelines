@@ -2,30 +2,30 @@
 # from 0xPolygon/apps-team-workflows. Other paths remain unowned by this
 # file — existing pipelines workflows keep their implicit ownership.
 
-/.github/workflows/apps-*                      @MaximusHaximus @py-zoid @grajat90 @shan8851
-/.github/actions/ci/                           @MaximusHaximus @py-zoid @grajat90 @shan8851
-/.github/actions/docker-test/                  @MaximusHaximus @py-zoid @grajat90 @shan8851
-/.github/actions/npm-release/                  @MaximusHaximus @py-zoid @grajat90 @shan8851
-/.github/actions/slack-notify/                 @MaximusHaximus @py-zoid @grajat90 @shan8851
-/.github/actions/upsert-changeset-comment/     @MaximusHaximus @py-zoid @grajat90 @shan8851
-/.github/scripts/                              @MaximusHaximus @py-zoid @grajat90 @shan8851
+/.github/workflows/apps-*                      @0xPolygon/product-applications
+/.github/actions/ci/                           @0xPolygon/product-applications
+/.github/actions/docker-test/                  @0xPolygon/product-applications
+/.github/actions/npm-release/                  @0xPolygon/product-applications
+/.github/actions/slack-notify/                 @0xPolygon/product-applications
+/.github/actions/upsert-changeset-comment/     @0xPolygon/product-applications
+/.github/scripts/                              @0xPolygon/product-applications
 
-/packages/                                     @MaximusHaximus @py-zoid @grajat90 @shan8851
-/scripts/                                      @MaximusHaximus @py-zoid @grajat90 @shan8851
-/.changeset/                                   @MaximusHaximus @py-zoid @grajat90 @shan8851
-/.husky/                                       @MaximusHaximus @py-zoid @grajat90 @shan8851
-/.claude/                                      @MaximusHaximus @py-zoid @grajat90 @shan8851
+/packages/                                     @0xPolygon/product-applications
+/scripts/                                      @0xPolygon/product-applications
+/.changeset/                                   @0xPolygon/product-applications
+/.husky/                                       @0xPolygon/product-applications
+/.claude/                                      @0xPolygon/product-applications
 
-/CLAUDE.md                                     @MaximusHaximus @py-zoid @grajat90 @shan8851
-/.gitattributes                                @MaximusHaximus @py-zoid @grajat90 @shan8851
-/.lintstagedrc.js                              @MaximusHaximus @py-zoid @grajat90 @shan8851
-/.markdownlint-cli2.mjs                        @MaximusHaximus @py-zoid @grajat90 @shan8851
-/.nvmrc                                        @MaximusHaximus @py-zoid @grajat90 @shan8851
-/.prettierignore                               @MaximusHaximus @py-zoid @grajat90 @shan8851
-/.prettierrc.json                              @MaximusHaximus @py-zoid @grajat90 @shan8851
-/commitlint.config.js                          @MaximusHaximus @py-zoid @grajat90 @shan8851
-/eslint.config.js                              @MaximusHaximus @py-zoid @grajat90 @shan8851
-/package.json                                  @MaximusHaximus @py-zoid @grajat90 @shan8851
-/pnpm-lock.yaml                                @MaximusHaximus @py-zoid @grajat90 @shan8851
-/pnpm-workspace.yaml                           @MaximusHaximus @py-zoid @grajat90 @shan8851
-/tsconfig.json                                 @MaximusHaximus @py-zoid @grajat90 @shan8851
+/CLAUDE.md                                     @0xPolygon/product-applications
+/.gitattributes                                @0xPolygon/product-applications
+/.lintstagedrc.js                              @0xPolygon/product-applications
+/.markdownlint-cli2.mjs                        @0xPolygon/product-applications
+/.nvmrc                                        @0xPolygon/product-applications
+/.prettierignore                               @0xPolygon/product-applications
+/.prettierrc.json                              @0xPolygon/product-applications
+/commitlint.config.js                          @0xPolygon/product-applications
+/eslint.config.js                              @0xPolygon/product-applications
+/package.json                                  @0xPolygon/product-applications
+/pnpm-lock.yaml                                @0xPolygon/product-applications
+/pnpm-workspace.yaml                           @0xPolygon/product-applications
+/tsconfig.json                                 @0xPolygon/product-applications
