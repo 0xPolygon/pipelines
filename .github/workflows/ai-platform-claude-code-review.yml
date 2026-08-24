@@ -1,0 +1,164 @@
+# .github/workflows/ai-platform-claude-code-review.yml
+#
+# Reusable workflow (on: workflow_call) that has Claude review PRs.
+# AI-platform variant of apps-claude-code-review.yml — kept separate so
+# changes here can't break that workflow's existing consumers. Pairs with
+# ai-platform-claude-autofix.yml: the review verdicts this workflow submits
+# are the events the autofix workflow triggers on.
+#
+# Consumers add a thin trigger workflow in their own repo that owns the
+# event triggers, concurrency, and per-repo configuration, e.g.:
+#
+#   name: Claude Code Review
+#   on:
+#     pull_request:
+#       types: [opened, synchronize, ready_for_review, reopened]
+#   concurrency:
+#     group: claude-review-${{ github.event.pull_request.number }}
+#     cancel-in-progress: true
+#   permissions:
+#     contents: read
+#     pull-requests: write
+#     issues: read
+#     id-token: write
+#     actions: read
+#   jobs:
+#     claude-review:
+#       # Skip bot-triggered updates (the action rejects bot actors anyway, so
+#       # this skips cleanly instead of failing red). claude[bot] is exempted
+#       # so a push from the autofix workflow re-triggers the review.
+#       if: github.event.sender.type != 'Bot' || github.event.sender.login == 'claude[bot]'
+#       uses: 0xPolygon/pipelines/.github/workflows/ai-platform-claude-code-review.yml@main
+#       with:
+#         mode: approve
+#       secrets:
+#         CLAUDE_API_KEY: ${{ secrets.CLAUDE_API_KEY }}
+
+name: Claude Code Review
+
+on:
+  workflow_call:
+    inputs:
+      mode:
+        description: >-
+          'comment' (default) posts an informational, non-blocking review
+          comment. 'approve' has Claude submit an actual `gh pr review
+          --approve`/`--request-changes` verdict, which counts toward
+          branch-protection required reviews.
+        required: false
+        type: string
+        default: 'comment'
+      model:
+        description: Claude model used for the review.
+        type: string
+        required: false
+        default: 'claude-sonnet-4-6'
+    secrets:
+      CLAUDE_API_KEY:
+        required: true
+
+permissions: {}
+
+jobs:
+  claude-review:
+    # Only run on PRs from the same repository (not forks) to avoid API costs on external contributions.
+    # Skip changeset-release branches — those are automated version-bump PRs, not code to review.
+    # Skip PRs labelled disable-claude-code-review.
+    # Skip drafts — most relevant to mode: approve, where an approval verdict
+    # on unfinished work would be meaningless.
+    if: >-
+      github.event.pull_request.head.repo.full_name == github.repository &&
+      github.event.pull_request.draft == false &&
+      !startsWith(github.head_ref, 'changeset-release/') &&
+      !contains(github.event.pull_request.labels.*.name, 'disable-claude-code-review')
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    permissions:
+      contents: read
+      pull-requests: write
+      issues: read
+      id-token: write
+      actions: read
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
+        with:
+          ref: ${{ github.event.pull_request.head.sha }}
+          fetch-depth: 1
+
+      - name: Run Claude Code Review (comment)
+        if: inputs.mode == 'comment'
+        uses: anthropics/claude-code-action@df37d2f0760a4b5683a6e617c9325bc1a36443f6 # v1
+        with:
+          anthropic_api_key: ${{ secrets.CLAUDE_API_KEY }}
+          show_full_output: false
+          # The action refuses non-human actors by default; allow claude[bot] so
+          # PRs it authors still get reviewed.
+          allowed_bots: claude
+          claude_args: |
+            --model ${{ inputs.model }}
+          plugin_marketplaces: 'https://github.com/anthropics/claude-code.git'
+          plugins: 'code-review@claude-code-plugins'
+          prompt: '/code-review:code-review --comment'
+          additional_permissions: |
+            actions: read
+
+      # Claude approves or requests changes directly via `gh pr review` (see
+      # the prompt below), so it needs Bash access to the gh subcommands that
+      # read the diff/existing reviews and submit its verdict. Reviews post as
+      # claude[bot]; on PRs claude[bot] itself authored, the prompt's
+      # self-authored-PR path submits a comment-form verdict instead (GitHub
+      # rejects an author approving its own PR).
+      #
+      # NOTE: the "Changes needed:" comment-review fallback on self-authored
+      # PRs (Step 3) is load-bearing for ai-platform-claude-autofix.yml, whose
+      # fix-review-feedback job triggers on that exact body prefix.
+      - name: Run Claude Code Review (approve)
+        if: inputs.mode == 'approve'
+        uses: anthropics/claude-code-action@df37d2f0760a4b5683a6e617c9325bc1a36443f6 # v1
+        with:
+          anthropic_api_key: ${{ secrets.CLAUDE_API_KEY }}
+          allowed_bots: claude
+          claude_args: |
+            --model ${{ inputs.model }}
+            --max-turns 60
+            --allowedTools "Read,Grep,Glob,Bash(gh pr diff:*),Bash(gh pr view:*),Bash(gh pr review:*),Bash(gh api:*)"
+          prompt: |
+            You are reviewing pull request #${{ github.event.pull_request.number }} in ${{ github.repository }}.
+
+            Step 1: Check for a prior review from you
+
+            1. Get your own bot login: `gh api app --jq '.slug'` returns the app slug (e.g. `claude`); your GitHub login is `{slug}[bot]` (e.g. `claude[bot]`). Do not use `gh api user` — the installation token used for commit signing is a GitHub App token, and `/user` only works with user-to-server OAuth tokens; it 403s for api token based plans (e.g. Enterprise plans).
+            2. List existing reviews: `gh api repos/${{ github.repository }}/pulls/${{ github.event.pull_request.number }}/reviews`
+            3. Get the PR author: `gh api repos/${{ github.repository }}/pulls/${{ github.event.pull_request.number }} --jq '.user.login'`. If the author is your own login (`{slug}[bot]`), this is a **self-authored PR**: GitHub rejects `--approve` and `--request-changes` from a PR's own author with HTTP 422, so you must use the comment-form verdicts in Step 3 — do not attempt the normal forms and fall back ad hoc.
+            4. Find your own latest review by filtering for `login == "{slug}[bot]"`.
+            5. If your latest review is `APPROVED`, new commits have made it stale — dismiss it now, before reviewing, so the PR is never mergeable on the strength of an approval that predates the current code: `gh api repos/${{ github.repository }}/pulls/${{ github.event.pull_request.number }}/reviews/{id}/dismissals --method PUT -f message="New commits pushed since approval; re-reviewing" -f event="DISMISS"` (Comment-form verdicts on a self-authored PR are `COMMENTED`, never block, and cannot be dismissed — skip this for them.)
+            6. If your latest review is `CHANGES_REQUESTED` — or, on a self-authored PR, `COMMENTED` with a body starting `Changes needed:` — do **NOT** dismiss it — it must keep standing until you have actually confirmed the issues are fixed. Your verdict in Step 3 will supersede it automatically (GitHub treats a reviewer's latest review as their current state). Keep its body in mind — you'll need to check whether those specific issues are now fixed.
+
+            Step 2: Review the diff
+
+            1. Read the full diff: `gh pr diff ${{ github.event.pull_request.number }}`
+            2. Read `AGENTS.md` / `CLAUDE.md` conventions if you need to judge whether the diff follows them.
+            3. If you have a standing `CHANGES_REQUESTED` review (or its comment-form `Changes needed:` equivalent on a self-authored PR) from Step 1:
+               - Read the PR conversation for disputes and withdrawals of each carried-over issue: `gh api repos/${{ github.repository }}/issues/${{ github.event.pull_request.number }}/comments --paginate --jq '.[] | {user: .user.login, body}'`. An issue is **withdrawn** if a later comment from your own login (`{slug}[bot]`) retracts it (e.g. "finding withdrawn"), or a human rebutted it and you (or the rebuttal, if you never responded) verifiably hold up against the current code. Do NOT re-raise a withdrawn issue unless new commits have actually reintroduced the problem — re-deriving the same finding from scratch on every push creates an unresolvable review loop.
+               - Check whether each remaining (non-withdrawn) issue from that review's body is now fixed by the new commits.
+               - Check whether the new commits introduce any new problems.
+               - Do not re-litigate parts of the diff you already reviewed and had no issue with.
+            4. Otherwise (first review, or the prior review was an approval), check for real, actionable problems: bugs and logic errors, security issues, missing error handling that could cause silent failures, and violations of this repo's conventions. Before flagging an issue, check the PR conversation (same `gh api .../comments` call as above) for a prior withdrawal of that same finding by your own login — do not resurrect a finding you already retracted unless the code has changed in a way that reintroduces it.
+            5. Be strict but concise. Only flag things that actually matter — no nitpicks, no praise.
+
+            Step 3: Submit exactly one verdict
+
+            Normal PR (author is not you):
+
+            - No unresolved problems: `gh pr review ${{ github.event.pull_request.number }} --approve -b "Approved."` If you had a standing `CHANGES_REQUESTED` review, this approval supersedes it — do not dismiss it separately.
+            - Unresolved or new problems: `gh pr review ${{ github.event.pull_request.number }} --request-changes -b "Changes needed:\n- issue 1\n- issue 2"` (one line per issue, no elaboration). List every issue that is still open, including carried-over ones from your previous review — this review replaces it as your current verdict. Never downgrade to `--comment` on a normal PR — a comment-state review does not block the merge.
+
+            Self-authored PR (author from Step 1 is `{slug}[bot]`): GitHub blocks `--approve` and `--request-changes` on your own PR, so submit the same verdict as a comment review instead:
+
+            - No unresolved problems: `gh pr review ${{ github.event.pull_request.number }} --comment -b "Approved."`
+            - Unresolved or new problems: `gh pr review ${{ github.event.pull_request.number }} --comment -b "Changes needed:\n- issue 1\n- issue 2"` — the body MUST start with exactly `Changes needed:`. That prefix is load-bearing: the autofix workflow treats a comment review from you that starts with it as changes-requested and triggers on it.
+
+            You must end by running exactly one `gh pr review` command. Never dismiss a `CHANGES_REQUESTED` review — the only dismissal you ever perform is the stale-approval one in Step 1.
+          additional_permissions: |
+            actions: read

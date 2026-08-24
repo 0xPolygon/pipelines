@@ -1,0 +1,45 @@
+# Thin trigger for the Claude PR Autofix reusable workflow
+# (ai-platform-claude-autofix.yml). This file owns the event triggers, permissions,
+# concurrency, and per-repo configuration; all logic lives in the reusable
+# workflow. Consuming repos copy this file and point `uses:` at:
+#   0xPolygon/pipelines/.github/workflows/ai-platform-claude-autofix.yml@main
+# (This repo must allow org access: Settings -> Actions -> Access.)
+
+name: Claude Autofix
+
+on:
+  pull_request_review:
+    types: [submitted]
+  check_suite:
+    types: [completed]
+
+# One autofix run per PR at a time. Concurrency must live here, at the
+# caller: a workflow_call runs inside the caller's run, and a duplicate
+# group in the called workflow could queue behind this one.
+concurrency:
+  group: claude-autofix-${{ github.event.pull_request.number || github.event.check_suite.head_sha || github.run_id }}
+  cancel-in-progress: false
+
+permissions:
+  contents: write
+  pull-requests: write
+  issues: write
+  id-token: write
+  actions: read
+  checks: read
+
+jobs:
+  claude-autofix:
+    uses: ./.github/workflows/ai-platform-claude-autofix.yml
+    secrets:
+      CLAUDE_API_KEY: ${{ secrets.CLAUDE_API_KEY }}
+    with:
+      # Paths the bot must never modify (gitignore-style, one per line).
+      # Empty or absent = nothing denied. Denied wins over allowed_paths
+      # (absent here = all other paths allowed). In most repos, deny
+      # `.github/**` so the bot can't rewrite its own guardrails. In THIS
+      # repo the workflows are the product, so only the autofix files
+      # themselves are off limits.
+      denied_paths: |
+        .github/workflows/ai-platform-claude-autofix.yml
+        .github/workflows/ai-platform-claude-autofix-trigger.yml
