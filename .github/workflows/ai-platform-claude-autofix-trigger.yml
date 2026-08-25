@@ -34,11 +34,12 @@ jobs:
     secrets:
       CLAUDE_API_KEY: ${{ secrets.CLAUDE_API_KEY }}
     with:
-      # Paths the bot must never modify (gitignore-style, one per line).
-      # Empty or absent = nothing denied. Denied wins over allowed_paths
-      # (absent here = all other paths allowed). In most repos, deny
-      # `.github/**` so the bot can't rewrite its own guardrails. In THIS
-      # repo the workflows are the product, so only the autofix files
+      # Paths the bot must never modify (gitignore-style file paths or
+      # globs, one per line); everything else is allowed. Omitting this
+      # input entirely uses the default `.github/**`, so most repos need
+      # no `with:` block at all. An explicit value REPLACES the default —
+      # re-list `.github/**` alongside your own patterns to keep it. In
+      # THIS repo the workflows are the product, so only the autofix files
       # themselves are off limits.
       denied_paths: |
         .github/workflows/ai-platform-claude-autofix.yml

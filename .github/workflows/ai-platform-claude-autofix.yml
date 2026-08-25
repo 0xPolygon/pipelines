@@ -39,17 +39,18 @@
 #     bot on a PR; remove it to re-enable.
 #   - Per-run limit: --max-turns caps how long any single run can go.
 #
-# Path policy (allowed_paths / denied_paths inputs): newline-separated
-# gitignore-style patterns controlling which files the bot may modify.
-# Enforced in two layers: the parsed lists are injected into Claude's
-# prompt (advisory), and a post-run hard gate diffs what was actually
-# pushed against the policy — on violation it reverts the branch to its
-# pre-run state (via an API commit, so branch protection requiring
+# Path policy (denied_paths input): newline-separated gitignore-style
+# patterns (exact file paths or globs) the bot must never modify;
+# everything else is allowed. Defaults to .github/** so a bare caller's
+# bot can't rewrite its own guardrails — an explicit caller value REPLACES
+# the default. Enforced in two layers: the parsed list is injected into
+# Claude's prompt (advisory), and a post-run hard gate diffs what was
+# actually pushed against the policy — on violation it reverts the branch
+# to its pre-run state (via an API commit, so branch protection requiring
 # verified commits is satisfied), comments on the PR, and applies the
-# kill-switch label. Denied wins over allowed; entries with no glob
-# characters match exactly one repo-relative path. Invalid patterns fail
-# closed: the run skips with a PR comment instead of falling back to
-# "everything allowed".
+# kill-switch label. Entries with no glob characters match exactly one
+# repo-relative path. Invalid patterns fail closed: the run skips with a
+# PR comment instead of running unrestricted.
 #
 # Security: both jobs run with a write token and repo secrets, so they
 # refuse fork PRs (untrusted code must not run in this privileged context),
@@ -64,20 +65,17 @@ name: Claude PR Autofix
 on:
   workflow_call:
     inputs:
-      allowed_paths:
-        description: >
-          Newline-separated gitignore-style patterns the bot may modify.
-          Empty = all paths allowed.
-        type: string
-        required: false
-        default: ''
       denied_paths:
         description: >
-          Newline-separated gitignore-style patterns the bot must never
-          modify. Empty = nothing denied. Denied wins over allowed.
+          Newline-separated gitignore-style patterns (exact file paths or
+          globs) the bot must never modify. Everything else is allowed.
+          Defaults to .github/** so the bot can't rewrite its own
+          guardrails. NOTE: an explicit value REPLACES this default —
+          re-list .github/** alongside your own patterns if you still want
+          it protected. An empty value denies nothing.
         type: string
         required: false
-        default: ''
+        default: '.github/**'
       max_attempts:
         description: Autofix attempts per PR before stopping with the kill-switch label.
         type: number
@@ -153,28 +151,26 @@ jobs:
       # in its environment. Skipped when no path policy is configured, so an
       # unrestricted caller gains no new network failure mode.
       - name: Install path matcher dependency
-        if: inputs.allowed_paths != '' || inputs.denied_paths != ''
+        if: inputs.denied_paths != ''
         run: python3 -m pip install --quiet pathspec==1.1.1
 
-      # Parse allowed_paths/denied_paths, validate every pattern, and build
-      # the prompt snippet. Fails closed: invalid patterns skip the run with
-      # a PR comment instead of running unrestricted.
+      # Parse denied_paths, validate every pattern, and build the prompt
+      # snippet. Fails closed: invalid patterns skip the run with a PR
+      # comment instead of running unrestricted.
       - name: Parse and validate path policy
         id: policy
         env:
           GH_TOKEN: ${{ github.token }}
           PR_NUMBER: ${{ github.event.pull_request.number }}
-          ALLOWED_PATHS: ${{ inputs.allowed_paths }}
           DENIED_PATHS: ${{ inputs.denied_paths }}
         run: |
           set -euo pipefail
-          printf '%s\n' "$ALLOWED_PATHS" > "$RUNNER_TEMP/allowed_paths.txt"
           printf '%s\n' "$DENIED_PATHS" > "$RUNNER_TEMP/denied_paths.txt"
 
           # Gitignore-style matcher shared by this step (validate) and the
           # post-run hard gate (check, changed paths on stdin, violations on
           # stdout). Entries with no glob characters match exactly one
-          # repo-relative path; denied wins over allowed.
+          # repo-relative path.
           cat > "$RUNNER_TEMP/pathpolicy.py" <<'PYEOF'
           import sys
           import pathspec
@@ -212,19 +208,17 @@ jobs:
 
           mode = sys.argv[1]
           try:
-              a_exact, a_spec = compile_patterns(parse(sys.argv[2]))
-              d_exact, d_spec = compile_patterns(parse(sys.argv[3]))
+              d_exact, d_spec = compile_patterns(parse(sys.argv[2]))
           except ValueError as e:
               print(e, file=sys.stderr)
               sys.exit(2)
           if mode == "validate":
               sys.exit(0)
 
-          allow_restricted = bool(a_exact or a_spec)
           violations = []
           # NUL-delimited path list on stdin (git diff -z); never trim or
           # otherwise alter names — a path with trailing whitespace must not
-          # collapse onto an allowed exact entry.
+          # dodge (or collapse onto) a denied exact entry.
           for raw in sys.stdin.buffer.read().split(b"\0"):
               if not raw:
                   continue
@@ -232,8 +226,6 @@ jobs:
               if f in violations:
                   continue
               if f in d_exact or (d_spec and d_spec.match_file(f)):
-                  violations.append(f)
-              elif allow_restricted and f not in a_exact and not (a_spec and a_spec.match_file(f)):
                   violations.append(f)
           print("\n".join(violations))
           sys.exit(1 if violations else 0)
@@ -243,19 +235,18 @@ jobs:
           echo "script_sha=$(sha256sum "$RUNNER_TEMP/pathpolicy.py" | cut -d' ' -f1)" >> "$GITHUB_OUTPUT"
 
           strip_comments() { grep -Ev '^[[:space:]]*(#|$)' "$1" || true; }
-          ALLOWED_CLEAN=$(strip_comments "$RUNNER_TEMP/allowed_paths.txt")
           DENIED_CLEAN=$(strip_comments "$RUNNER_TEMP/denied_paths.txt")
 
-          if [ -z "$ALLOWED_CLEAN" ] && [ -z "$DENIED_CLEAN" ]; then
+          if [ -z "$DENIED_CLEAN" ]; then
             echo "No path policy configured; all paths allowed."
             { echo "valid=true"; echo "enforce=false"; echo "prompt_block="; } >> "$GITHUB_OUTPUT"
             exit 0
           fi
 
-          if ! python3 "$RUNNER_TEMP/pathpolicy.py" validate "$RUNNER_TEMP/allowed_paths.txt" "$RUNNER_TEMP/denied_paths.txt"; then
+          if ! python3 "$RUNNER_TEMP/pathpolicy.py" validate "$RUNNER_TEMP/denied_paths.txt"; then
             { echo "valid=false"; echo "enforce=false"; echo "prompt_block="; } >> "$GITHUB_OUTPUT"
             gh pr comment "$PR_NUMBER" --repo "${{ github.repository }}" --body \
-              "Claude autofix skipped: the \`allowed_paths\`/\`denied_paths\` configuration in the caller workflow contains an invalid pattern (see the run log). Autofix will not run until the configuration is fixed. ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}"
+              "Claude autofix skipped: the \`denied_paths\` configuration in the caller workflow contains an invalid pattern (see the run log). Autofix will not run until the configuration is fixed. ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}"
             exit 0
           fi
 
@@ -267,14 +258,8 @@ jobs:
             echo "enforce=true"
             echo "prompt_block<<$DELIM"
             echo "PATH RESTRICTIONS:"
-            if [ -n "$ALLOWED_CLEAN" ]; then
-              echo "You may only modify files matching these patterns:"
-              echo "$ALLOWED_CLEAN"
-            fi
-            if [ -n "$DENIED_CLEAN" ]; then
-              echo "You must never modify files matching these patterns:"
-              echo "$DENIED_CLEAN"
-            fi
+            echo "You must never modify files matching these patterns:"
+            echo "$DENIED_CLEAN"
             echo "If the fix requires touching a file outside these restrictions, do not push. Comment your diagnosis, apply the ${STOP_LABEL} label, and stop."
             echo "$DELIM"
           } >> "$GITHUB_OUTPUT"
@@ -430,7 +415,6 @@ jobs:
           HEAD_REF: ${{ github.event.pull_request.head.ref }}
           BEFORE_SHA: ${{ steps.before.outputs.sha }}
           SCRIPT_SHA: ${{ steps.policy.outputs.script_sha }}
-          ALLOWED_PATHS: ${{ inputs.allowed_paths }}
           DENIED_PATHS: ${{ inputs.denied_paths }}
         run: |
           set -euo pipefail
@@ -467,9 +451,9 @@ jobs:
           # unvetted push standing silently.
           unverifiable() {
             if try_revert; then
-              fail_closed "Claude autofix could not verify the pushed changes against \`allowed_paths\`/\`denied_paths\` ($1). The branch was reverted to its pre-run state as a precaution. Remove the \`$STOP_LABEL\` label to re-enable the bot. Run log: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}"
+              fail_closed "Claude autofix could not verify the pushed changes against \`denied_paths\` ($1). The branch was reverted to its pre-run state as a precaution. Remove the \`$STOP_LABEL\` label to re-enable the bot. Run log: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}"
             else
-              fail_closed "Claude autofix could not verify the pushed changes against \`allowed_paths\`/\`denied_paths\` ($1), and the pushed range could not be safely auto-reverted (it contains commits not attributable to the bot). A human must review the branch. Remove the \`$STOP_LABEL\` label to re-enable the bot. Run log: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}"
+              fail_closed "Claude autofix could not verify the pushed changes against \`denied_paths\` ($1), and the pushed range could not be safely auto-reverted (it contains commits not attributable to the bot). A human must review the branch. Remove the \`$STOP_LABEL\` label to re-enable the bot. Run log: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}"
             fi
           }
           AFTER_SHA=$(git ls-remote origin "refs/heads/$HEAD_REF" | cut -f1)
@@ -479,10 +463,9 @@ jobs:
           fi
           git fetch origin "$HEAD_REF"
 
-          # Rebuild the pattern files from trusted workflow inputs and verify
+          # Rebuild the pattern file from the trusted workflow input and verify
           # the matcher script still hashes to what the pre-run validation
           # step recorded — step outputs are beyond Claude's reach.
-          printf '%s\n' "$ALLOWED_PATHS" > "$RUNNER_TEMP/allowed_paths.txt"
           printf '%s\n' "$DENIED_PATHS" > "$RUNNER_TEMP/denied_paths.txt"
           if [ ! -f "$RUNNER_TEMP/pathpolicy.py" ] || [ "$(sha256sum "$RUNNER_TEMP/pathpolicy.py" | cut -d' ' -f1)" != "$SCRIPT_SHA" ]; then
             unverifiable "the policy matcher was modified or removed during the run"
@@ -505,7 +488,7 @@ jobs:
             git diff --name-only --no-renames -z "$c^" "$c" >> "$RUNNER_TEMP/changed_paths.zlist"
           done
           set +e
-          VIOLATIONS=$(python3 "$RUNNER_TEMP/pathpolicy.py" check "$RUNNER_TEMP/allowed_paths.txt" "$RUNNER_TEMP/denied_paths.txt" \
+          VIOLATIONS=$(python3 "$RUNNER_TEMP/pathpolicy.py" check "$RUNNER_TEMP/denied_paths.txt" \
             < "$RUNNER_TEMP/changed_paths.zlist")
           RC=$?
           set -e
@@ -519,9 +502,9 @@ jobs:
           echo "Path policy violations:"
           echo "$VIOLATIONS"
           if try_revert; then
-            fail_closed "Claude autofix modified files outside its allowed paths and the branch has been reverted to its pre-run state. Violating paths: $(echo "$VIOLATIONS" | tr '\n' ' '). Configured in the caller workflow's \`allowed_paths\`/\`denied_paths\`. A human needs to take over; remove the \`$STOP_LABEL\` label to re-enable the bot."
+            fail_closed "Claude autofix modified files in its denied paths and the branch has been reverted to its pre-run state. Violating paths: $(echo "$VIOLATIONS" | tr '\n' ' '). Configured via the \`denied_paths\` input (default: \`.github/**\`). A human needs to take over; remove the \`$STOP_LABEL\` label to re-enable the bot."
           else
-            fail_closed "Claude autofix modified files outside its allowed paths (violating paths: $(echo "$VIOLATIONS" | tr '\n' ' ')), but the pushed range contains commits not attributable to the bot, so nothing was reverted automatically. A human must clean up the branch. Remove the \`$STOP_LABEL\` label to re-enable the bot."
+            fail_closed "Claude autofix modified files in its denied paths (violating paths: $(echo "$VIOLATIONS" | tr '\n' ' ')), but the pushed range contains commits not attributable to the bot, so nothing was reverted automatically. A human must clean up the branch. Remove the \`$STOP_LABEL\` label to re-enable the bot."
           fi
 
       # If the action step above errors out (hits --max-turns, crashes, etc.)
@@ -622,12 +605,12 @@ jobs:
       # Pinned to the audited version; see the note on the fix-review-feedback
       # job's step of the same name.
       - name: Install path matcher dependency
-        if: steps.pr.outputs.proceed == 'true' && (inputs.allowed_paths != '' || inputs.denied_paths != '')
+        if: steps.pr.outputs.proceed == 'true' && inputs.denied_paths != ''
         run: python3 -m pip install --quiet pathspec==1.1.1
 
-      # Parse allowed_paths/denied_paths, validate every pattern, and build
-      # the prompt snippet. Fails closed: invalid patterns skip the run with
-      # a PR comment instead of running unrestricted. Same logic as the
+      # Parse denied_paths, validate every pattern, and build the prompt
+      # snippet. Fails closed: invalid patterns skip the run with a PR
+      # comment instead of running unrestricted. Same logic as the
       # fix-review-feedback job's step of the same name.
       - name: Parse and validate path policy
         id: policy
@@ -635,17 +618,15 @@ jobs:
         env:
           GH_TOKEN: ${{ github.token }}
           PR_NUMBER: ${{ steps.pr.outputs.pr_number }}
-          ALLOWED_PATHS: ${{ inputs.allowed_paths }}
           DENIED_PATHS: ${{ inputs.denied_paths }}
         run: |
           set -euo pipefail
-          printf '%s\n' "$ALLOWED_PATHS" > "$RUNNER_TEMP/allowed_paths.txt"
           printf '%s\n' "$DENIED_PATHS" > "$RUNNER_TEMP/denied_paths.txt"
 
           # Gitignore-style matcher shared by this step (validate) and the
           # post-run hard gate (check, changed paths on stdin, violations on
           # stdout). Entries with no glob characters match exactly one
-          # repo-relative path; denied wins over allowed.
+          # repo-relative path.
           cat > "$RUNNER_TEMP/pathpolicy.py" <<'PYEOF'
           import sys
           import pathspec
@@ -683,19 +664,17 @@ jobs:
 
           mode = sys.argv[1]
           try:
-              a_exact, a_spec = compile_patterns(parse(sys.argv[2]))
-              d_exact, d_spec = compile_patterns(parse(sys.argv[3]))
+              d_exact, d_spec = compile_patterns(parse(sys.argv[2]))
           except ValueError as e:
               print(e, file=sys.stderr)
               sys.exit(2)
           if mode == "validate":
               sys.exit(0)
 
-          allow_restricted = bool(a_exact or a_spec)
           violations = []
           # NUL-delimited path list on stdin (git diff -z); never trim or
           # otherwise alter names — a path with trailing whitespace must not
-          # collapse onto an allowed exact entry.
+          # dodge (or collapse onto) a denied exact entry.
           for raw in sys.stdin.buffer.read().split(b"\0"):
               if not raw:
                   continue
@@ -703,8 +682,6 @@ jobs:
               if f in violations:
                   continue
               if f in d_exact or (d_spec and d_spec.match_file(f)):
-                  violations.append(f)
-              elif allow_restricted and f not in a_exact and not (a_spec and a_spec.match_file(f)):
                   violations.append(f)
           print("\n".join(violations))
           sys.exit(1 if violations else 0)
@@ -714,19 +691,18 @@ jobs:
           echo "script_sha=$(sha256sum "$RUNNER_TEMP/pathpolicy.py" | cut -d' ' -f1)" >> "$GITHUB_OUTPUT"
 
           strip_comments() { grep -Ev '^[[:space:]]*(#|$)' "$1" || true; }
-          ALLOWED_CLEAN=$(strip_comments "$RUNNER_TEMP/allowed_paths.txt")
           DENIED_CLEAN=$(strip_comments "$RUNNER_TEMP/denied_paths.txt")
 
-          if [ -z "$ALLOWED_CLEAN" ] && [ -z "$DENIED_CLEAN" ]; then
+          if [ -z "$DENIED_CLEAN" ]; then
             echo "No path policy configured; all paths allowed."
             { echo "valid=true"; echo "enforce=false"; echo "prompt_block="; } >> "$GITHUB_OUTPUT"
             exit 0
           fi
 
-          if ! python3 "$RUNNER_TEMP/pathpolicy.py" validate "$RUNNER_TEMP/allowed_paths.txt" "$RUNNER_TEMP/denied_paths.txt"; then
+          if ! python3 "$RUNNER_TEMP/pathpolicy.py" validate "$RUNNER_TEMP/denied_paths.txt"; then
             { echo "valid=false"; echo "enforce=false"; echo "prompt_block="; } >> "$GITHUB_OUTPUT"
             gh pr comment "$PR_NUMBER" --repo "${{ github.repository }}" --body \
-              "Claude autofix skipped: the \`allowed_paths\`/\`denied_paths\` configuration in the caller workflow contains an invalid pattern (see the run log). Autofix will not run until the configuration is fixed. ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}"
+              "Claude autofix skipped: the \`denied_paths\` configuration in the caller workflow contains an invalid pattern (see the run log). Autofix will not run until the configuration is fixed. ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}"
             exit 0
           fi
 
@@ -738,14 +714,8 @@ jobs:
             echo "enforce=true"
             echo "prompt_block<<$DELIM"
             echo "PATH RESTRICTIONS:"
-            if [ -n "$ALLOWED_CLEAN" ]; then
-              echo "You may only modify files matching these patterns:"
-              echo "$ALLOWED_CLEAN"
-            fi
-            if [ -n "$DENIED_CLEAN" ]; then
-              echo "You must never modify files matching these patterns:"
-              echo "$DENIED_CLEAN"
-            fi
+            echo "You must never modify files matching these patterns:"
+            echo "$DENIED_CLEAN"
             echo "If the fix requires touching a file outside these restrictions, do not push. Comment your diagnosis, apply the ${STOP_LABEL} label, and stop."
             echo "$DELIM"
           } >> "$GITHUB_OUTPUT"
@@ -877,7 +847,6 @@ jobs:
           HEAD_REF: ${{ steps.pr.outputs.head_ref }}
           BEFORE_SHA: ${{ steps.before.outputs.sha }}
           SCRIPT_SHA: ${{ steps.policy.outputs.script_sha }}
-          ALLOWED_PATHS: ${{ inputs.allowed_paths }}
           DENIED_PATHS: ${{ inputs.denied_paths }}
         run: |
           set -euo pipefail
@@ -914,9 +883,9 @@ jobs:
           # unvetted push standing silently.
           unverifiable() {
             if try_revert; then
-              fail_closed "Claude autofix could not verify the pushed changes against \`allowed_paths\`/\`denied_paths\` ($1). The branch was reverted to its pre-run state as a precaution. Remove the \`$STOP_LABEL\` label to re-enable the bot. Run log: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}"
+              fail_closed "Claude autofix could not verify the pushed changes against \`denied_paths\` ($1). The branch was reverted to its pre-run state as a precaution. Remove the \`$STOP_LABEL\` label to re-enable the bot. Run log: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}"
             else
-              fail_closed "Claude autofix could not verify the pushed changes against \`allowed_paths\`/\`denied_paths\` ($1), and the pushed range could not be safely auto-reverted (it contains commits not attributable to the bot). A human must review the branch. Remove the \`$STOP_LABEL\` label to re-enable the bot. Run log: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}"
+              fail_closed "Claude autofix could not verify the pushed changes against \`denied_paths\` ($1), and the pushed range could not be safely auto-reverted (it contains commits not attributable to the bot). A human must review the branch. Remove the \`$STOP_LABEL\` label to re-enable the bot. Run log: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}"
             fi
           }
           AFTER_SHA=$(git ls-remote origin "refs/heads/$HEAD_REF" | cut -f1)
@@ -926,10 +895,9 @@ jobs:
           fi
           git fetch origin "$HEAD_REF"
 
-          # Rebuild the pattern files from trusted workflow inputs and verify
+          # Rebuild the pattern file from the trusted workflow input and verify
           # the matcher script still hashes to what the pre-run validation
           # step recorded — step outputs are beyond Claude's reach.
-          printf '%s\n' "$ALLOWED_PATHS" > "$RUNNER_TEMP/allowed_paths.txt"
           printf '%s\n' "$DENIED_PATHS" > "$RUNNER_TEMP/denied_paths.txt"
           if [ ! -f "$RUNNER_TEMP/pathpolicy.py" ] || [ "$(sha256sum "$RUNNER_TEMP/pathpolicy.py" | cut -d' ' -f1)" != "$SCRIPT_SHA" ]; then
             unverifiable "the policy matcher was modified or removed during the run"
@@ -952,7 +920,7 @@ jobs:
             git diff --name-only --no-renames -z "$c^" "$c" >> "$RUNNER_TEMP/changed_paths.zlist"
           done
           set +e
-          VIOLATIONS=$(python3 "$RUNNER_TEMP/pathpolicy.py" check "$RUNNER_TEMP/allowed_paths.txt" "$RUNNER_TEMP/denied_paths.txt" \
+          VIOLATIONS=$(python3 "$RUNNER_TEMP/pathpolicy.py" check "$RUNNER_TEMP/denied_paths.txt" \
             < "$RUNNER_TEMP/changed_paths.zlist")
           RC=$?
           set -e
@@ -966,9 +934,9 @@ jobs:
           echo "Path policy violations:"
           echo "$VIOLATIONS"
           if try_revert; then
-            fail_closed "Claude autofix modified files outside its allowed paths and the branch has been reverted to its pre-run state. Violating paths: $(echo "$VIOLATIONS" | tr '\n' ' '). Configured in the caller workflow's \`allowed_paths\`/\`denied_paths\`. A human needs to take over; remove the \`$STOP_LABEL\` label to re-enable the bot."
+            fail_closed "Claude autofix modified files in its denied paths and the branch has been reverted to its pre-run state. Violating paths: $(echo "$VIOLATIONS" | tr '\n' ' '). Configured via the \`denied_paths\` input (default: \`.github/**\`). A human needs to take over; remove the \`$STOP_LABEL\` label to re-enable the bot."
           else
-            fail_closed "Claude autofix modified files outside its allowed paths (violating paths: $(echo "$VIOLATIONS" | tr '\n' ' ')), but the pushed range contains commits not attributable to the bot, so nothing was reverted automatically. A human must clean up the branch. Remove the \`$STOP_LABEL\` label to re-enable the bot."
+            fail_closed "Claude autofix modified files in its denied paths (violating paths: $(echo "$VIOLATIONS" | tr '\n' ' ')), but the pushed range contains commits not attributable to the bot, so nothing was reverted automatically. A human must clean up the branch. Remove the \`$STOP_LABEL\` label to re-enable the bot."
           fi
 
       # Skipped when the hard gate already posted its own, more specific
