@@ -117,10 +117,9 @@ jobs:
     # changes_requested path.
     #
     # The changes_requested path accepts any reviewer login, including bot
-    # reviewers: claude[bot], Codegenie (which posts reviews under
+    # reviewers: claude[bot] and Codegenie (which posts reviews under
     # github-actions[bot] — it runs on the default workflow token; see
-    # 0xPolygon/codegenie action.yml `github-token`/`bot-login` defaults),
-    # and GitHub Copilot code review (copilot-pull-request-reviewer[bot]).
+    # 0xPolygon/codegenie action.yml `github-token`/`bot-login` defaults).
     if: >-
       github.event_name == 'pull_request_review' &&
       (
@@ -323,15 +322,12 @@ jobs:
           # not the review author, so both identities must be listed where
           # they differ:
           #   - claude[bot]: the Claude reviewer workflow.
-          #   - copilot-pull-request-reviewer[bot] / Copilot: GitHub Copilot
-          #     code review submits reviews as the former, but triggers
-          #     workflow runs with GITHUB_ACTOR="Copilot".
           #   - github-actions[bot]: Codegenie posts reviews under this login
           #     (it uses the default workflow token). Note that events created
           #     with the default GITHUB_TOKEN do not trigger workflow runs, so
           #     this entry only takes effect if Codegenie is configured with a
           #     custom app token/PAT.
-          allowed_bots: 'claude[bot],github-actions[bot],copilot-pull-request-reviewer[bot],Copilot'
+          allowed_bots: 'claude[bot],github-actions[bot]'
           # Visibility: log the full Claude transcript (tool calls, permission
           # denials) and live-update a progress comment on the PR. The
           # transcript can echo repo content into the Actions log; acceptable
