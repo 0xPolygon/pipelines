@@ -96,6 +96,10 @@ on:
 # workflow is workflow_call-only, and a called workflow sharing the caller's
 # concurrency group can queue behind its own caller.
 
+# Baseline: no default token permissions; each job declares exactly what
+# it needs.
+permissions: {}
+
 env:
   STOP_LABEL: ai-needs-human
 
