@@ -1,0 +1,983 @@
+# .github/workflows/ai-platform-claude-autofix.yml
+#
+# Reusable workflow (on: workflow_call) that auto-fixes PRs using Claude
+# Code. Consumers add a thin trigger workflow in their own repo that owns
+# the event triggers, permissions, concurrency, and per-repo configuration
+# (see ai-platform-claude-autofix-trigger.yml in this repo for the template):
+#
+#   jobs:
+#     claude-autofix:
+#       uses: 0xPolygon/pipelines/.github/workflows/ai-platform-claude-autofix.yml@main
+#       secrets:
+#         CLAUDE_API_KEY: ${{ secrets.CLAUDE_API_KEY }}
+#
+# This file contains all the logic and nothing repo-specific.
+#
+# Purely event-driven — two triggering events (delivered via the caller),
+# two jobs, no polling or cross-check coordination:
+#   1. A reviewer (human, automated or AI bot) submits a
+#      changes-requested review -> Claude addresses the feedback and pushes.
+#      (Also fires on claude[bot]'s "Changes needed:" comment reviews — its
+#      changes-requested fallback on PRs it authored itself; see the job's
+#      `if:` below.)
+#   2. A check suite completes with a failure (any workflow or app:
+#      CI, CodeQL, etc. -- no repo-specific workflow names, so this file is
+#      copy-paste portable across repos) -> look up the open PR from the
+#      failing commit SHA, then Claude reads the failure, fixes it, and
+#      pushes. Do not require check_suite.pull_requests; GitHub often
+#      leaves that array empty on PR branches. Failures produced by this
+#      workflow's own jobs are excluded, so a crashed autofix run can't
+#      re-trigger itself.
+#
+# Loop control (three layers):
+#   - Hard attempt cap: every autofix commit ends its subject line with the
+#     [claude-autofix] tag. A gate step counts them on the PR branch and
+#     stops after max_attempts.
+#   - Kill switch: the "ai-needs-human" label. Added automatically at the
+#     attempt cap, and by Claude itself when it stops without pushing
+#     because a human decision is needed. Add it manually to silence the
+#     bot on a PR; remove it to re-enable.
+#   - Per-run limit: --max-turns caps how long any single run can go.
+#
+# Path policy (allowed_paths / denied_paths inputs): newline-separated
+# gitignore-style patterns controlling which files the bot may modify.
+# Enforced in two layers: the parsed lists are injected into Claude's
+# prompt (advisory), and a post-run hard gate diffs what was actually
+# pushed against the policy — on violation it reverts the branch to its
+# pre-run state (via an API commit, so branch protection requiring
+# verified commits is satisfied), comments on the PR, and applies the
+# kill-switch label. Denied wins over allowed; entries with no glob
+# characters match exactly one repo-relative path. Invalid patterns fail
+# closed: the run skips with a PR comment instead of falling back to
+# "everything allowed".
+#
+# Security: both jobs run with a write token and repo secrets, so they
+# refuse fork PRs (untrusted code must not run in this privileged context),
+# and attacker-controllable event fields (branch names) are passed to
+# scripts via env, never interpolated into script bodies.
+#
+# Requires: Claude GitHub App installed + an Anthropic API key passed by
+# the caller as the CLAUDE_API_KEY secret.
+
+name: Claude PR Autofix
+
+on:
+  workflow_call:
+    inputs:
+      allowed_paths:
+        description: >
+          Newline-separated gitignore-style patterns the bot may modify.
+          Empty = all paths allowed.
+        type: string
+        required: false
+        default: ''
+      denied_paths:
+        description: >
+          Newline-separated gitignore-style patterns the bot must never
+          modify. Empty = nothing denied. Denied wins over allowed.
+        type: string
+        required: false
+        default: ''
+      max_attempts:
+        description: Autofix attempts per PR before stopping with the kill-switch label.
+        type: number
+        required: false
+        default: 3
+      model:
+        description: Claude model used by both autofix jobs.
+        type: string
+        required: false
+        default: 'claude-opus-4-8'
+    secrets:
+      CLAUDE_API_KEY:
+        required: true
+
+# Concurrency (one autofix run per PR) lives in the CALLER, not here: this
+# workflow is workflow_call-only, and a called workflow sharing the caller's
+# concurrency group can queue behind its own caller.
+
+# Baseline: no default token permissions; each job declares exactly what
+# it needs.
+permissions: {}
+
+env:
+  STOP_LABEL: ai-needs-human
+
+jobs:
+  # ------------------------------------------------------------------
+  # Job 1: A changes-requested review came in -> fix the feedback
+  # ------------------------------------------------------------------
+  fix-review-feedback:
+    # Besides real changes-requested reviews, also accept a COMMENTED review
+    # from claude[bot] whose body starts with "Changes needed:". That is the
+    # reviewer workflow's fallback verdict on PRs authored by claude[bot]
+    # itself — GitHub rejects REQUEST_CHANGES (and APPROVE) from a PR's own
+    # author with HTTP 422, so on self-authored PRs the reviewer submits the
+    # same verdict as a comment review with that exact body prefix (see the
+    # approve-mode prompt in ai-platform-claude-code-review.yml, Step 3). This fallback
+    # path is claude[bot]-only by design; other bots go through the plain
+    # changes_requested path.
+    #
+    # The changes_requested path accepts any reviewer login, including bot
+    # reviewers: claude[bot], Codegenie (which posts reviews under
+    # github-actions[bot] — it runs on the default workflow token; see
+    # 0xPolygon/codegenie action.yml `github-token`/`bot-login` defaults),
+    # and GitHub Copilot code review (copilot-pull-request-reviewer[bot]).
+    if: >-
+      github.event_name == 'pull_request_review' &&
+      (
+        github.event.review.state == 'changes_requested' ||
+        (
+          github.event.review.state == 'commented' &&
+          github.event.review.user.login == 'claude[bot]' &&
+          startsWith(github.event.review.body, 'Changes needed:')
+        )
+      ) &&
+      github.event.pull_request.head.repo.full_name == github.repository &&
+      !contains(github.event.pull_request.labels.*.name, 'ai-needs-human')
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+      pull-requests: write
+      issues: write
+      id-token: write
+      actions: read
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event.pull_request.head.sha }}
+          fetch-depth: 0
+
+      # Pinned to the audited version — enforcement semantics depend on exact
+      # matcher behavior. Separate step so the install runs without GH_TOKEN
+      # in its environment. Skipped when no path policy is configured, so an
+      # unrestricted caller gains no new network failure mode.
+      - name: Install path matcher dependency
+        if: inputs.allowed_paths != '' || inputs.denied_paths != ''
+        run: python3 -m pip install --quiet pathspec==1.1.1
+
+      # Parse allowed_paths/denied_paths, validate every pattern, and build
+      # the prompt snippet. Fails closed: invalid patterns skip the run with
+      # a PR comment instead of running unrestricted.
+      - name: Parse and validate path policy
+        id: policy
+        env:
+          GH_TOKEN: ${{ github.token }}
+          PR_NUMBER: ${{ github.event.pull_request.number }}
+          ALLOWED_PATHS: ${{ inputs.allowed_paths }}
+          DENIED_PATHS: ${{ inputs.denied_paths }}
+        run: |
+          set -euo pipefail
+          printf '%s\n' "$ALLOWED_PATHS" > "$RUNNER_TEMP/allowed_paths.txt"
+          printf '%s\n' "$DENIED_PATHS" > "$RUNNER_TEMP/denied_paths.txt"
+
+          # Gitignore-style matcher shared by this step (validate) and the
+          # post-run hard gate (check, changed paths on stdin, violations on
+          # stdout). Entries with no glob characters match exactly one
+          # repo-relative path; denied wins over allowed.
+          cat > "$RUNNER_TEMP/pathpolicy.py" <<'PYEOF'
+          import sys
+          import pathspec
+
+          def parse(path):
+              with open(path) as fh:
+                  lines = [l.strip() for l in fh.read().splitlines()]
+              return [l for l in lines if l and not l.startswith("#")]
+
+          def compile_patterns(patterns):
+              exact, globs = set(), []
+              for p in patterns:
+                  # pathspec compiles almost anything without raising, so
+                  # validate what it produced: negation is unsupported by this
+                  # policy, and a pattern that compiles to a null-op (e.g.
+                  # '[]', 'src/[**') would silently match nothing.
+                  if p.startswith("!"):
+                      raise ValueError(f"invalid pattern {p!r}: negation is not supported")
+                  # Trailing-slash entries are gitignore directory patterns —
+                  # they must go through pathspec (an "exact" entry could never
+                  # match: git diff never emits trailing slashes).
+                  if not any(c in p for c in "*?[") and not p.endswith("/"):
+                      exact.add(p.lstrip("/"))
+                  else:
+                      # Compile individually so an invalid pattern names itself.
+                      try:
+                          compiled = pathspec.PathSpec.from_lines("gitwildmatch", [p])
+                      except Exception as e:
+                          raise ValueError(f"invalid pattern {p!r}: {e}")
+                      if not compiled.patterns or compiled.patterns[0].include is None:
+                          raise ValueError(f"invalid pattern {p!r}: compiles to a null pattern")
+                      globs.append(p)
+              spec = pathspec.PathSpec.from_lines("gitwildmatch", globs) if globs else None
+              return exact, spec
+
+          mode = sys.argv[1]
+          try:
+              a_exact, a_spec = compile_patterns(parse(sys.argv[2]))
+              d_exact, d_spec = compile_patterns(parse(sys.argv[3]))
+          except ValueError as e:
+              print(e, file=sys.stderr)
+              sys.exit(2)
+          if mode == "validate":
+              sys.exit(0)
+
+          allow_restricted = bool(a_exact or a_spec)
+          violations = []
+          # NUL-delimited path list on stdin (git diff -z); never trim or
+          # otherwise alter names — a path with trailing whitespace must not
+          # collapse onto an allowed exact entry.
+          for raw in sys.stdin.buffer.read().split(b"\0"):
+              if not raw:
+                  continue
+              f = raw.decode("utf-8", "surrogateescape")
+              if f in violations:
+                  continue
+              if f in d_exact or (d_spec and d_spec.match_file(f)):
+                  violations.append(f)
+              elif allow_restricted and f not in a_exact and not (a_spec and a_spec.match_file(f)):
+                  violations.append(f)
+          print("\n".join(violations))
+          sys.exit(1 if violations else 0)
+          PYEOF
+          # The hard gate re-verifies this hash before trusting the script:
+          # Claude runs with Bash in between and $RUNNER_TEMP is writable.
+          echo "script_sha=$(sha256sum "$RUNNER_TEMP/pathpolicy.py" | cut -d' ' -f1)" >> "$GITHUB_OUTPUT"
+
+          strip_comments() { grep -Ev '^[[:space:]]*(#|$)' "$1" || true; }
+          ALLOWED_CLEAN=$(strip_comments "$RUNNER_TEMP/allowed_paths.txt")
+          DENIED_CLEAN=$(strip_comments "$RUNNER_TEMP/denied_paths.txt")
+
+          if [ -z "$ALLOWED_CLEAN" ] && [ -z "$DENIED_CLEAN" ]; then
+            echo "No path policy configured; all paths allowed."
+            { echo "valid=true"; echo "enforce=false"; echo "prompt_block="; } >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+
+          if ! python3 "$RUNNER_TEMP/pathpolicy.py" validate "$RUNNER_TEMP/allowed_paths.txt" "$RUNNER_TEMP/denied_paths.txt"; then
+            { echo "valid=false"; echo "enforce=false"; echo "prompt_block="; } >> "$GITHUB_OUTPUT"
+            gh pr comment "$PR_NUMBER" --repo "${{ github.repository }}" --body \
+              "Claude autofix skipped: the \`allowed_paths\`/\`denied_paths\` configuration in the caller workflow contains an invalid pattern (see the run log). Autofix will not run until the configuration is fixed. ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}"
+            exit 0
+          fi
+
+          # Random heredoc delimiter so a pattern line can never collide with
+          # it and terminate the multiline output early.
+          DELIM="POLICY_EOF_$(od -An -N8 -tx1 /dev/urandom | tr -d ' \n')"
+          {
+            echo "valid=true"
+            echo "enforce=true"
+            echo "prompt_block<<$DELIM"
+            echo "PATH RESTRICTIONS:"
+            if [ -n "$ALLOWED_CLEAN" ]; then
+              echo "You may only modify files matching these patterns:"
+              echo "$ALLOWED_CLEAN"
+            fi
+            if [ -n "$DENIED_CLEAN" ]; then
+              echo "You must never modify files matching these patterns:"
+              echo "$DENIED_CLEAN"
+            fi
+            echo "If the fix requires touching a file outside these restrictions, do not push. Comment your diagnosis, apply the ${STOP_LABEL} label, and stop."
+            echo "$DELIM"
+          } >> "$GITHUB_OUTPUT"
+
+      # Loop prevention: count prior autofix commits on this branch and
+      # stop (with the kill-switch label) at the cap. Skipped when the path
+      # policy is invalid — that case already commented and nothing will run.
+      - name: Check attempt count
+        id: attempts
+        if: steps.policy.outputs.valid == 'true'
+        env:
+          GH_TOKEN: ${{ github.token }}
+          PR_NUMBER: ${{ github.event.pull_request.number }}
+          BASE_REF: ${{ github.event.pull_request.base.ref }}
+          MAX_ATTEMPTS: ${{ inputs.max_attempts }}
+        run: |
+          set -euo pipefail
+          # Fail loudly on a non-integer input (e.g. 1.5): the -ge test below
+          # would error inside the if-condition and fall through to
+          # proceed=true, silently disabling the cap.
+          case "$MAX_ATTEMPTS" in
+            ''|*[!0-9]*) echo "::error::max_attempts must be a positive integer (got '$MAX_ATTEMPTS')"; exit 1;;
+          esac
+          [ "$MAX_ATTEMPTS" -ge 1 ] || { echo "::error::max_attempts must be at least 1"; exit 1; }
+          ATTEMPTS=$(git log --oneline "origin/$BASE_REF..HEAD" | grep -c '\[claude-autofix\]' || true)
+          echo "Prior autofix attempts on this PR: $ATTEMPTS (max: $MAX_ATTEMPTS)"
+          if [ "$ATTEMPTS" -ge "$MAX_ATTEMPTS" ]; then
+            echo "proceed=false" >> "$GITHUB_OUTPUT"
+            gh pr edit "$PR_NUMBER" --repo "${{ github.repository }}" --add-label "$STOP_LABEL"
+            gh pr comment "$PR_NUMBER" --repo "${{ github.repository }}" --body \
+              "Claude autofix has hit its limit of $MAX_ATTEMPTS attempts on this PR and is stopping. A human needs to take over. Remove the \`$STOP_LABEL\` label to re-enable the bot after intervening."
+          else
+            echo "proceed=true" >> "$GITHUB_OUTPUT"
+          fi
+
+      # The hard gate below diffs the remote branch against this pre-run
+      # snapshot; commit signing means autofix commits land on the remote
+      # via the API, not in this checkout.
+      - name: Record branch head before autofix
+        id: before
+        if: steps.attempts.outputs.proceed == 'true' && steps.policy.outputs.enforce == 'true'
+        env:
+          HEAD_REF: ${{ github.event.pull_request.head.ref }}
+        run: |
+          set -euo pipefail
+          echo "sha=$(git ls-remote origin "refs/heads/$HEAD_REF" | cut -f1)" >> "$GITHUB_OUTPUT"
+
+      - name: Fix review feedback
+        # The trailing clause makes the gate coupling explicit: when the
+        # policy is enforced, Claude must not run unless the pre-run head
+        # snapshot (which the hard gate diffs against) was recorded.
+        if: >-
+          steps.attempts.outputs.proceed == 'true' &&
+          steps.policy.outputs.valid == 'true' &&
+          (steps.policy.outputs.enforce != 'true' || steps.before.outcome == 'success')
+        uses: anthropics/claude-code-action@e2a4b761cd77a1138a5b41410eda9b28581f9bcd # v1.0.196
+        with:
+          anthropic_api_key: ${{ secrets.CLAUDE_API_KEY }}
+          # Required so reviews posted by bot reviewers can trigger a run.
+          # The action validates the workflow-triggering actor (github.actor),
+          # not the review author, so both identities must be listed where
+          # they differ:
+          #   - claude[bot]: the Claude reviewer workflow.
+          #   - copilot-pull-request-reviewer[bot] / Copilot: GitHub Copilot
+          #     code review submits reviews as the former, but triggers
+          #     workflow runs with GITHUB_ACTOR="Copilot".
+          #   - github-actions[bot]: Codegenie posts reviews under this login
+          #     (it uses the default workflow token). Note that events created
+          #     with the default GITHUB_TOKEN do not trigger workflow runs, so
+          #     this entry only takes effect if Codegenie is configured with a
+          #     custom app token/PAT.
+          allowed_bots: 'claude[bot],github-actions[bot],copilot-pull-request-reviewer[bot],Copilot'
+          # Visibility: log the full Claude transcript (tool calls, permission
+          # denials) and live-update a progress comment on the PR. The
+          # transcript can echo repo content into the Actions log; acceptable
+          # for a private repo, revisit before making the repo public.
+          show_full_output: true
+          track_progress: true
+          # Sign commits via the GitHub API so autofix commits satisfy branch
+          # protection rules that require verified commits. With this on, the
+          # action commits through its file-ops tools instead of raw
+          # `git commit && git push`. Trade-off: no git CLI rebase /
+          # cherry-pick / interactive history while this is on.
+          # See https://github.com/anthropics/claude-code-action/blob/main/docs/security.md
+          use_commit_signing: true
+          prompt: |
+            REPO: ${{ github.repository }}
+            PR NUMBER: ${{ github.event.pull_request.number }}
+
+            A reviewer requested changes on this PR. Address the review
+            feedback that blocks approval.
+
+            ASSESS:
+            1. Read the review feedback: `gh pr view ${{ github.event.pull_request.number }} --comments`
+               and `gh api repos/${{ github.repository }}/pulls/${{ github.event.pull_request.number }}/comments`
+               for requested changes and inline comments.
+            2. Check the git log first: if a prior [claude-autofix] commit
+               already attempted a fix for an item and it was re-raised, do not
+               repeat the same approach. Try a meaningfully different fix or
+               explain why the current code is correct.
+
+            FIX:
+            3. Address every actionable requested change. Follow existing code
+               style and CLAUDE.md if present. Never delete, skip, or weaken
+               tests to get green.
+
+            REPORT:
+            4. Commit your changes to the current branch with the
+               mcp__github_file_ops__commit_files tool (NOT raw `git add` /
+               `git commit` / `git push` -- commit signing is enabled, and only
+               API commits are signed). Commit messages MUST
+               follow Conventional Commits (`type(scope): description`) AND MUST
+               end the subject line with the tag "[claude-autofix]". Example:
+               `fix(auth): handle expired session in middleware [claude-autofix]`
+               The tag is how the loop-prevention gate counts attempts; omitting
+               it breaks the safety mechanism.
+            5. Reply via `gh pr comment` summarizing what you changed. For
+               feedback you intentionally did NOT act on, explain why.
+
+            If there is genuinely nothing actionable, do NOT push an empty or
+            cosmetic commit. Just reply with a comment and stop.
+
+            Do not force-push. Do not modify unrelated code. If feedback
+            requires a product decision, ask in a comment instead of guessing --
+            and when you do, also run
+            `gh pr edit ${{ github.event.pull_request.number }} --add-label ${{ env.STOP_LABEL }} --repo ${{ github.repository }}`
+            so the PR is flagged for a human (this case pushes no commit, so
+            the attempt cap alone would never catch it). A human removes the
+            label once they've answered.
+
+            ${{ steps.policy.outputs.prompt_block }}
+          claude_args: |
+            --model ${{ inputs.model }}
+            --max-turns 60
+            --allowedTools "Bash,Read,Edit,Write,Grep,Glob,mcp__github_file_ops__commit_files,mcp__github_file_ops__delete_files"
+
+      # Hard gate: prompt compliance is advisory only. Diff what was actually
+      # pushed against the path policy; on violation, revert the branch to
+      # its pre-run state with an API commit (signed, so branch protection
+      # requiring verified commits is satisfied), comment, and apply the
+      # kill-switch label. The revert commit carries the [claude-autofix]
+      # tag so a reverted violation still counts as an attempt. Runs with
+      # always() so a crashed Claude step that already pushed is still gated.
+      # Fails closed: matcher tampering (Claude has Bash and $RUNNER_TEMP is
+      # writable) or a matcher error labels the PR and fails the job rather
+      # than passing the push.
+      - name: Enforce path policy
+        id: gate
+        if: always() && steps.before.outcome == 'success'
+        env:
+          GH_TOKEN: ${{ github.token }}
+          PR_NUMBER: ${{ github.event.pull_request.number }}
+          HEAD_REF: ${{ github.event.pull_request.head.ref }}
+          BEFORE_SHA: ${{ steps.before.outputs.sha }}
+          SCRIPT_SHA: ${{ steps.policy.outputs.script_sha }}
+          ALLOWED_PATHS: ${{ inputs.allowed_paths }}
+          DENIED_PATHS: ${{ inputs.denied_paths }}
+        run: |
+          set -euo pipefail
+          # Label + comment + fail the step. `commented=true` tells the
+          # notify step this failure already produced its own PR comment.
+          fail_closed() {
+            echo "commented=true" >> "$GITHUB_OUTPUT"
+            gh pr edit "$PR_NUMBER" --repo "${{ github.repository }}" --add-label "$STOP_LABEL"
+            gh pr comment "$PR_NUMBER" --repo "${{ github.repository }}" --body "$1"
+            exit 1
+          }
+          # Revert the branch to its pre-run state, but only when the pushed
+          # range is exclusively this bot's work: every commit must carry the
+          # [claude-autofix] subject tag AND an API-set bot committer
+          # identity (the author field is spoofable via the commits API; the
+          # committer is not). A concurrent Dependabot or other-app commit
+          # fails the tag test and blocks the auto-revert. The ref update is
+          # fast-forward-only, so a push landing after AFTER_SHA makes it
+          # error rather than clobber. Returns 1 when the range isn't safely
+          # ours — callers escalate to a human instead.
+          try_revert() {
+            git merge-base --is-ancestor "$BEFORE_SHA" "$AFTER_SHA" || return 1
+            UNOWNED=$(git log --format='%cn <%ce>|%s' "$BEFORE_SHA..$AFTER_SHA" \
+              | grep -Ev '^([^|]*\[bot\][^|]*|GitHub <noreply@github\.com>)\|.*\[claude-autofix\]' || true)
+            [ -z "$UNOWNED" ] || return 1
+            TREE=$(gh api "repos/${{ github.repository }}/git/commits/$BEFORE_SHA" -q '.tree.sha')
+            REVERT=$(gh api "repos/${{ github.repository }}/git/commits" \
+              -f message="revert: undo autofix commits that touched restricted paths [claude-autofix]" \
+              -f tree="$TREE" -f "parents[]=$AFTER_SHA" -q '.sha')
+            gh api -X PATCH "repos/${{ github.repository }}/git/refs/heads/$HEAD_REF" -f sha="$REVERT"
+          }
+          # A push happened but the policy verdict is unavailable: revert if
+          # the range is safely ours, and fail either way — never leave an
+          # unvetted push standing silently.
+          unverifiable() {
+            if try_revert; then
+              fail_closed "Claude autofix could not verify the pushed changes against \`allowed_paths\`/\`denied_paths\` ($1). The branch was reverted to its pre-run state as a precaution. Remove the \`$STOP_LABEL\` label to re-enable the bot. Run log: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}"
+            else
+              fail_closed "Claude autofix could not verify the pushed changes against \`allowed_paths\`/\`denied_paths\` ($1), and the pushed range could not be safely auto-reverted (it contains commits not attributable to the bot). A human must review the branch. Remove the \`$STOP_LABEL\` label to re-enable the bot. Run log: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}"
+            fi
+          }
+          AFTER_SHA=$(git ls-remote origin "refs/heads/$HEAD_REF" | cut -f1)
+          if [ "$AFTER_SHA" = "$BEFORE_SHA" ]; then
+            echo "Branch unchanged; nothing to enforce."
+            exit 0
+          fi
+          git fetch origin "$HEAD_REF"
+
+          # Rebuild the pattern files from trusted workflow inputs and verify
+          # the matcher script still hashes to what the pre-run validation
+          # step recorded — step outputs are beyond Claude's reach.
+          printf '%s\n' "$ALLOWED_PATHS" > "$RUNNER_TEMP/allowed_paths.txt"
+          printf '%s\n' "$DENIED_PATHS" > "$RUNNER_TEMP/denied_paths.txt"
+          if [ ! -f "$RUNNER_TEMP/pathpolicy.py" ] || [ "$(sha256sum "$RUNNER_TEMP/pathpolicy.py" | cut -d' ' -f1)" != "$SCRIPT_SHA" ]; then
+            unverifiable "the policy matcher was modified or removed during the run"
+          fi
+          # The verdict also depends on the pathspec module, which Claude
+          # could have overwritten in site-packages; reinstall it clean.
+          # (In-job tamper-proofing is best-effort — hosted runners grant
+          # the job passwordless sudo.)
+          python3 -m pip install --quiet --force-reinstall --no-cache-dir pathspec==1.1.1 \
+            || unverifiable "the matcher dependency could not be reinstalled"
+
+          # Union the paths touched by EVERY commit in the range — an
+          # endpoint-only diff would miss a denied path that one commit
+          # modifies and a later commit restores. --no-renames so a rename
+          # out of a denied path reports both sides; -z so exotic filenames
+          # reach the matcher unaltered. Exit 0 = compliant, 1 = violations,
+          # anything else = matcher error.
+          : > "$RUNNER_TEMP/changed_paths.zlist"
+          git rev-list "$BEFORE_SHA..$AFTER_SHA" | while read -r c; do
+            git diff --name-only --no-renames -z "$c^" "$c" >> "$RUNNER_TEMP/changed_paths.zlist"
+          done
+          set +e
+          VIOLATIONS=$(python3 "$RUNNER_TEMP/pathpolicy.py" check "$RUNNER_TEMP/allowed_paths.txt" "$RUNNER_TEMP/denied_paths.txt" \
+            < "$RUNNER_TEMP/changed_paths.zlist")
+          RC=$?
+          set -e
+          if [ "$RC" -eq 0 ]; then
+            echo "All pushed paths comply with the path policy."
+            exit 0
+          fi
+          if [ "$RC" -ne 1 ]; then
+            unverifiable "the policy matcher failed to run (exit $RC)"
+          fi
+          echo "Path policy violations:"
+          echo "$VIOLATIONS"
+          if try_revert; then
+            fail_closed "Claude autofix modified files outside its allowed paths and the branch has been reverted to its pre-run state. Violating paths: $(echo "$VIOLATIONS" | tr '\n' ' '). Configured in the caller workflow's \`allowed_paths\`/\`denied_paths\`. A human needs to take over; remove the \`$STOP_LABEL\` label to re-enable the bot."
+          else
+            fail_closed "Claude autofix modified files outside its allowed paths (violating paths: $(echo "$VIOLATIONS" | tr '\n' ' ')), but the pushed range contains commits not attributable to the bot, so nothing was reverted automatically. A human must clean up the branch. Remove the \`$STOP_LABEL\` label to re-enable the bot."
+          fi
+
+      # If the action step above errors out (hits --max-turns, crashes, etc.)
+      # it goes silent — no commit, no PR comment. Tell a human.
+      # Skipped when the hard gate already posted its own, more specific
+      # comment (gate failures without a comment — e.g. a crash before
+      # commenting — still notify).
+      - name: Notify on autofix failure
+        if: failure() && steps.attempts.outputs.proceed == 'true' && steps.gate.outputs.commented != 'true'
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh pr comment "${{ github.event.pull_request.number }}" --repo "${{ github.repository }}" --body \
+            "Claude autofix run failed while addressing review feedback (error, not a normal stop). See the run log: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}"
+
+  # ------------------------------------------------------------------
+  # Job 2: A check suite failed on a PR -> fix the failure
+  # ------------------------------------------------------------------
+  fix-failing-checks:
+    if: >-
+      github.event_name == 'check_suite' &&
+      github.event.check_suite.conclusion == 'failure'
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+      pull-requests: write
+      issues: write
+      id-token: write
+      actions: read
+      checks: read
+    steps:
+      # check_suite often omits pull_requests on PR branches. Resolve the
+      # open PR from the failing commit SHA instead, then check the
+      # kill-switch label, that the PR isn't from a fork (this job runs
+      # with a write token and secrets), and that at least one failing
+      # check on the head SHA is NOT one of this workflow's own jobs -- a
+      # crashed autofix run produces a failing suite too, and reacting to it
+      # would loop forever.
+      - name: Resolve PR and check preconditions
+        id: pr
+        env:
+          GH_TOKEN: ${{ github.token }}
+          HEAD_SHA: ${{ github.event.check_suite.head_sha }}
+          HEAD_BRANCH: ${{ github.event.check_suite.head_branch }}
+        run: |
+          set -euo pipefail
+          echo "proceed=false" >> "$GITHUB_OUTPUT"
+
+          PR_NUMBER=$(gh pr list --repo "${{ github.repository }}" --state open \
+            --search "$HEAD_SHA" --json number --jq '.[0].number // empty')
+          if [ -z "$PR_NUMBER" ] && [ -n "$HEAD_BRANCH" ]; then
+            PR_NUMBER=$(gh pr list --repo "${{ github.repository }}" --state open \
+              --head "$HEAD_BRANCH" --json number --jq '.[0].number // empty')
+          fi
+          if [ -z "$PR_NUMBER" ]; then
+            echo "No open PR for sha=$HEAD_SHA branch=${HEAD_BRANCH:-none}. Nothing to do."
+            exit 0
+          fi
+          echo "pr_number=$PR_NUMBER" >> "$GITHUB_OUTPUT"
+
+          PR_INFO=$(gh pr view "$PR_NUMBER" --repo "${{ github.repository }}" --json baseRefName,headRefName,isCrossRepository,labels)
+          echo "base_ref=$(echo "$PR_INFO" | jq -r '.baseRefName')" >> "$GITHUB_OUTPUT"
+          echo "head_ref=$(echo "$PR_INFO" | jq -r '.headRefName')" >> "$GITHUB_OUTPUT"
+
+          if [ "$(echo "$PR_INFO" | jq -r '.isCrossRepository')" = "true" ]; then
+            echo "Fork PR; refusing to run autofix in a privileged context."
+            echo "proceed=false" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+
+          if echo "$PR_INFO" | jq -e --arg l "$STOP_LABEL" '.labels[] | select(.name == $l)' > /dev/null; then
+            echo "Stop label present. Skipping."
+            echo "proceed=false" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+
+          # Self-exclusion: only proceed if some failing check-run on the
+          # head SHA is NOT one of this workflow's own jobs. As a reusable
+          # workflow the check-run names are compound ("<caller-job> /
+          # <job>", e.g. "claude-autofix / fix-failing-checks"), so match on
+          # the suffix, which also covers a direct (non-reusable) run.
+          FAILED=$(gh api --method GET "repos/${{ github.repository }}/commits/$HEAD_SHA/check-runs" -F per_page=100 \
+            -q '[.check_runs[] | select(.conclusion == "failure" and (((.name == "fix-failing-checks") or (.name | endswith(" / fix-failing-checks")) or (.name == "fix-review-feedback") or (.name | endswith(" / fix-review-feedback"))) | not))] | length')
+          if [ "$FAILED" -eq 0 ]; then
+            echo "Only autofix's own jobs failed on $HEAD_SHA; not re-triggering myself."
+            echo "proceed=false" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+
+          echo "proceed=true" >> "$GITHUB_OUTPUT"
+
+      - uses: actions/checkout@v4
+        if: steps.pr.outputs.proceed == 'true'
+        with:
+          ref: ${{ github.event.check_suite.head_sha }}
+          fetch-depth: 0
+
+      # Pinned to the audited version; see the note on the fix-review-feedback
+      # job's step of the same name.
+      - name: Install path matcher dependency
+        if: steps.pr.outputs.proceed == 'true' && (inputs.allowed_paths != '' || inputs.denied_paths != '')
+        run: python3 -m pip install --quiet pathspec==1.1.1
+
+      # Parse allowed_paths/denied_paths, validate every pattern, and build
+      # the prompt snippet. Fails closed: invalid patterns skip the run with
+      # a PR comment instead of running unrestricted. Same logic as the
+      # fix-review-feedback job's step of the same name.
+      - name: Parse and validate path policy
+        id: policy
+        if: steps.pr.outputs.proceed == 'true'
+        env:
+          GH_TOKEN: ${{ github.token }}
+          PR_NUMBER: ${{ steps.pr.outputs.pr_number }}
+          ALLOWED_PATHS: ${{ inputs.allowed_paths }}
+          DENIED_PATHS: ${{ inputs.denied_paths }}
+        run: |
+          set -euo pipefail
+          printf '%s\n' "$ALLOWED_PATHS" > "$RUNNER_TEMP/allowed_paths.txt"
+          printf '%s\n' "$DENIED_PATHS" > "$RUNNER_TEMP/denied_paths.txt"
+
+          # Gitignore-style matcher shared by this step (validate) and the
+          # post-run hard gate (check, changed paths on stdin, violations on
+          # stdout). Entries with no glob characters match exactly one
+          # repo-relative path; denied wins over allowed.
+          cat > "$RUNNER_TEMP/pathpolicy.py" <<'PYEOF'
+          import sys
+          import pathspec
+
+          def parse(path):
+              with open(path) as fh:
+                  lines = [l.strip() for l in fh.read().splitlines()]
+              return [l for l in lines if l and not l.startswith("#")]
+
+          def compile_patterns(patterns):
+              exact, globs = set(), []
+              for p in patterns:
+                  # pathspec compiles almost anything without raising, so
+                  # validate what it produced: negation is unsupported by this
+                  # policy, and a pattern that compiles to a null-op (e.g.
+                  # '[]', 'src/[**') would silently match nothing.
+                  if p.startswith("!"):
+                      raise ValueError(f"invalid pattern {p!r}: negation is not supported")
+                  # Trailing-slash entries are gitignore directory patterns —
+                  # they must go through pathspec (an "exact" entry could never
+                  # match: git diff never emits trailing slashes).
+                  if not any(c in p for c in "*?[") and not p.endswith("/"):
+                      exact.add(p.lstrip("/"))
+                  else:
+                      # Compile individually so an invalid pattern names itself.
+                      try:
+                          compiled = pathspec.PathSpec.from_lines("gitwildmatch", [p])
+                      except Exception as e:
+                          raise ValueError(f"invalid pattern {p!r}: {e}")
+                      if not compiled.patterns or compiled.patterns[0].include is None:
+                          raise ValueError(f"invalid pattern {p!r}: compiles to a null pattern")
+                      globs.append(p)
+              spec = pathspec.PathSpec.from_lines("gitwildmatch", globs) if globs else None
+              return exact, spec
+
+          mode = sys.argv[1]
+          try:
+              a_exact, a_spec = compile_patterns(parse(sys.argv[2]))
+              d_exact, d_spec = compile_patterns(parse(sys.argv[3]))
+          except ValueError as e:
+              print(e, file=sys.stderr)
+              sys.exit(2)
+          if mode == "validate":
+              sys.exit(0)
+
+          allow_restricted = bool(a_exact or a_spec)
+          violations = []
+          # NUL-delimited path list on stdin (git diff -z); never trim or
+          # otherwise alter names — a path with trailing whitespace must not
+          # collapse onto an allowed exact entry.
+          for raw in sys.stdin.buffer.read().split(b"\0"):
+              if not raw:
+                  continue
+              f = raw.decode("utf-8", "surrogateescape")
+              if f in violations:
+                  continue
+              if f in d_exact or (d_spec and d_spec.match_file(f)):
+                  violations.append(f)
+              elif allow_restricted and f not in a_exact and not (a_spec and a_spec.match_file(f)):
+                  violations.append(f)
+          print("\n".join(violations))
+          sys.exit(1 if violations else 0)
+          PYEOF
+          # The hard gate re-verifies this hash before trusting the script:
+          # Claude runs with Bash in between and $RUNNER_TEMP is writable.
+          echo "script_sha=$(sha256sum "$RUNNER_TEMP/pathpolicy.py" | cut -d' ' -f1)" >> "$GITHUB_OUTPUT"
+
+          strip_comments() { grep -Ev '^[[:space:]]*(#|$)' "$1" || true; }
+          ALLOWED_CLEAN=$(strip_comments "$RUNNER_TEMP/allowed_paths.txt")
+          DENIED_CLEAN=$(strip_comments "$RUNNER_TEMP/denied_paths.txt")
+
+          if [ -z "$ALLOWED_CLEAN" ] && [ -z "$DENIED_CLEAN" ]; then
+            echo "No path policy configured; all paths allowed."
+            { echo "valid=true"; echo "enforce=false"; echo "prompt_block="; } >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+
+          if ! python3 "$RUNNER_TEMP/pathpolicy.py" validate "$RUNNER_TEMP/allowed_paths.txt" "$RUNNER_TEMP/denied_paths.txt"; then
+            { echo "valid=false"; echo "enforce=false"; echo "prompt_block="; } >> "$GITHUB_OUTPUT"
+            gh pr comment "$PR_NUMBER" --repo "${{ github.repository }}" --body \
+              "Claude autofix skipped: the \`allowed_paths\`/\`denied_paths\` configuration in the caller workflow contains an invalid pattern (see the run log). Autofix will not run until the configuration is fixed. ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}"
+            exit 0
+          fi
+
+          # Random heredoc delimiter so a pattern line can never collide with
+          # it and terminate the multiline output early.
+          DELIM="POLICY_EOF_$(od -An -N8 -tx1 /dev/urandom | tr -d ' \n')"
+          {
+            echo "valid=true"
+            echo "enforce=true"
+            echo "prompt_block<<$DELIM"
+            echo "PATH RESTRICTIONS:"
+            if [ -n "$ALLOWED_CLEAN" ]; then
+              echo "You may only modify files matching these patterns:"
+              echo "$ALLOWED_CLEAN"
+            fi
+            if [ -n "$DENIED_CLEAN" ]; then
+              echo "You must never modify files matching these patterns:"
+              echo "$DENIED_CLEAN"
+            fi
+            echo "If the fix requires touching a file outside these restrictions, do not push. Comment your diagnosis, apply the ${STOP_LABEL} label, and stop."
+            echo "$DELIM"
+          } >> "$GITHUB_OUTPUT"
+
+      # Loop prevention: count prior autofix commits on this branch and
+      # stop (with the kill-switch label) at the cap.
+      - name: Check attempt count
+        id: attempts
+        if: steps.pr.outputs.proceed == 'true' && steps.policy.outputs.valid == 'true'
+        env:
+          GH_TOKEN: ${{ github.token }}
+          PR_NUMBER: ${{ steps.pr.outputs.pr_number }}
+          BASE_REF: ${{ steps.pr.outputs.base_ref }}
+          MAX_ATTEMPTS: ${{ inputs.max_attempts }}
+        run: |
+          set -euo pipefail
+          # Fail loudly on a non-integer input (e.g. 1.5): the -ge test below
+          # would error inside the if-condition and fall through to
+          # proceed=true, silently disabling the cap.
+          case "$MAX_ATTEMPTS" in
+            ''|*[!0-9]*) echo "::error::max_attempts must be a positive integer (got '$MAX_ATTEMPTS')"; exit 1;;
+          esac
+          [ "$MAX_ATTEMPTS" -ge 1 ] || { echo "::error::max_attempts must be at least 1"; exit 1; }
+          ATTEMPTS=$(git log --oneline "origin/$BASE_REF..HEAD" | grep -c '\[claude-autofix\]' || true)
+          echo "Prior autofix attempts: $ATTEMPTS (max: $MAX_ATTEMPTS)"
+          if [ "$ATTEMPTS" -ge "$MAX_ATTEMPTS" ]; then
+            echo "proceed=false" >> "$GITHUB_OUTPUT"
+            gh pr edit "$PR_NUMBER" --repo "${{ github.repository }}" --add-label "$STOP_LABEL"
+            gh pr comment "$PR_NUMBER" --repo "${{ github.repository }}" --body \
+              "Claude autofix hit its limit of $MAX_ATTEMPTS attempts and is stopping. CI is still failing; a human needs to take over. Remove the \`$STOP_LABEL\` label to re-enable."
+          else
+            echo "proceed=true" >> "$GITHUB_OUTPUT"
+          fi
+
+      # The hard gate below diffs the remote branch against this pre-run
+      # snapshot; commit signing means autofix commits land on the remote
+      # via the API, not in this checkout.
+      - name: Record branch head before autofix
+        id: before
+        if: steps.attempts.outputs.proceed == 'true' && steps.policy.outputs.enforce == 'true'
+        env:
+          HEAD_REF: ${{ steps.pr.outputs.head_ref }}
+        run: |
+          set -euo pipefail
+          echo "sha=$(git ls-remote origin "refs/heads/$HEAD_REF" | cut -f1)" >> "$GITHUB_OUTPUT"
+
+      - name: Fix failing checks
+        # The trailing clause makes the gate coupling explicit: when the
+        # policy is enforced, Claude must not run unless the pre-run head
+        # snapshot (which the hard gate diffs against) was recorded.
+        if: >-
+          steps.attempts.outputs.proceed == 'true' &&
+          steps.policy.outputs.valid == 'true' &&
+          (steps.policy.outputs.enforce != 'true' || steps.before.outcome == 'success')
+        uses: anthropics/claude-code-action@e2a4b761cd77a1138a5b41410eda9b28581f9bcd # v1.0.196
+        with:
+          anthropic_api_key: ${{ secrets.CLAUDE_API_KEY }}
+          # Visibility: see the note on the fix-review-feedback step.
+          show_full_output: true
+          track_progress: true
+          # Sign commits via the GitHub API; see the note on the
+          # fix-review-feedback step.
+          use_commit_signing: true
+          prompt: |
+            REPO: ${{ github.repository }}
+            PR NUMBER: ${{ steps.pr.outputs.pr_number }}
+            HEAD SHA: ${{ github.event.check_suite.head_sha }}
+
+            A check failed on this PR's head commit. The failure could be a
+            broken build, compilation error, lint failure, test failure, or a
+            non-Actions check (e.g. CodeQL). Do not assume which; read the logs.
+
+            ASSESS:
+            1. Find the failing check(s):
+               `gh api repos/${{ github.repository }}/commits/${{ github.event.check_suite.head_sha }}/check-runs`
+               For Actions-based failures, read the real output with
+               `gh run list --commit ${{ github.event.check_suite.head_sha }}` and
+               `gh run view <run-id> --log-failed`.
+            2. Identify the root cause of each failure. Check the git log: if a
+               prior [claude-autofix] commit already tried to fix this exact
+               failure and it is STILL failing, your previous approach was wrong.
+               Try a fundamentally different approach or, if you have none,
+               comment your diagnosis and stop without pushing.
+
+            FIX:
+            3. Fix the underlying problem. Fix the code, not the test, unless
+               the test itself is clearly wrong.
+
+            REPORT:
+            4. Commit your changes with the mcp__github_file_ops__commit_files
+               tool (NOT raw `git add` / `git commit` / `git push` -- commit
+               signing is enabled, and only API commits are signed). Commit
+               messages MUST follow Conventional Commits
+               (`type(scope): description`) AND MUST end the subject line with
+               the tag "[claude-autofix]". Example:
+               `fix(build): add missing import in payment service [claude-autofix]`
+               The tag is required for loop-prevention accounting.
+            5. Post a short `gh pr comment` summarizing what was broken and what
+               you fixed.
+
+            Rules:
+            - Do not force-push.
+            - Do not delete, skip, or weaken tests to make CI green.
+            - If the failure looks like infrastructure/flake (network timeout,
+              runner issue), comment that it appears flaky. Do not change code.
+            - If you cannot fix it, comment your diagnosis so a human can take
+              over, and also run
+              `gh pr edit ${{ steps.pr.outputs.pr_number }} --add-label ${{ env.STOP_LABEL }} --repo ${{ github.repository }}`
+              so the PR is flagged (this case pushes no commit, so the attempt
+              cap alone would never catch it). A human removes the label once
+              they've intervened.
+
+            ${{ steps.policy.outputs.prompt_block }}
+          claude_args: |
+            --model ${{ inputs.model }}
+            --max-turns 60
+            --allowedTools "Bash,Read,Edit,Write,Grep,Glob,mcp__github_file_ops__commit_files,mcp__github_file_ops__delete_files"
+
+      # Hard gate: see the note on the fix-review-feedback job's step of the
+      # same name. Reverts policy-violating pushes, comments, and applies the
+      # kill-switch label; the revert carries [claude-autofix] so it still
+      # counts as an attempt. Fails closed on matcher tampering or error.
+      - name: Enforce path policy
+        id: gate
+        if: always() && steps.before.outcome == 'success'
+        env:
+          GH_TOKEN: ${{ github.token }}
+          PR_NUMBER: ${{ steps.pr.outputs.pr_number }}
+          HEAD_REF: ${{ steps.pr.outputs.head_ref }}
+          BEFORE_SHA: ${{ steps.before.outputs.sha }}
+          SCRIPT_SHA: ${{ steps.policy.outputs.script_sha }}
+          ALLOWED_PATHS: ${{ inputs.allowed_paths }}
+          DENIED_PATHS: ${{ inputs.denied_paths }}
+        run: |
+          set -euo pipefail
+          # Label + comment + fail the step. `commented=true` tells the
+          # notify step this failure already produced its own PR comment.
+          fail_closed() {
+            echo "commented=true" >> "$GITHUB_OUTPUT"
+            gh pr edit "$PR_NUMBER" --repo "${{ github.repository }}" --add-label "$STOP_LABEL"
+            gh pr comment "$PR_NUMBER" --repo "${{ github.repository }}" --body "$1"
+            exit 1
+          }
+          # Revert the branch to its pre-run state, but only when the pushed
+          # range is exclusively this bot's work: every commit must carry the
+          # [claude-autofix] subject tag AND an API-set bot committer
+          # identity (the author field is spoofable via the commits API; the
+          # committer is not). A concurrent Dependabot or other-app commit
+          # fails the tag test and blocks the auto-revert. The ref update is
+          # fast-forward-only, so a push landing after AFTER_SHA makes it
+          # error rather than clobber. Returns 1 when the range isn't safely
+          # ours — callers escalate to a human instead.
+          try_revert() {
+            git merge-base --is-ancestor "$BEFORE_SHA" "$AFTER_SHA" || return 1
+            UNOWNED=$(git log --format='%cn <%ce>|%s' "$BEFORE_SHA..$AFTER_SHA" \
+              | grep -Ev '^([^|]*\[bot\][^|]*|GitHub <noreply@github\.com>)\|.*\[claude-autofix\]' || true)
+            [ -z "$UNOWNED" ] || return 1
+            TREE=$(gh api "repos/${{ github.repository }}/git/commits/$BEFORE_SHA" -q '.tree.sha')
+            REVERT=$(gh api "repos/${{ github.repository }}/git/commits" \
+              -f message="revert: undo autofix commits that touched restricted paths [claude-autofix]" \
+              -f tree="$TREE" -f "parents[]=$AFTER_SHA" -q '.sha')
+            gh api -X PATCH "repos/${{ github.repository }}/git/refs/heads/$HEAD_REF" -f sha="$REVERT"
+          }
+          # A push happened but the policy verdict is unavailable: revert if
+          # the range is safely ours, and fail either way — never leave an
+          # unvetted push standing silently.
+          unverifiable() {
+            if try_revert; then
+              fail_closed "Claude autofix could not verify the pushed changes against \`allowed_paths\`/\`denied_paths\` ($1). The branch was reverted to its pre-run state as a precaution. Remove the \`$STOP_LABEL\` label to re-enable the bot. Run log: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}"
+            else
+              fail_closed "Claude autofix could not verify the pushed changes against \`allowed_paths\`/\`denied_paths\` ($1), and the pushed range could not be safely auto-reverted (it contains commits not attributable to the bot). A human must review the branch. Remove the \`$STOP_LABEL\` label to re-enable the bot. Run log: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}"
+            fi
+          }
+          AFTER_SHA=$(git ls-remote origin "refs/heads/$HEAD_REF" | cut -f1)
+          if [ "$AFTER_SHA" = "$BEFORE_SHA" ]; then
+            echo "Branch unchanged; nothing to enforce."
+            exit 0
+          fi
+          git fetch origin "$HEAD_REF"
+
+          # Rebuild the pattern files from trusted workflow inputs and verify
+          # the matcher script still hashes to what the pre-run validation
+          # step recorded — step outputs are beyond Claude's reach.
+          printf '%s\n' "$ALLOWED_PATHS" > "$RUNNER_TEMP/allowed_paths.txt"
+          printf '%s\n' "$DENIED_PATHS" > "$RUNNER_TEMP/denied_paths.txt"
+          if [ ! -f "$RUNNER_TEMP/pathpolicy.py" ] || [ "$(sha256sum "$RUNNER_TEMP/pathpolicy.py" | cut -d' ' -f1)" != "$SCRIPT_SHA" ]; then
+            unverifiable "the policy matcher was modified or removed during the run"
+          fi
+          # The verdict also depends on the pathspec module, which Claude
+          # could have overwritten in site-packages; reinstall it clean.
+          # (In-job tamper-proofing is best-effort — hosted runners grant
+          # the job passwordless sudo.)
+          python3 -m pip install --quiet --force-reinstall --no-cache-dir pathspec==1.1.1 \
+            || unverifiable "the matcher dependency could not be reinstalled"
+
+          # Union the paths touched by EVERY commit in the range — an
+          # endpoint-only diff would miss a denied path that one commit
+          # modifies and a later commit restores. --no-renames so a rename
+          # out of a denied path reports both sides; -z so exotic filenames
+          # reach the matcher unaltered. Exit 0 = compliant, 1 = violations,
+          # anything else = matcher error.
+          : > "$RUNNER_TEMP/changed_paths.zlist"
+          git rev-list "$BEFORE_SHA..$AFTER_SHA" | while read -r c; do
+            git diff --name-only --no-renames -z "$c^" "$c" >> "$RUNNER_TEMP/changed_paths.zlist"
+          done
+          set +e
+          VIOLATIONS=$(python3 "$RUNNER_TEMP/pathpolicy.py" check "$RUNNER_TEMP/allowed_paths.txt" "$RUNNER_TEMP/denied_paths.txt" \
+            < "$RUNNER_TEMP/changed_paths.zlist")
+          RC=$?
+          set -e
+          if [ "$RC" -eq 0 ]; then
+            echo "All pushed paths comply with the path policy."
+            exit 0
+          fi
+          if [ "$RC" -ne 1 ]; then
+            unverifiable "the policy matcher failed to run (exit $RC)"
+          fi
+          echo "Path policy violations:"
+          echo "$VIOLATIONS"
+          if try_revert; then
+            fail_closed "Claude autofix modified files outside its allowed paths and the branch has been reverted to its pre-run state. Violating paths: $(echo "$VIOLATIONS" | tr '\n' ' '). Configured in the caller workflow's \`allowed_paths\`/\`denied_paths\`. A human needs to take over; remove the \`$STOP_LABEL\` label to re-enable the bot."
+          else
+            fail_closed "Claude autofix modified files outside its allowed paths (violating paths: $(echo "$VIOLATIONS" | tr '\n' ' ')), but the pushed range contains commits not attributable to the bot, so nothing was reverted automatically. A human must clean up the branch. Remove the \`$STOP_LABEL\` label to re-enable the bot."
+          fi
+
+      # Skipped when the hard gate already posted its own, more specific
+      # comment (gate failures without a comment — e.g. a crash before
+      # commenting — still notify).
+      - name: Notify on autofix failure
+        if: failure() && steps.attempts.outputs.proceed == 'true' && steps.gate.outputs.commented != 'true'
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh pr comment "${{ steps.pr.outputs.pr_number }}" --repo "${{ github.repository }}" --body \
+            "Claude autofix run failed while fixing CI (error, not a normal stop). See the run log: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}"
