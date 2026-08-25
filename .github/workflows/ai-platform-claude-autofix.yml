@@ -434,6 +434,11 @@ jobs:
           DENIED_PATHS: ${{ inputs.denied_paths }}
         run: |
           set -euo pipefail
+          # The Claude action step swaps the checkout's git credentials for
+          # its own app token and revokes it when the step ends, so plain git
+          # network calls (ls-remote/fetch) 401 afterwards. Re-point origin at
+          # the workflow token before any network call below.
+          git remote set-url origin "https://x-access-token:${GH_TOKEN}@github.com/${{ github.repository }}.git"
           # Label + comment + fail the step. `commented=true` tells the
           # notify step this failure already produced its own PR comment.
           fail_closed() {
@@ -881,6 +886,11 @@ jobs:
           DENIED_PATHS: ${{ inputs.denied_paths }}
         run: |
           set -euo pipefail
+          # The Claude action step swaps the checkout's git credentials for
+          # its own app token and revokes it when the step ends, so plain git
+          # network calls (ls-remote/fetch) 401 afterwards. Re-point origin at
+          # the workflow token before any network call below.
+          git remote set-url origin "https://x-access-token:${GH_TOKEN}@github.com/${{ github.repository }}.git"
           # Label + comment + fail the step. `commented=true` tells the
           # notify step this failure already produced its own PR comment.
           fail_closed() {
