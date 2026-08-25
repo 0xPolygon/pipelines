@@ -53,6 +53,17 @@ on:
         type: string
         required: false
         default: 'claude-sonnet-4-6'
+      skip_paths:
+        description: >-
+          Newline-separated gitignore-style patterns. When EVERY file changed
+          in the PR matches, the review is skipped. Empty = never skip.
+          Evaluated inside the job (not via GitHub's dispatch-time
+          paths-ignore, which silently fails to dispatch workflows on
+          synchronize events from API-created commits — e.g. the autofix
+          workflow's signed commits).
+        type: string
+        required: false
+        default: ''
     secrets:
       CLAUDE_API_KEY:
         required: true
@@ -87,8 +98,39 @@ jobs:
         with:
           fetch-depth: 1
 
+      # Skip the review when every file changed in the PR matches skip_paths.
+      # Uses git check-ignore in a throwaway repo so patterns get exact
+      # gitignore semantics without inheriting this repo's own .gitignore.
+      - name: Evaluate skip_paths
+        id: skip
+        env:
+          GH_TOKEN: ${{ github.token }}
+          SKIP_PATHS: ${{ inputs.skip_paths }}
+          PR_NUMBER: ${{ github.event.pull_request.number }}
+        run: |
+          set -euo pipefail
+          if ! printf '%s\n' "$SKIP_PATHS" | grep -Eqv '^[[:space:]]*(#|$)'; then
+            echo "No skip_paths configured; running review."
+            echo "run_review=true" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+          SCRATCH="$RUNNER_TEMP/skip-paths-check"
+          mkdir -p "$SCRATCH" && git -C "$SCRATCH" init -q
+          printf '%s\n' "$SKIP_PATHS" > "$SCRATCH/.gitignore"
+          gh api "repos/${{ github.repository }}/pulls/$PR_NUMBER/files" \
+            --paginate --jq '.[].filename' > "$RUNNER_TEMP/pr_files.txt"
+          TOTAL=$(grep -c . "$RUNNER_TEMP/pr_files.txt" || true)
+          MATCHED=$(git -C "$SCRATCH" check-ignore --stdin < "$RUNNER_TEMP/pr_files.txt" | grep -c . || true)
+          if [ "$TOTAL" -gt 0 ] && [ "$MATCHED" -eq "$TOTAL" ]; then
+            echo "All $TOTAL changed file(s) match skip_paths; skipping review."
+            echo "run_review=false" >> "$GITHUB_OUTPUT"
+          else
+            echo "$MATCHED of $TOTAL changed file(s) match skip_paths; running review."
+            echo "run_review=true" >> "$GITHUB_OUTPUT"
+          fi
+
       - name: Run Claude Code Review (comment)
-        if: inputs.mode == 'comment'
+        if: inputs.mode == 'comment' && steps.skip.outputs.run_review == 'true'
         uses: anthropics/claude-code-action@df37d2f0760a4b5683a6e617c9325bc1a36443f6 # v1
         with:
           anthropic_api_key: ${{ secrets.CLAUDE_API_KEY }}
@@ -115,7 +157,7 @@ jobs:
       # PRs (Step 3) is load-bearing for ai-platform-claude-autofix.yml, whose
       # fix-review-feedback job triggers on that exact body prefix.
       - name: Run Claude Code Review (approve)
-        if: inputs.mode == 'approve'
+        if: inputs.mode == 'approve' && steps.skip.outputs.run_review == 'true'
         uses: anthropics/claude-code-action@df37d2f0760a4b5683a6e617c9325bc1a36443f6 # v1
         with:
           anthropic_api_key: ${{ secrets.CLAUDE_API_KEY }}
