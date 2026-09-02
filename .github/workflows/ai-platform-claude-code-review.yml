@@ -13,6 +13,7 @@
 #   on:
 #     pull_request:
 #       types: [opened, synchronize, ready_for_review, reopened]
+#       # No paths / paths-ignore here — see the `changes` job below.
 #   concurrency:
 #     group: claude-review-${{ github.event.pull_request.number }}
 #     cancel-in-progress: true
@@ -60,13 +61,51 @@ on:
 permissions: {}
 
 jobs:
+  changes:
+    # Detect self-edits. The Claude App's token exchange 401s ("Workflow
+    # validation failed") when the CALLER workflow file differs from the
+    # default branch, so a PR that edits it can never be reviewed. Callers
+    # must not use paths-ignore for this: GitHub silently skips dispatching
+    # path-filtered pull_request workflows when the synchronize event comes
+    # from an API-created commit (e.g. the autofix bot's signed pushes), so
+    # the re-review after autofix would never fire. Check in-run instead.
+    # In a reusable workflow, github.workflow_ref names the caller's file
+    # (owner/repo/.github/workflows/x.yml@ref).
+    if: github.event.pull_request.head.repo.full_name == github.repository
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    permissions:
+      pull-requests: read
+    outputs:
+      self_edit: ${{ steps.check.outputs.self_edit }}
+    steps:
+      - id: check
+        env:
+          GH_TOKEN: ${{ github.token }}
+          WORKFLOW_REF: ${{ github.workflow_ref }}
+          REPO: ${{ github.repository }}
+          PR: ${{ github.event.pull_request.number }}
+        run: |
+          caller="${WORKFLOW_REF#"$REPO"/}"
+          caller="${caller%@*}"
+          echo "caller workflow: $caller"
+          if gh api "repos/$REPO/pulls/$PR/files" --paginate --jq '.[].filename' \
+             | grep -qxF "$caller"; then
+            echo "self_edit=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "self_edit=false" >> "$GITHUB_OUTPUT"
+          fi
+
   claude-review:
+    needs: changes
     # Only run on PRs from the same repository (not forks) to avoid API costs on external contributions.
     # Skip changeset-release branches — those are automated version-bump PRs, not code to review.
     # Skip PRs labelled disable-claude-code-review.
     # Skip drafts — most relevant to mode: approve, where an approval verdict
     # on unfinished work would be meaningless.
+    # Skip PRs that edit the caller workflow file (see `changes`).
     if: >-
+      needs.changes.outputs.self_edit == 'false' &&
       github.event.pull_request.head.repo.full_name == github.repository &&
       github.event.pull_request.draft == false &&
       !startsWith(github.head_ref, 'changeset-release/') &&
