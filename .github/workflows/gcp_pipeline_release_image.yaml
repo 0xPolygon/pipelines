@@ -95,6 +95,17 @@ jobs:
           fi 
 
           echo 'EOF' >> $GITHUB_OUTPUT
+      # Build provenance for images whose Dockerfiles declare GIT_SHA/BUILT_AT
+      # args (services boot-log them as their build identity). Resolved from
+      # the CHECKED-OUT ref, not github.sha — on workflow_dispatch re-runs the
+      # two differ, and stamping the wrong sha is worse than "unknown".
+      # Dockerfiles without these args just log an unused-build-arg warning.
+      - name: Resolve build provenance
+        id: provenance
+        run: |
+          echo "git_sha=$(git rev-parse HEAD)" >> "$GITHUB_OUTPUT"
+          echo "built_at=$(date -u +%Y-%m-%dT%H:%M:%SZ)" >> "$GITHUB_OUTPUT"
+
       - name: Set up QEMU
         uses: docker/setup-qemu-action@v3
   
@@ -129,6 +140,9 @@ jobs:
           push: true
           tags: ${{ steps.meta.outputs.tags }}
           labels: ${{ steps.meta.outputs.labels }}
+          build-args: |
+            GIT_SHA=${{ steps.provenance.outputs.git_sha }}
+            BUILT_AT=${{ steps.provenance.outputs.built_at }}
           cache-from: type=gha
           cache-to: type=gha,mode=max
           platforms: ${{ inputs.platforms }}
