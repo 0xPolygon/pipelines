@@ -84,7 +84,7 @@ jobs:
 
       - name: Run Claude Code Review (comment)
         if: inputs.mode == 'comment'
-        uses: anthropics/claude-code-action@df37d2f0760a4b5683a6e617c9325bc1a36443f6 # v1
+        uses: anthropics/claude-code-action@f90699222fdbc06942ba7bd0cc5dfed38177ee55 # v1.0.214
         with:
           anthropic_api_key: ${{ secrets.CLAUDE_API_KEY }}
           show_full_output: false
@@ -120,7 +120,7 @@ jobs:
       # all - every API call inside the review then fails 401 Bad credentials.
       - name: Run Claude Code Review (approve, reviewer app)
         if: inputs.mode == 'approve' && env.HAS_REVIEWER_APP == 'true'
-        uses: anthropics/claude-code-action@df37d2f0760a4b5683a6e617c9325bc1a36443f6 # v1
+        uses: anthropics/claude-code-action@f90699222fdbc06942ba7bd0cc5dfed38177ee55 # v1.0.214
         with:
           anthropic_api_key: ${{ secrets.CLAUDE_API_KEY }}
           github_token: ${{ steps.reviewer-token.outputs.token }}
@@ -138,7 +138,7 @@ jobs:
       # docstring above for the self-approval limitation of that identity).
       - name: Run Claude Code Review (approve)
         if: inputs.mode == 'approve' && env.HAS_REVIEWER_APP != 'true'
-        uses: anthropics/claude-code-action@df37d2f0760a4b5683a6e617c9325bc1a36443f6 # v1
+        uses: anthropics/claude-code-action@f90699222fdbc06942ba7bd0cc5dfed38177ee55 # v1.0.214
         with:
           anthropic_api_key: ${{ secrets.CLAUDE_API_KEY }}
           allowed_bots: claude
