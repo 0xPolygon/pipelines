@@ -86,6 +86,22 @@ on:
         type: string
         required: false
         default: 'claude-opus-4-8'
+      allowed_bots:
+        description: >
+          Bot actors permitted to trigger an autofix run, passed straight
+          through to claude-code-action's `allowed_bots`. The action checks
+          the workflow-TRIGGERING actor (github.actor), not the review
+          author: for pull_request_review that is the reviewer, for
+          check_suite it is whoever pushed the failing commit — including
+          this workflow's own claude[bot] pushes. Defaults to '*' (any bot):
+          both jobs already refuse fork PRs, so every bot that can reach
+          them is an App the org installed, and a human's review body is
+          exactly as injectable as a bot's. Restrict with a comma-separated
+          login list (e.g. 'claude[bot],my-reviewer[bot]') if you want only
+          specific reviewers to spend autofix credit.
+        type: string
+        required: false
+        default: '*'
     secrets:
       CLAUDE_API_KEY:
         required: true
@@ -318,20 +334,11 @@ jobs:
         uses: anthropics/claude-code-action@e2a4b761cd77a1138a5b41410eda9b28581f9bcd # v1.0.196
         with:
           anthropic_api_key: ${{ secrets.CLAUDE_API_KEY }}
-          # Required so reviews posted by bot reviewers can trigger a run.
-          # The action validates the workflow-triggering actor (github.actor),
-          # not the review author, so both identities must be listed where
-          # they differ:
-          #   - claude[bot]: the Claude reviewer workflow.
-          #   - copilot-pull-request-reviewer[bot] / Copilot: GitHub Copilot
-          #     code review submits reviews as the former, but triggers
-          #     workflow runs with GITHUB_ACTOR="Copilot".
-          #   - github-actions[bot]: Codegenie posts reviews under this login
-          #     (it uses the default workflow token). Note that events created
-          #     with the default GITHUB_TOKEN do not trigger workflow runs, so
-          #     this entry only takes effect if Codegenie is configured with a
-          #     custom app token/PAT.
-          allowed_bots: 'claude[bot],github-actions[bot],copilot-pull-request-reviewer[bot],Copilot'
+          # Bot actor gate — see the allowed_bots input. Note that events
+          # created with the default GITHUB_TOKEN (e.g. Codegenie without a
+          # custom app token) never trigger workflow runs at all, regardless
+          # of this list.
+          allowed_bots: ${{ inputs.allowed_bots }}
           # Visibility: log the full Claude transcript (tool calls, permission
           # denials) and live-update a progress comment on the PR. The
           # transcript can echo repo content into the Actions log; acceptable
@@ -778,6 +785,10 @@ jobs:
         uses: anthropics/claude-code-action@e2a4b761cd77a1138a5b41410eda9b28581f9bcd # v1.0.196
         with:
           anthropic_api_key: ${{ secrets.CLAUDE_API_KEY }}
+          # Bot actor gate — see the allowed_bots input. Without it a check
+          # suite failing on a bot-pushed commit (including this workflow's
+          # own [claude-autofix] pushes) is rejected by the action.
+          allowed_bots: ${{ inputs.allowed_bots }}
           # Visibility: see the note on the fix-review-feedback step.
           show_full_output: true
           track_progress: true
