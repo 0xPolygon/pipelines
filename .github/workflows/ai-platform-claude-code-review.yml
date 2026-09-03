@@ -32,6 +32,7 @@
 #       uses: 0xPolygon/pipelines/.github/workflows/ai-platform-claude-code-review.yml@main
 #       with:
 #         mode: approve
+#         # fetch_depth: 0   # full history — see the input's description below
 #       secrets:
 #         CLAUDE_API_KEY: ${{ secrets.CLAUDE_API_KEY }}
 
@@ -54,6 +55,22 @@ on:
         type: string
         required: false
         default: 'claude-sonnet-4-6'
+      fetch_depth:
+        description: >-
+          Passed straight through to the checkout step's `fetch-depth`. The
+          default (1) is a shallow checkout — fine for judging the diff in
+          isolation, but the review also does a "historical git context"
+          pass (git log / git blame against the base branch) to check
+          whether a claim about surrounding code still holds on `main`, e.g.
+          to avoid re-flagging an issue elsewhere in a touched file that a
+          since-merged commit already fixed. A shallow checkout has no
+          ancestry for that pass to walk, so it can't verify those claims
+          and may re-flag stale issues. Set to 0 (full history) for repos
+          where that historical pass matters; leave at 1 for repos that
+          prioritize checkout speed over it.
+        type: number
+        required: false
+        default: 1
     secrets:
       CLAUDE_API_KEY:
         required: true
@@ -124,7 +141,7 @@ jobs:
       - name: Checkout repository
         uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
         with:
-          fetch-depth: 1
+          fetch-depth: ${{ inputs.fetch_depth }}
 
       - name: Run Claude Code Review (comment)
         if: inputs.mode == 'comment'
