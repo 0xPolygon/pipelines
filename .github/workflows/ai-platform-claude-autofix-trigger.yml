@@ -44,3 +44,8 @@ jobs:
       denied_paths: |
         .github/workflows/ai-platform-claude-autofix.yml
         .github/workflows/ai-platform-claude-autofix-trigger.yml
+      # Bot actors allowed to trigger a run (reviewers on
+      # pull_request_review, the pusher on check_suite). The default is
+      # '*' — any installed App. Uncomment to restrict to named logins:
+      #
+      # allowed_bots: 'claude[bot],polygon-websites-reviewer[bot]'
