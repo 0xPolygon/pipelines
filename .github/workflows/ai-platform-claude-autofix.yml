@@ -331,7 +331,7 @@ jobs:
           steps.attempts.outputs.proceed == 'true' &&
           steps.policy.outputs.valid == 'true' &&
           (steps.policy.outputs.enforce != 'true' || steps.before.outcome == 'success')
-        uses: anthropics/claude-code-action@e2a4b761cd77a1138a5b41410eda9b28581f9bcd # v1.0.196
+        uses: anthropics/claude-code-action@f90699222fdbc06942ba7bd0cc5dfed38177ee55 # v1.0.214
         with:
           anthropic_api_key: ${{ secrets.CLAUDE_API_KEY }}
           # Bot actor gate — see the allowed_bots input. Note that events
@@ -782,7 +782,19 @@ jobs:
           steps.attempts.outputs.proceed == 'true' &&
           steps.policy.outputs.valid == 'true' &&
           (steps.policy.outputs.enforce != 'true' || steps.before.outcome == 'success')
-        uses: anthropics/claude-code-action@e2a4b761cd77a1138a5b41410eda9b28581f9bcd # v1.0.196
+        uses: anthropics/claude-code-action@f90699222fdbc06942ba7bd0cc5dfed38177ee55 # v1.0.214
+        # HACK: this job runs on check_suite, but claude-code-action hardcodes
+        # the events it accepts (src/github/context.ts: ENTITY_EVENT_NAMES +
+        # AUTOMATION_EVENT_NAMES) and check_suite is not in either list, in
+        # any release to date. Anything else throws "Unsupported event type"
+        # before Claude starts. We relabel the event as workflow_run, which
+        # IS accepted. Safe at this pin because in agent mode the action only
+        # reads GITHUB_ACTOR (permission check) and the optional
+        # payload.workflow_run.actor; PR number, head SHA and branch come from
+        # our resolved step outputs, not the payload. RE-VERIFY THIS ON EVERY
+        # PIN BUMP, and delete the override once upstream accepts check_suite.
+        env:
+          GITHUB_EVENT_NAME: workflow_run
         with:
           anthropic_api_key: ${{ secrets.CLAUDE_API_KEY }}
           # Bot actor gate — see the allowed_bots input. Without it a check
