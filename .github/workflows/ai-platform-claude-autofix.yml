@@ -783,16 +783,6 @@ jobs:
           steps.policy.outputs.valid == 'true' &&
           (steps.policy.outputs.enforce != 'true' || steps.before.outcome == 'success')
         uses: anthropics/claude-code-action@f90699222fdbc06942ba7bd0cc5dfed38177ee55 # v1.0.214
-        # claude-code-action only parses entity events (issues, PRs, comments,
-        # reviews) and the automation events workflow_dispatch,
-        # repository_dispatch, schedule and workflow_run. It throws
-        # "Unsupported event type: check_suite" before doing anything else, so
-        # this job never worked on its real trigger. Present the run as a
-        # workflow_run automation event: in agent mode (prompt set) the action
-        # then only reads GITHUB_ACTOR for its write-permission check and
-        # `payload.workflow_run?.actor` (optional, absent here). The PR, head
-        # SHA and branch all come from the resolved outputs above, not from
-        # the event payload, so nothing else depends on the event name.
         env:
           GITHUB_EVENT_NAME: workflow_run
         with:
