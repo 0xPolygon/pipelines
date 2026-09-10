@@ -1,10 +1,18 @@
+# Docker image release into GCP Artifact Registry.
+#
+# Each target platform is built on a runner of its own CPU architecture and
+# pushed by digest; a final job stitches those digests into one tagged
+# multi-platform manifest. Building arm64 under QEMU on an amd64 runner ran a
+# service's TypeScript compile ~8x slower than native (471s vs 58s on identical
+# source) and dominated every release, so emulation is deliberately not used.
+
 on:
   workflow_call:
     inputs:
       image_name:
         required: true
         type: string
-      
+
       image_tag:
         required: false
         type: string
@@ -25,15 +33,28 @@ on:
         default: "."
         type: string
         description: "Context for dockerfile"
-      
+
       checkout_ref:
         required: false
         type: string
-      
+
       platforms:
         required: false
         type: string
         default: "linux/amd64,linux/arm64"
+        description: "Comma-separated target platforms; each is built natively on its own runner"
+
+      runner_amd64:
+        required: false
+        type: string
+        default: "ubuntu-latest"
+        description: "runs-on label for linux/amd64 builds"
+
+      runner_arm64:
+        required: false
+        type: string
+        default: "ubuntu-24.04-arm"
+        description: "runs-on label for linux/arm64 builds. GitHub's standard arm64 runner by default; pass a larger-runner label for more vCPUs"
 
     secrets:
       build_params_gh_secret_keys:
@@ -47,10 +68,70 @@ env:
   OIDC_SERVICE_ACCOUNT: shared-prod-oidc-sa@prj-polygonlabs-shared-prod.iam.gserviceaccount.com
 
 jobs:
-  docker-release-common:
-    name: Build and push docker image to GitHub Container Registry
+  prepare:
+    name: Resolve platforms, tags and build provenance
     runs-on: ubuntu-latest
+    outputs:
+      platforms: ${{ steps.platforms.outputs.matrix }}
+      tag_config: ${{ steps.metadata-tags.outputs.tag_config }}
+      git_sha: ${{ steps.provenance.outputs.git_sha }}
+      built_at: ${{ steps.provenance.outputs.built_at }}
+    steps:
+      - name: Checkout
+        if: inputs.checkout_ref != ''
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ inputs.checkout_ref }}
+
+      - name: Checkout
+        if: inputs.checkout_ref == ''
+        uses: actions/checkout@v4
+
+      - name: Build the platform matrix
+        id: platforms
+        env:
+          PLATFORMS: ${{ inputs.platforms }}
+        run: |
+          matrix=$(jq -cn --arg p "$PLATFORMS" '$p | split(",") | map(gsub("^\\s+|\\s+$"; "")) | map(select(length > 0))')
+          echo "matrix=${matrix}" >> "$GITHUB_OUTPUT"
+
+      - name: Construct metadata tags input
+        id: metadata-tags
+        run: |
+          echo 'tag_config<<EOF' >> $GITHUB_OUTPUT
+
+          if [ -n "${{ inputs.image_tag }}" ]; then
+            echo "type=raw,value=${{ inputs.image_tag }}" >> $GITHUB_OUTPUT
+          else
+            echo "type=ref,event=branch" >> $GITHUB_OUTPUT
+            echo "type=ref,event=pr" >> $GITHUB_OUTPUT
+            echo "type=semver,pattern={{version}}" >> $GITHUB_OUTPUT
+            echo "type=semver,pattern={{major}}.{{minor}}" >> $GITHUB_OUTPUT
+          fi
+
+          echo 'EOF' >> $GITHUB_OUTPUT
+
+      # Build provenance for images whose Dockerfiles declare GIT_SHA/BUILT_AT
+      # args (services boot-log them as their build identity). Resolved from
+      # the CHECKED-OUT ref, not github.sha — on workflow_dispatch re-runs the
+      # two differ, and stamping the wrong sha is worse than "unknown".
+      # Resolved once here so every platform's image carries the same values.
+      # Dockerfiles without these args just log an unused-build-arg warning.
+      - name: Resolve build provenance
+        id: provenance
+        run: |
+          echo "git_sha=$(git rev-parse HEAD)" >> "$GITHUB_OUTPUT"
+          echo "built_at=$(date -u +%Y-%m-%dT%H:%M:%SZ)" >> "$GITHUB_OUTPUT"
+
+  build:
+    name: Build ${{ matrix.platform }}
+    needs: prepare
+    runs-on: ${{ matrix.platform == 'linux/arm64' && inputs.runner_arm64 || inputs.runner_amd64 }}
     environment: ${{ inputs.environment }}
+    strategy:
+      fail-fast: true
+      matrix:
+        platform: ${{ fromJSON(needs.prepare.outputs.platforms) }}
     steps:
       - name: Checkout
         if: inputs.checkout_ref != ''
@@ -80,35 +161,12 @@ jobs:
             echo ".env contents:" && cat .env
           fi
 
-      - name: Construct metadata tags input
-        id: metadata-tags
-        run: |
-          echo 'tag_config<<EOF' >> $GITHUB_OUTPUT
+      # Artifact names and cache scopes cannot contain "/".
+      - name: Derive platform slug
+        env:
+          PLATFORM: ${{ matrix.platform }}
+        run: echo "PLATFORM_SLUG=${PLATFORM//\//-}" >> "$GITHUB_ENV"
 
-          if [ -n "${{ inputs.image_tag }}" ]; then
-            echo "type=raw,value=${{ inputs.image_tag }}" >> $GITHUB_OUTPUT
-          else
-            echo "type=ref,event=branch" >> $GITHUB_OUTPUT
-            echo "type=ref,event=pr" >> $GITHUB_OUTPUT
-            echo "type=semver,pattern={{version}}" >> $GITHUB_OUTPUT
-            echo "type=semver,pattern={{major}}.{{minor}}" >> $GITHUB_OUTPUT
-          fi 
-
-          echo 'EOF' >> $GITHUB_OUTPUT
-      # Build provenance for images whose Dockerfiles declare GIT_SHA/BUILT_AT
-      # args (services boot-log them as their build identity). Resolved from
-      # the CHECKED-OUT ref, not github.sha — on workflow_dispatch re-runs the
-      # two differ, and stamping the wrong sha is worse than "unknown".
-      # Dockerfiles without these args just log an unused-build-arg warning.
-      - name: Resolve build provenance
-        id: provenance
-        run: |
-          echo "git_sha=$(git rev-parse HEAD)" >> "$GITHUB_OUTPUT"
-          echo "built_at=$(date -u +%Y-%m-%dT%H:%M:%SZ)" >> "$GITHUB_OUTPUT"
-
-      - name: Set up QEMU
-        uses: docker/setup-qemu-action@v3
-  
       - name: Set up Docker Buildx
         uses: docker/setup-buildx-action@v3
 
@@ -123,26 +181,95 @@ jobs:
         run: |
           echo '{"credHelpers": {"europe-west2-docker.pkg.dev": "gcloud"}}' > ~/.docker/config.json
 
-      - name: Extract metadata (tags, labels) for Docker
+      - name: Extract metadata (labels) for Docker
         id: meta
         uses: docker/metadata-action@v5
         with:
           images: ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}
-          tags: ${{ steps.metadata-tags.outputs.tag_config }}
+          tags: ${{ needs.prepare.outputs.tag_config }}
           flavor: |
             latest=false
 
-      - name: Push to GCP Artifact Registry
+      # Pushed by digest only. Tags are applied to the merged manifest in the
+      # next job, so a tag never points at a single-platform image, and a
+      # failure in either platform leaves the tag unpublished rather than
+      # half-published. The cache scope is per image and platform so parallel
+      # legs (and sibling images released from the same repo) never overwrite
+      # each other's cache index.
+      - name: Build and push ${{ matrix.platform }} by digest
+        id: build
         uses: docker/build-push-action@v6
         with:
           file: ${{ inputs.dockerfile_path }}
           context: ${{ inputs.dockerfile_context }}
-          push: true
-          tags: ${{ steps.meta.outputs.tags }}
+          platforms: ${{ matrix.platform }}
           labels: ${{ steps.meta.outputs.labels }}
           build-args: |
-            GIT_SHA=${{ steps.provenance.outputs.git_sha }}
-            BUILT_AT=${{ steps.provenance.outputs.built_at }}
-          cache-from: type=gha
-          cache-to: type=gha,mode=max
-          platforms: ${{ inputs.platforms }}
+            GIT_SHA=${{ needs.prepare.outputs.git_sha }}
+            BUILT_AT=${{ needs.prepare.outputs.built_at }}
+          cache-from: type=gha,scope=${{ env.IMAGE_NAME }}-${{ env.PLATFORM_SLUG }}
+          cache-to: type=gha,mode=max,scope=${{ env.IMAGE_NAME }}-${{ env.PLATFORM_SLUG }}
+          outputs: type=image,name=${{ env.REGISTRY }}/${{ env.IMAGE_NAME }},push-by-digest=true,name-canonical=true,push=true
+
+      - name: Export digest
+        env:
+          DIGEST: ${{ steps.build.outputs.digest }}
+        run: |
+          mkdir -p "${{ runner.temp }}/digests"
+          touch "${{ runner.temp }}/digests/${DIGEST#sha256:}"
+
+      - name: Upload digest
+        uses: actions/upload-artifact@v4
+        with:
+          name: digests-${{ env.IMAGE_NAME }}-${{ env.PLATFORM_SLUG }}
+          path: ${{ runner.temp }}/digests/*
+          if-no-files-found: error
+          retention-days: 1
+
+  merge:
+    name: Push multi-platform manifest
+    needs: [prepare, build]
+    runs-on: ubuntu-latest
+    environment: ${{ inputs.environment }}
+    steps:
+      - name: Download digests
+        uses: actions/download-artifact@v4
+        with:
+          path: ${{ runner.temp }}/digests
+          pattern: digests-${{ env.IMAGE_NAME }}-*
+          merge-multiple: true
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Authenticate with GCP via OIDC
+        uses: google-github-actions/auth@v2
+        with:
+          token_format: access_token
+          workload_identity_provider: ${{ env.OIDC_PROVIDER }}
+          service_account: ${{ env.OIDC_SERVICE_ACCOUNT }}
+
+      - name: Configure Artifact Registry authentication
+        run: |
+          echo '{"credHelpers": {"europe-west2-docker.pkg.dev": "gcloud"}}' > ~/.docker/config.json
+
+      - name: Extract metadata (tags) for Docker
+        id: meta
+        uses: docker/metadata-action@v5
+        with:
+          images: ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}
+          tags: ${{ needs.prepare.outputs.tag_config }}
+          flavor: |
+            latest=false
+
+      # The digest files are named by their sha256 hex, so the glob expands to
+      # one image reference per platform.
+      - name: Create and push the manifest list
+        working-directory: ${{ runner.temp }}/digests
+        run: |
+          docker buildx imagetools create \
+            $(jq -cr '.tags | map("-t " + .) | join(" ")' <<< "$DOCKER_METADATA_OUTPUT_JSON") \
+            $(printf '${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}@sha256:%s ' *)
+
+      - name: Inspect the pushed manifest
+        run: docker buildx imagetools inspect ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:${{ steps.meta.outputs.version }}
