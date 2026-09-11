@@ -14,7 +14,7 @@ on:
   # Actions, so the Actions workflows to watch must be named here. List
   # every workflow whose failure Claude should try to fix (by `name:`).
   workflow_run:
-    workflows: ["CI Trigger"]
+    workflows: ['CI Trigger']
     types: [completed]
   # Non-Actions check apps (CodeQL default setup, github-advanced-security,
   # codecov, ...).

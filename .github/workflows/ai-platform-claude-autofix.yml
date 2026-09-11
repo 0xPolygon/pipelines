@@ -573,7 +573,7 @@ jobs:
       )
     runs-on: ubuntu-latest
     permissions:
-      contents: write   # POST /repos/{repo}/dispatches
+      contents: write # POST /repos/{repo}/dispatches
       pull-requests: read
       checks: read
     steps:
