@@ -10,14 +10,32 @@ name: Claude Autofix
 on:
   pull_request_review:
     types: [submitted]
+  # CI failures. GitHub does not fire check_suite for suites created by
+  # Actions, so the Actions workflows to watch must be named here. List
+  # every workflow whose failure Claude should try to fix (by `name:`).
+  workflow_run:
+    workflows: ["CI Trigger"]
+    types: [completed]
+  # Non-Actions check apps (CodeQL default setup, github-advanced-security,
+  # codecov, ...).
   check_suite:
     types: [completed]
+  # Raised by the shared workflow's dispatch-failing-checks job; this is the
+  # event that actually runs Claude for CI/check failures.
+  repository_dispatch:
+    types: [claude-autofix-failing-checks]
 
-# One autofix run per PR at a time. Concurrency must live here, at the
+# One Claude run per PR at a time. Concurrency must live here, at the
 # caller: a workflow_call runs inside the caller's run, and a duplicate
 # group in the called workflow could queue behind this one.
+#
+# The two Claude jobs (review feedback, failing checks) key on the PR
+# number so they serialise against each other. The dispatcher runs key on
+# a separate `dispatch-<sha>` group: they only raise a repository_dispatch,
+# and sharing the fixer's group would let a pending dispatcher and the
+# pending fixer evict each other (GitHub keeps one pending run per group).
 concurrency:
-  group: claude-autofix-${{ github.event.pull_request.number || github.event.check_suite.head_sha || github.run_id }}
+  group: claude-autofix-${{ github.event.pull_request.number || github.event.client_payload.pr_number || format('dispatch-{0}', github.event.check_suite.head_sha || github.event.workflow_run.head_sha || github.run_id) }}
   cancel-in-progress: false
 
 permissions:
@@ -45,7 +63,7 @@ jobs:
         .github/workflows/ai-platform-claude-autofix.yml
         .github/workflows/ai-platform-claude-autofix-trigger.yml
       # Bot actors allowed to trigger a run (reviewers on
-      # pull_request_review, the pusher on check_suite). The default is
+      # pull_request_review, the pusher on check_suite / workflow_run). The default is
       # '*' — any installed App. Uncomment to restrict to named logins:
       #
       # allowed_bots: 'claude[bot],polygon-websites-reviewer[bot]'
