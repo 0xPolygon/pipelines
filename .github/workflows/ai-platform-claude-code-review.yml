@@ -64,8 +64,10 @@ on:
         description: >-
           Base URL for the Anthropic API, e.g. a proxy or gateway in front
           of it. Forwarded to Claude Code as ANTHROPIC_BASE_URL. Empty (the
-          default) uses the public API. CLAUDE_API_KEY is sent to whichever
-          host this names, so only point it at a gateway you trust.
+          default) uses the public API. When set, CLAUDE_API_KEY is also sent
+          to that host as a bearer token (ANTHROPIC_AUTH_TOKEN), which
+          gateways such as OpenRouter require, so only point it at a gateway
+          you trust.
         type: string
         required: false
         default: ''
@@ -137,6 +139,12 @@ jobs:
       # claude-code-action reads ANTHROPIC_BASE_URL from the caller's env
       # context (not from an input), so it has to be forwarded here.
       ANTHROPIC_BASE_URL: ${{ inputs.anthropic_base_url }}
+      # Claude Code sends anthropic_api_key as `x-api-key`, but gateways such
+      # as OpenRouter authenticate with `Authorization: Bearer`, which Claude
+      # Code only sends for ANTHROPIC_AUTH_TOKEN. A custom base URL means a
+      # gateway, so pass the same key both ways (OpenRouter's documented
+      # setup). Left empty for the public API so default auth is untouched.
+      ANTHROPIC_AUTH_TOKEN: ${{ inputs.anthropic_base_url != '' && secrets.CLAUDE_API_KEY || '' }}
       # Model resolution: explicit input, then the org-wide default variable,
       # then a hard fallback. Inside a called workflow `vars` is the CALLER's
       # repository/organization variables, so the org default is read here
