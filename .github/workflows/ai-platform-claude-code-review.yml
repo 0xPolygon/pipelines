@@ -32,6 +32,9 @@
 #       uses: 0xPolygon/pipelines/.github/workflows/ai-platform-claude-code-review.yml@main
 #       with:
 #         mode: approve
+#         # Optional per-repo overrides; '' falls through to the defaults.
+#         # model: ${{ vars.CLAUDE_REVIEW_MODEL }}
+#         # anthropic_base_url: ${{ vars.ANTHROPIC_BASE_URL }}
 #       secrets:
 #         CLAUDE_API_KEY: ${{ secrets.CLAUDE_API_KEY }}
 
@@ -50,10 +53,22 @@ on:
         type: string
         default: 'comment'
       model:
-        description: Claude model used for the review.
+        description: >-
+          Claude model used for the review. Empty (the default) uses the
+          caller's DEFAULT_CLAUDE_CODE_REVIEW_MODEL Actions variable (org- or
+          repo-level), and 'claude-sonnet-5' if that is unset either.
         type: string
         required: false
-        default: 'claude-sonnet-4-6'
+        default: ''
+      anthropic_base_url:
+        description: >-
+          Base URL for the Anthropic API, e.g. a proxy or gateway in front
+          of it. Forwarded to Claude Code as ANTHROPIC_BASE_URL. Empty (the
+          default) uses the public API. CLAUDE_API_KEY is sent to whichever
+          host this names, so only point it at a gateway you trust.
+        type: string
+        required: false
+        default: ''
     secrets:
       CLAUDE_API_KEY:
         required: true
@@ -118,6 +133,16 @@ jobs:
       issues: read
       id-token: write
       actions: read
+    env:
+      # claude-code-action reads ANTHROPIC_BASE_URL from the caller's env
+      # context (not from an input), so it has to be forwarded here.
+      ANTHROPIC_BASE_URL: ${{ inputs.anthropic_base_url }}
+      # Model resolution: explicit input, then the org-wide default variable,
+      # then a hard fallback. Inside a called workflow `vars` is the CALLER's
+      # repository/organization variables, so the org default is read here
+      # rather than passed as an input. `||` also covers a caller wiring
+      # `model` to an unset variable, which arrives as ''.
+      CLAUDE_MODEL: ${{ inputs.model || vars.DEFAULT_CLAUDE_CODE_REVIEW_MODEL || 'claude-sonnet-5' }}
     steps:
       # Default pull_request checkout (the PR merge commit) — no explicit
       # head-SHA ref, which CodeQL flags as untrusted checkout.
@@ -136,7 +161,7 @@ jobs:
           # PRs it authors still get reviewed.
           allowed_bots: claude
           claude_args: |
-            --model ${{ inputs.model }}
+            --model ${{ env.CLAUDE_MODEL }}
           plugin_marketplaces: 'https://github.com/anthropics/claude-code.git'
           plugins: 'code-review@claude-code-plugins'
           prompt: '/code-review:code-review --comment'
@@ -160,7 +185,7 @@ jobs:
           anthropic_api_key: ${{ secrets.CLAUDE_API_KEY }}
           allowed_bots: claude
           claude_args: |
-            --model ${{ inputs.model }}
+            --model ${{ env.CLAUDE_MODEL }}
             --max-turns 60
             --allowedTools "Read,Grep,Glob,Bash(gh pr diff:*),Bash(gh pr view:*),Bash(gh pr review:*),Bash(gh api:*)"
           prompt: |
