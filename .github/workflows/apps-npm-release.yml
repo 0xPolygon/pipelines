@@ -166,11 +166,18 @@ jobs:
             exit 1
           fi
 
-      # The snapshot job never pushes, so the job token is not persisted.
-      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
+      # Credentials stay persisted here on purpose. `changeset version` finds the
+      # commit that added each changeset through @changesets/git, which deepens
+      # a shallow clone with `git fetch --deepen=50` in a loop that ignores the
+      # fetch's exit code: on a private or internal caller an unauthenticated
+      # fetch fails forever and the job hangs to its timeout (polygon-websites
+      # hit this, 0xPolygon/polygon-websites#497). The persisted token is this
+      # job's read-only github.token (contents: read, pull-requests: read), not
+      # the release bot; the release job's changesets/action authenticates its
+      # own deepen through ~/.netrc.
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4 # zizmor: ignore[artipacked]
         with:
           fetch-depth: 1
-          persist-credentials: false
 
       - uses: pnpm/action-setup@41ff72655975bd51cab0327fa583b6e92b6d3061 # v4
 
