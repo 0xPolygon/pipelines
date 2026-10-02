@@ -192,7 +192,7 @@ See [Adding a new composite action with compiled dist](#adding-a-new-composite-a
 
 | Workflow | Purpose |
 |----------|---------|
-| `gcp_pipeline_release_image.yaml` | Canonical Docker image build + push to GCP Artifact Registry with OIDC auth. The Apps Team `apps-docker-release.yml` delegates to this. |
+| `gcp_pipeline_release_image.yaml` | Canonical Docker image build + push to GCP Artifact Registry with OIDC auth. Builds each platform in `platforms` natively on its own runner (`runner_amd64` / `runner_arm64` inputs; arm64 defaults to GitHub's `ubuntu-24.04-arm`) and merges the per-platform digests into one tagged multi-platform manifest — no QEMU emulation. The Apps Team `apps-docker-release.yml` delegates to this. |
 | `generate_version.yaml` | Produces a deterministic version string `<iso-date>-<short-sha>-<run-id>-<run-number>` for consumers that need a build identifier. |
 | `codeql.yml` | GitHub CodeQL security scanning. Generic template — consumers customise language matrix. |
 
