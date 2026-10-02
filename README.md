@@ -31,7 +31,7 @@ in its own separate GitHub Actions job with its own runner.
 | `apps-ci.yml` | Lint, typecheck, and test on PRs | _(none)_ |
 | `apps-changeset-check.yml` | PR gate: requires a changeset; posts/deletes instructions comment | _(none)_ |
 | `apps-codegen-drift-check.yml` | PR gate: runs `pnpm -r --include-workspace-root run --if-present codegen-drift-check` (no-op when no package defines the script) | _(none)_ |
-| `apps-npm-release.yml` | Changesets release pipeline (version bumps, npm publish, git tags) and on-demand snapshot publish via the `snapshot_tag` input | `CHANGESET_RELEASE_BOT_APP_ID`, `CHANGESET_RELEASE_BOT_APP_PRIVATE_KEY` |
+| `apps-npm-release.yml` | Changesets release pipeline (version bumps, npm publish, git tags) and on-demand snapshot publish via the `snapshot_tag` input; opt-in npm staged publishing (maintainer 2FA approval before a version goes live) via `staged_publish` | `CHANGESET_RELEASE_BOT_APP_ID`, `CHANGESET_RELEASE_BOT_APP_PRIVATE_KEY` |
 | `apps-docker-release.yml` | GCP image push on version tag (delegates to `gcp_pipeline_release_image.yaml`) | `build_params_gh_secret_keys` |
 | `apps-pr-labeler.yml` | Labels `.github/`-only PRs as `do-not-notify`; removes label when non-`.github/` changes are added | _(none)_ |
 | `apps-slack-merge-notify.yml` | Posts a Slack Block Kit message when a PR is merged | `SLACK_WEBHOOK_URL` |
@@ -55,6 +55,7 @@ system state automatically.
 | `actions/check-dockerfile` | Pre-flight gate: resolve a changeset tag and report whether the package ships a Dockerfile | No — pure shell |
 | `actions/docker-test` | Resolve service from tag, build image, start container, run tests, stop | No — pure shell |
 | `actions/npm-release` | Publish, tag, and release post-changesets merge | No — bash script |
+| `actions/npm-stage-publish` | Upgrade npm and resolve the `npm stage publish` drop-in for `changeset publish` (used by `apps-npm-release.yml` when `staged_publish: true`) | Yes — ncc bundle |
 | `actions/slack-notify` | Post Slack Block Kit message from `pr.json` | Yes — ncc bundle |
 | `actions/upsert-changeset-comment` | Post or remove changeset nag comment on a PR | Yes — ncc bundle |
 
@@ -183,6 +184,36 @@ respectively. Both contain logic that runs across repository boundaries inside a
 reusable workflow context, so they must be compiled ncc bundles (raw
 `.github/scripts/` files are not accessible in the calling repo's workspace).
 See [Adding a new composite action with compiled dist](#adding-a-new-composite-action-with-compiled-dist).
+
+### Staged publishing (`apps-npm-release.yml` → `staged_publish: true`)
+
+OIDC trusted publishing removes the long-lived npm token, but it also removes
+any human from the publish: a merged release PR goes live on npm with no
+2FA anywhere. Packages that want a maintainer to sign off on every version
+opt in with `staged_publish: true` on the trigger's `with:` block. Every
+publish — release and snapshot — then goes through `npm stage publish`: the
+version is uploaded but not installable until a maintainer approves it on
+npmjs.com or with `npm stage approve <stage-id>`, which prompts for 2FA.
+
+npm offers no flag or config that makes `npm publish` stage, so `changeset
+publish` cannot do this itself. `actions/npm-stage-publish` bundles a drop-in
+that changesets/action runs as its `publish` command instead: `changeset tag`
+picks out versions with no git tag yet, the public ones are packed with
+`pnpm pack` and staged, and only staged versions print the `New tag:` lines
+the action reads to push tags and create GitHub Releases.
+
+Things to know before opting in:
+
+- **Tags and Releases are created at staging time**, before approval. A
+  GitHub Release can exist for a version that isn't installable yet, and a
+  rejected version keeps its tag and Release until someone deletes them.
+- **The npm trusted publisher must allow staging.** Enable staged publishing
+  on the package's trusted-publisher settings
+  (`npm trust ... --allow-stage-publish`). A publisher that only allows
+  `npm publish` rejects the stage.
+- **A lost tag push fails loudly on the next run.** If a version is staged
+  but its tag never reached the remote, the next release run tries to stage
+  it again, and npm refuses the duplicate. Push the tag by hand to recover.
 
 ---
 

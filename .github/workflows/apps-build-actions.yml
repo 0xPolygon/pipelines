@@ -45,3 +45,21 @@ jobs:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           DIST_PATH: .github/actions/upsert-changeset-comment/dist/index.js
         run: node .github/scripts/commit-dist.ts
+
+  build-npm-stage-publish:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
+      - uses: pnpm/action-setup@41ff72655975bd51cab0327fa583b6e92b6d3061 # v4
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
+        with:
+          node-version-file: .nvmrc
+          check-latest: true
+          cache: pnpm
+      - run: pnpm install --frozen-lockfile
+      - run: pnpm run build:npm-stage-publish
+      - name: Commit dist if changed
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          DIST_PATH: .github/actions/npm-stage-publish/dist/index.js
+        run: node .github/scripts/commit-dist.ts

@@ -60,6 +60,8 @@ importers:
         specifier: ^5.0.0
         version: 5.9.3
 
+  packages/npm-stage-publish: {}
+
   packages/slack-notify:
     dependencies:
       '@slack/webhook':
