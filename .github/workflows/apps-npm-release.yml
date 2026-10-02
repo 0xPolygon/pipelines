@@ -56,6 +56,10 @@ jobs:
     # Skipped when `snapshot_tag` is set — that's a snapshot publish handled below.
     if: inputs.snapshot_tag == ''
     runs-on: ubuntu-latest
+    # Bounded: a git network call that cannot authenticate (e.g. changesets'
+    # deepen loop, which ignores fetch failures) fails here, not at the
+    # 6-hour default.
+    timeout-minutes: 20
     permissions:
       contents: write # release commits, tags, GitHub Releases
       pull-requests: write # the changesets Release / Deploy PR
@@ -143,6 +147,7 @@ jobs:
     # only way to cut a real version.
     if: inputs.snapshot_tag != ''
     runs-on: ubuntu-latest
+    timeout-minutes: 20
     permissions:
       contents: read # checkout
       # @changesets/changelog-github (used by most callers) looks up each
@@ -196,6 +201,11 @@ jobs:
       # resolvable against the local workspace. --ignore-scripts for the same
       # reason as the release job: this job also holds id-token: write.
       - run: pnpm install --no-frozen-lockfile --config.link-workspace-packages=true --ignore-scripts
+
+      # One authenticated deepen first, so broken git auth fails in seconds
+      # instead of spinning changesets' deepen loop to the timeout.
+      - name: Check git can fetch (changesets deepens this shallow clone)
+        run: git fetch --deepen=1
 
       - name: Version snapshot
         # Bumps versions on the runner only — never committed.
