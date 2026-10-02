@@ -37,6 +37,23 @@ on:
         type: string
         required: false
         default: ''
+      staged_publish:
+        description: >
+          Stage every publish with `npm stage publish` instead of publishing
+          it. A staged version is uploaded but not installable until a
+          package maintainer approves it on npmjs.com (or with `npm stage
+          approve`) behind a 2FA challenge — a human proof-of-presence step
+          that OIDC trusted publishing alone does not give. Applies to both
+          the release and snapshot jobs. Git tags and GitHub Releases are
+          still created at staging time, so a Release can exist for a version
+          that is awaiting approval.
+
+          Requires the package's npm trusted publisher to allow staged
+          publishing (`npm trust ... --allow-stage-publish`, or the
+          equivalent setting on npmjs.com).
+        type: boolean
+        required: false
+        default: false
     secrets:
       CHANGESET_RELEASE_BOT_APP_ID:
         required: true
@@ -76,6 +93,11 @@ jobs:
           registry-url: 'https://registry.npmjs.org'
           # No node-auth-token — npm auth handled by OIDC
 
+      - name: Set up staged publishing
+        id: stage
+        if: inputs.staged_publish
+        uses: 0xPolygon/pipelines/.github/actions/npm-stage-publish@main
+
       # The release PR replaces workspace:* with real semver ranges for all
       # intra-monorepo deps (e.g. ^2.0.0). Those versions don't exist on
       # npm yet — they're what we're about to publish.
@@ -99,7 +121,10 @@ jobs:
           # run publish: capture published packages, push their tags, and
           # create a GitHub Release per tag with the body extracted from
           # each package's CHANGELOG.md `## <version>` section.
-          publish: pnpm exec changeset publish
+          # With `staged_publish`, a drop-in script stages instead of
+          # publishing and emits the same `New tag:` lines the action reads,
+          # so tag pushes and GitHub Releases work unchanged.
+          publish: ${{ inputs.staged_publish && format('node {0}', steps.stage.outputs.script) || 'pnpm exec changeset publish' }}
           createGithubReleases: true
         env:
           GITHUB_TOKEN: ${{ steps.app-token.outputs.token }}
@@ -150,6 +175,11 @@ jobs:
           registry-url: 'https://registry.npmjs.org'
           # No node-auth-token — npm auth handled by OIDC trusted publishing
 
+      - name: Set up staged publishing
+        id: stage
+        if: inputs.staged_publish
+        uses: 0xPolygon/pipelines/.github/actions/npm-stage-publish@main
+
       # See the comment on the equivalent step in the `release` job: snapshot
       # version() rewrites workspace:* to e.g. 0.0.0-pre-3.9.8-<timestamp>
       # for every co-published package, and those versions don't exist on
@@ -176,6 +206,7 @@ jobs:
         run: pnpm exec changeset version --snapshot "$SNAPSHOT_TAG"
 
       - name: Publish snapshot
+        if: ${{ !inputs.staged_publish }}
         # `--snapshot` is intentionally NOT passed to `changeset publish`:
         # the publish command only destructures `{ otp, tag, gitTag }`
         # from its flags. In `@changesets/cli` ≤2.30.x `--snapshot` is
@@ -192,3 +223,11 @@ jobs:
           SNAPSHOT_TAG: ${{ inputs.snapshot_tag }}
         shell: bash
         run: pnpm exec changeset publish --tag "$SNAPSHOT_TAG" --no-git-tag
+
+      - name: Stage snapshot
+        if: inputs.staged_publish
+        env:
+          SNAPSHOT_TAG: ${{ inputs.snapshot_tag }}
+          STAGE_SCRIPT: ${{ steps.stage.outputs.script }}
+        shell: bash
+        run: node "$STAGE_SCRIPT"

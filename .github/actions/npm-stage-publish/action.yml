@@ -1,0 +1,30 @@
+name: npm stage publish
+description: >
+  Prepares the runner for npm staged publishing and resolves the script that
+  stages releases in place of `changeset publish`. The bundled script is not
+  run here — changesets/action runs it as its `publish` command, because the
+  action reads that command's stdout to decide which tags to push and which
+  GitHub Releases to create.
+
+outputs:
+  script:
+    description: Path to the staged-publish script, run with `node`
+    value: ${{ steps.resolve.outputs.script }}
+
+runs:
+  using: composite
+  steps:
+    # `npm stage` first shipped in npm 11.15.0; the npm bundled with the
+    # runner's Node may predate it.
+    - name: Install an npm that supports staged publishing
+      shell: bash
+      run: npm install -g npm@^11.15.0
+
+    - name: Resolve script path
+      id: resolve
+      shell: bash
+      env:
+        # Assign github.action_path to an env var before shell use to prevent
+        # expression injection if the path contains special characters.
+        ACTION_PATH: ${{ github.action_path }}
+      run: echo "script=$ACTION_PATH/dist/index.js" >> "$GITHUB_OUTPUT"

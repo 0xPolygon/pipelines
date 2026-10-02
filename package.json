@@ -23,8 +23,10 @@
     "typecheck": "tsc --noEmit",
     "build:slack-notify": "ncc build packages/slack-notify/src/index.ts -o .github/actions/slack-notify/dist",
     "build:upsert-changeset-comment": "ncc build packages/upsert-changeset-comment/src/index.ts -o .github/actions/upsert-changeset-comment/dist",
+    "build:npm-stage-publish": "ncc build packages/npm-stage-publish/src/index.ts -o .github/actions/npm-stage-publish/dist",
     "ci:publish": "pnpm exec changeset publish",
-    "test:npm-release": "bash scripts/test-tag-step.sh"
+    "test:npm-release": "bash scripts/test-tag-step.sh",
+    "test:npm-stage-publish": "bash scripts/test-stage-publish.sh"
   },
   "devDependencies": {
     "@changesets/cli": "^2.30.0",
