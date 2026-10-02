@@ -64,7 +64,16 @@ function isOnRegistry(pkg: WorkspacePackage): boolean {
 // `pnpm pack` rather than staging the directory directly: pnpm is what
 // rewrites `workspace:` ranges and applies `publishConfig` overrides (e.g.
 // `exports` without the source condition), and npm does neither.
+//
+// `pnpm pack` runs `prepack` but not `prepublishOnly`, which is where
+// libraries build their `dist/` — `pnpm publish` would have run it, so run it
+// here or the tarball ships without a build. Its output goes to stderr so
+// nothing it prints can be mistaken for a `New tag:` line.
 function stage({ pkg, distTag }: { pkg: WorkspacePackage; distTag: string }): void {
+  execFileSync('pnpm', ['run', '--if-present', 'prepublishOnly'], {
+    cwd: pkg.path,
+    stdio: ['ignore', 2, 'inherit']
+  });
   const dest = mkdtempSync(join(tmpdir(), 'stage-'));
   run('pnpm', ['pack', '--pack-destination', dest], pkg.path);
   const tarball = readdirSync(dest).find((f) => f.endsWith('.tgz'));

@@ -8,7 +8,8 @@
 # (`pnpm run build:npm-stage-publish`) — this tests what consumers run.
 #
 # What this tests:
-#   1. Single-package repo in pre mode: stages under the pre tag, emits v<version>
+#   1. Single-package repo in pre mode: stages under the pre tag, emits
+#      v<version>, and the tarball contains what prepublishOnly built
 #   2. Re-run once the tag is on the remote: stages nothing, emits nothing
 #   3. SNAPSHOT_TAG: stages under the snapshot tag, creates no git tag
 #   4. Monorepo: stages only public unpublished packages; private and
@@ -33,7 +34,8 @@ if [[ "$1" == view ]]; then
 fi
 if [[ "$1 $2" == "stage publish" ]]; then
   [[ "$3" == *fail* ]] && { echo "npm error E409 already staged" >&2; exit 1; }
-  echo "$(basename "$3") tag=$5" >> "$NPM_LOG"; echo "+ staged (staged with id abc)"; exit 0
+  echo "$(basename "$3") tag=$5" >> "$NPM_LOG"; tar -tzf "$3" >> "$NPM_LOG.files"
+  echo "+ staged (staged with id abc)"; exit 0
 fi
 echo "unexpected npm call: $*" >&2; exit 2
 M
@@ -49,14 +51,14 @@ commit_push() { git add -A; git commit -qm "$1"; git push -q origin HEAD:main 2>
 changesets_cfg() { mkdir -p .changeset; echo '{"changelog":false,"commit":false,"baseBranch":"main","updateInternalDependencies":"patch","privatePackages":{"version":true,"tag":true},"ignore":[],"fixed":[],"linked":[],"access":"restricted"}' > .changeset/config.json; }
 install_cli() { pnpm add -D -w @changesets/cli@2.31.1 --silent >/dev/null 2>&1 || pnpm add -D @changesets/cli@2.31.1 --silent >/dev/null 2>&1; }
 runit() { NPM_LOG=$ROOT/npm.log PATH="$MOCK:$PATH" node "$DIST" > $ROOT/out.txt 2>$ROOT/err.txt; echo $? > $ROOT/rc; }
-reset() { : > $ROOT/npm.log; }
+reset() { : > $ROOT/npm.log; : > $ROOT/npm.log.files; }
 
 echo "Test 1: single-package root repo in beta pre mode"
 mkdir $ROOT/t1; mkrepo $ROOT/t1
-echo '{"name":"@acme/sdk","version":"1.0.0-beta.32","publishConfig":{"access":"public"}}' > package.json
+echo '{"name":"@acme/sdk","version":"1.0.0-beta.32","files":["dist"],"scripts":{"prepublishOnly":"mkdir -p dist && echo built > dist/index.js"},"publishConfig":{"access":"public"}}' > package.json
 printf 'minimumReleaseAge: 0\n' > pnpm-workspace.yaml; changesets_cfg
 echo '{"mode":"pre","tag":"beta","initialVersions":{"@acme/sdk":"1.0.0-beta.32"},"changesets":[]}' > .changeset/pre.json
-install_cli; echo node_modules > .gitignore; commit_push init; git tag v1.0.0-beta.32; git push -q origin v1.0.0-beta.32
+install_cli; printf 'node_modules\ndist\n' > .gitignore; commit_push init; git tag v1.0.0-beta.32; git push -q origin v1.0.0-beta.32
 node -e 'const f="package.json",p=require("./"+f);p.version="1.0.0-beta.33";require("fs").writeFileSync(f,JSON.stringify(p))'; commit_push release
 git tag -d v1.0.0-beta.32 >/dev/null  # mimic fetch-depth 1 checkout: no local tags
 reset; runit
@@ -65,6 +67,7 @@ check "staged under beta" 'grep -q "acme-sdk-1.0.0-beta.33.tgz tag=beta" $ROOT/n
 check "exactly one stage" '[[ $(wc -l < $ROOT/npm.log) -eq 1 ]]'
 check "New tag: v1.0.0-beta.33 printed once" '[[ $(grep -c "New tag: v1.0.0-beta.33" $ROOT/out.txt) -eq 1 ]]'
 check "old version not re-tagged" '! grep -q "beta.32" $ROOT/out.txt'
+check "prepublishOnly build is in the tarball" 'grep -q "package/dist/index.js" $ROOT/npm.log.files'
 check "local tag created for action to push" 'git rev-parse -q --verify refs/tags/v1.0.0-beta.33 >/dev/null'
 
 echo "Test 2: re-run after tag reached remote is a no-op"
