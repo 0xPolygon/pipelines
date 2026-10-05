@@ -166,8 +166,8 @@ jobs:
           APP_NAME: ${{ inputs.app_name }}
           DOCKER_FILE: ${{ inputs.docker_file }}
         run: |
-          # APP_NAME and taskdef_file_template are written to GITHUB_ENV below; a newline
-          # would let a value inject extra variables.
+          # APP_NAME and taskdef_file_template are written to GITHUB_OUTPUT below; a newline
+          # would let a value inject extra outputs.
           if [[ "$APP_NAME$taskdef_file_template" == *[$'\r\n']* ]]; then
             echo "::error::app_name/taskdef_file_template must not contain newlines"
             exit 1
@@ -183,16 +183,16 @@ jobs:
           fi
           docker build -t $ECR_REGISTRY/$ECR_REPOSITORY:$IMAGE_TAG -f $docker_file_basename .
           docker push $ECR_REGISTRY/$ECR_REPOSITORY:$IMAGE_TAG
-          echo "image=$ECR_REGISTRY/$ECR_REPOSITORY:$IMAGE_TAG" >> "$GITHUB_ENV"
-          echo "TASKDEF_FILE=$(dirname "$taskdef_file_template")/${APP_NAME}.json" >> "$GITHUB_ENV"
+          echo "image=$ECR_REGISTRY/$ECR_REPOSITORY:$IMAGE_TAG" >> "$GITHUB_OUTPUT"
+          echo "taskdef_file=$(dirname "$taskdef_file_template")/${APP_NAME}.json" >> "$GITHUB_OUTPUT"
 
       - name: Fill in the new image ID in the Amazon ECS task definition
         id: task-def
         uses: aws-actions/amazon-ecs-render-task-definition@138c24f321fdbdf7edee4a685519d253cae2cdea # v1.9.0
         with:
-          task-definition: "${{ env.TASKDEF_FILE }}"
+          task-definition: "${{ steps.build-image.outputs.taskdef_file }}"
           container-name: ${{ inputs.app_name }}
-          image: ${{ env.image }}
+          image: ${{ steps.build-image.outputs.image }}
 
       - name: Deploy Amazon ECS task definition
         uses: aws-actions/amazon-ecs-deploy-task-definition@69e7aed9b8acdd75a6c585ac669c33831ab1b9a3 # v1.5.0
