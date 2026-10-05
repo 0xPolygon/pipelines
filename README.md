@@ -186,6 +186,37 @@ See [Adding a new composite action with compiled dist](#adding-a-new-composite-a
 
 ---
 
+## Pinning callers
+
+The examples above use `@main` for brevity. `@main` is a moving target: every
+merge here is picked up by every caller on its next run, including workflows
+that receive secrets and run with `id-token`/`contents: write`. Callers should
+pin to an immutable ref instead, for both reusable workflows and composite
+actions:
+
+```yaml
+jobs:
+  check:
+    # Prefer a full commit SHA; keep a human-readable comment with the version
+    uses: 0xPolygon/pipelines/.github/workflows/apps-ci.yml@<full-40-char-sha> # <tag or date>
+```
+
+- **Full commit SHA** is the only ref that cannot be moved. Prefer it.
+- **A release tag** (`@vX.Y.Z`) is acceptable when it is protected against
+  re-pointing. Tags are only as immutable as the repo's tag protection.
+- Bump the pin deliberately (Dependabot's `github-actions` ecosystem or
+  Renovate can open the PRs) rather than tracking `@main`.
+- Pin the `uses:` of every job and step in the trigger file. A pinned
+  reusable workflow still resolves nested `0xPolygon/pipelines/.github/actions/*@main`
+  references inside it at `main` until those are pinned here too.
+
+> **Status:** this repo does not yet publish release tags that contain the
+> current `apps-*` workflows (the existing `v1`–`v3` tags predate them), so the
+> trigger templates in this repo still show `@main`. Until a tag is cut,
+> callers should pin to a commit SHA of this repo.
+
+---
+
 ## Shared org infrastructure workflows
 
 ### Current

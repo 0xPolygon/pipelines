@@ -47,7 +47,7 @@ jobs:
         uses: actions/checkout@v3
 
       - name: Configure AWS credentials
-        uses: aws-actions/configure-aws-credentials@v1
+        uses: aws-actions/configure-aws-credentials@67fbcbb121271f7775d2e7715933280b06314838 # v1.7.0
         with:
           aws-region: ${{ inputs.aws_region }}
           role-to-assume: arn:aws:iam::${{ inputs.account_number }}:role/${{ inputs.app_name }}-GithubActionsRole
@@ -55,7 +55,7 @@ jobs:
 
       - name: Login to Amazon ECR
         id: login-ecr
-        uses: aws-actions/amazon-ecr-login@v1
+        uses: aws-actions/amazon-ecr-login@5a88a04c91d5c6f97aae0d9be790e64d9b1d47b7 # v1.7.1
 
       - name: Setup node
         uses: actions/setup-node@v2
@@ -63,23 +63,36 @@ jobs:
           node-version: 20.9.0
         
       - name: Set up secrets
+        env:
+          BUILD_PARAMS_GH_SECRET_KEYS: ${{ secrets.build_params_gh_secret_keys }}
         run: |
-          if [ -n "${{ secrets.build_params_gh_secret_keys }}" ]; then
-            echo "${{ secrets.build_params_gh_secret_keys }}" > secrets.json
-          fi      
+          if [ -n "$BUILD_PARAMS_GH_SECRET_KEYS" ]; then
+            # Callers store this secret either as plain JSON or with backslash-escaped
+            # quotes. The former inline `echo "..."` unescaped \" \\ \$ and \` as
+            # bash does inside double quotes; keep doing that for non-JSON input so
+            # existing secrets keep working.
+            secrets_json="$BUILD_PARAMS_GH_SECRET_KEYS"
+            if ! jq -e . <<< "$secrets_json" > /dev/null 2>&1; then
+              secrets_json="$(sed -E 's/\\([\\"$`])/\1/g' <<< "$secrets_json")"
+            fi
+            echo "$secrets_json" > secrets.json
+          fi
 
       - name: Parse secrets and set environment variables
         run: |
           if [ -f secrets.json ]; then
             echo "Setting environment variables from JSON..."
-            jq -r 'to_entries | .[] | "\(.key)=\(.value)"' secrets.json >> $GITHUB_ENV
+            jq -r 'to_entries | .[] | "\(.key)=\(.value)"' secrets.json >> "$GITHUB_ENV"
           fi
 
       - name: Set up secrets from base64 encoded secret to .env file in code directory
+        env:
+          ENV_FILE_SECRET_VAR: ${{ inputs.env_file_secret_var }}
+          ENV_FILE_SECRET_VALUE: ${{ secrets[inputs.env_file_secret_var] }}
         run: |
-          if [[ -n "${{ inputs.env_file_secret_var }}" ]]; then
-            echo "Fetching and decoding .env file data from secret.${{ inputs.env_file_secret_var }}"
-            echo "${{ secrets[inputs.env_file_secret_var] }}" | base64 -d > code/.env
+          if [[ -n "$ENV_FILE_SECRET_VAR" ]]; then
+            echo "Fetching and decoding .env file data from secret.$ENV_FILE_SECRET_VAR"
+            echo "$ENV_FILE_SECRET_VALUE" | base64 -d > code/.env
           fi
 
       - name: INSTALL
@@ -97,18 +110,18 @@ jobs:
         run: |
           docker build -t $ECR_REGISTRY/$ECR_REPOSITORY:$IMAGE_TAG .
           docker push $ECR_REGISTRY/$ECR_REPOSITORY:$IMAGE_TAG
-          echo "image=$ECR_REGISTRY/$ECR_REPOSITORY:$IMAGE_TAG" >> $GITHUB_OUTPUT
+          echo "image=$ECR_REGISTRY/$ECR_REPOSITORY:$IMAGE_TAG" >> "$GITHUB_OUTPUT"
 
       - name: Fill in the new image ID in the Amazon ECS task definition
         id: task-def
-        uses: aws-actions/amazon-ecs-render-task-definition@v1
+        uses: aws-actions/amazon-ecs-render-task-definition@138c24f321fdbdf7edee4a685519d253cae2cdea # v1.9.0
         with:
           task-definition: ${{ inputs.taskdef_file }}
           container-name: ${{ inputs.app_name }}
           image: ${{ steps.build-image.outputs.image }}
 
       - name: Deploy Amazon ECS task definition
-        uses: aws-actions/amazon-ecs-deploy-task-definition@v1
+        uses: aws-actions/amazon-ecs-deploy-task-definition@69e7aed9b8acdd75a6c585ac669c33831ab1b9a3 # v1.5.0
         with:
           task-definition: ${{ steps.task-def.outputs.task-definition }}
           service: ${{ inputs.app_name }}-ecs-service

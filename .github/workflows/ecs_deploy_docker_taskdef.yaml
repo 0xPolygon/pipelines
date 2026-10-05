@@ -73,39 +73,60 @@ jobs:
           path: ./code
 
       - name: Set up secrets
+        env:
+          BUILD_PARAMS_GH_SECRET_KEYS: ${{ secrets.build_params_gh_secret_keys }}
         run: |
-          if [ -n "${{ secrets.build_params_gh_secret_keys }}" ]; then
-            echo "${{ secrets.build_params_gh_secret_keys }}" > secrets.json
+          if [ -n "$BUILD_PARAMS_GH_SECRET_KEYS" ]; then
+            # Callers store this secret either as plain JSON or with backslash-escaped
+            # quotes. The former inline `echo "..."` unescaped \" \\ \$ and \` as
+            # bash does inside double quotes; keep doing that for non-JSON input so
+            # existing secrets keep working.
+            secrets_json="$BUILD_PARAMS_GH_SECRET_KEYS"
+            if ! jq -e . <<< "$secrets_json" > /dev/null 2>&1; then
+              secrets_json="$(sed -E 's/\\([\\"$`])/\1/g' <<< "$secrets_json")"
+            fi
+            echo "$secrets_json" > secrets.json
           fi
 
       - name: Parse secrets and set environment variables
         run: |
           if [ -f secrets.json ]; then
             echo "Setting environment variables from JSON..."
-            jq -r 'to_entries | .[] | "\(.key)=\(.value)"' secrets.json >> $GITHUB_ENV
+            jq -r 'to_entries | .[] | "\(.key)=\(.value)"' secrets.json >> "$GITHUB_ENV"
             jq -r 'to_entries | .[] | "\(.key)=\(.value)"' secrets.json | tr '\n' '\r\n' > code/.env
           fi
 
       - name: Set up secrets from base64 encoded secret to .env file in code directory
+        env:
+          ENV_FILE_SECRET_VAR: ${{ inputs.env_file_secret_var }}
+          ENV_FILE_SECRET_VALUE: ${{ secrets[inputs.env_file_secret_var] }}
         run: |
-          if [[ -n "${{ inputs.env_file_secret_var }}" ]]; then
-            echo "Fetching and decoding .env file data from secret.${{ inputs.env_file_secret_var }}"
-            echo "${{ secrets[inputs.env_file_secret_var] }}" | base64 -d > code/.env
+          if [[ -n "$ENV_FILE_SECRET_VAR" ]]; then
+            echo "Fetching and decoding .env file data from secret.$ENV_FILE_SECRET_VAR"
+            echo "$ENV_FILE_SECRET_VALUE" | base64 -d > code/.env
           fi
 
       - name: Set variables
+        env:
+          TASKDEF_FILE_SCRIPT_INPUT: ${{ inputs.taskdef_file_script }}
+          TASKDEF_FILE_TEMPLATE_INPUT: ${{ inputs.taskdef_file_template }}
         run: |
-          if [ "${{ inputs.taskdef_file_script }}" == "local" ]; then
-            echo "taskdef_file_script=pipelines/Support/taskdef_template/taskdef_creator.py" >> $GITHUB_ENV
-            echo "taskdef_file_template=pipelines/Support/taskdef_template/taskdef_template.json" >> $GITHUB_ENV
+          if [ "$TASKDEF_FILE_SCRIPT_INPUT" == "local" ]; then
+            echo "taskdef_file_script=pipelines/Support/taskdef_template/taskdef_creator.py" >> "$GITHUB_ENV"
+            echo "taskdef_file_template=pipelines/Support/taskdef_template/taskdef_template.json" >> "$GITHUB_ENV"
           else
-            echo "taskdef_file_script=code/${{inputs.taskdef_file_script}}" >> $GITHUB_ENV
-            echo "taskdef_file_template=code/${{inputs.taskdef_file_template}}" >> $GITHUB_ENV
+            echo "taskdef_file_script=code/${TASKDEF_FILE_SCRIPT_INPUT}" >> "$GITHUB_ENV"
+            echo "taskdef_file_template=code/${TASKDEF_FILE_TEMPLATE_INPUT}" >> "$GITHUB_ENV"
           fi
 
       - name: Create taskdef file dynamically using parameters passed
+        env:
+          TASKDEF_FILE_VARS: ${{ inputs.taskdef_file_vars }}
+          ACCOUNT_NUMBER: ${{ inputs.account_number }}
+          APP_NAME: ${{ inputs.app_name }}
         run: |
-          script_dir="$(dirname ${{ env.taskdef_file_script }})"
+          # taskdef_file_script / taskdef_file_template are set by the previous step via GITHUB_ENV
+          script_dir="$(dirname "$taskdef_file_script")"
           if [[ -z "$script_dir" ]]; then
             echo "Warning: Script name doesn't contain a directory path. Using current directory."
             script_dir="."
@@ -114,12 +135,12 @@ jobs:
           python -m pip install --upgrade pip
           pip install pipenv
           pipenv install
-          pipenv run python ${{ env.taskdef_file_script }} \
-            -pf code/${{ inputs.taskdef_file_vars }} -tt ${{ env.taskdef_file_template }} \
-            -acc ${{ inputs.account_number }} -app ${{ inputs.app_name }}
+          pipenv run python "$taskdef_file_script" \
+            -pf "code/${TASKDEF_FILE_VARS}" -tt "$taskdef_file_template" \
+            -acc "$ACCOUNT_NUMBER" -app "$APP_NAME"
 
       - name: Configure AWS credentials
-        uses: aws-actions/configure-aws-credentials@v4
+        uses: aws-actions/configure-aws-credentials@7474bc4690e29a8392af63c5b98e7449536d5c3a # v4.3.1
         with:
           aws-region: ${{ inputs.aws_region }}
           role-to-assume: |
@@ -128,7 +149,7 @@ jobs:
 
       - name: Login to Amazon ECR
         id: login-ecr
-        uses: aws-actions/amazon-ecr-login@v1
+        uses: aws-actions/amazon-ecr-login@5a88a04c91d5c6f97aae0d9be790e64d9b1d47b7 # v1.7.1
 
       - name: Build, tag, and push image to Amazon ECR
         id: build-image
@@ -136,31 +157,33 @@ jobs:
           ECR_REGISTRY: ${{ steps.login-ecr.outputs.registry }}
           IMAGE_TAG: "${{ github.sha }}-${{ github.run_id }}"
           ECR_REPOSITORY: ${{ inputs.app_name }}-ecr
+          APP_NAME: ${{ inputs.app_name }}
+          DOCKER_FILE: ${{ inputs.docker_file }}
         run: |
           cd code
           current_dir=$(realpath .)
-          target_dir=$(dirname "$(realpath "${{ inputs.docker_file }}")")
+          target_dir=$(dirname "$(realpath "$DOCKER_FILE")")
           if [[ "$current_dir" != "$target_dir" ]]; then
             cd "$target_dir"
-            docker_file_basename=$(basename "${{ inputs.docker_file }}")
+            docker_file_basename=$(basename "$DOCKER_FILE")
           else
-            docker_file_basename=$(basename "${{ inputs.docker_file }}")
+            docker_file_basename=$(basename "$DOCKER_FILE")
           fi
           docker build -t $ECR_REGISTRY/$ECR_REPOSITORY:$IMAGE_TAG -f $docker_file_basename .
           docker push $ECR_REGISTRY/$ECR_REPOSITORY:$IMAGE_TAG
-          echo "image=$ECR_REGISTRY/$ECR_REPOSITORY:$IMAGE_TAG" >> $GITHUB_ENV
-          echo "TASKDEF_FILE=$(dirname "${{ env.taskdef_file_template }}")/${{ inputs.app_name }}.json" >> $GITHUB_ENV
+          echo "image=$ECR_REGISTRY/$ECR_REPOSITORY:$IMAGE_TAG" >> "$GITHUB_ENV"
+          echo "TASKDEF_FILE=$(dirname "$taskdef_file_template")/${APP_NAME}.json" >> "$GITHUB_ENV"
 
       - name: Fill in the new image ID in the Amazon ECS task definition
         id: task-def
-        uses: aws-actions/amazon-ecs-render-task-definition@v1
+        uses: aws-actions/amazon-ecs-render-task-definition@138c24f321fdbdf7edee4a685519d253cae2cdea # v1.9.0
         with:
           task-definition: "${{ env.TASKDEF_FILE }}"
           container-name: ${{ inputs.app_name }}
           image: ${{ env.image }}
 
       - name: Deploy Amazon ECS task definition
-        uses: aws-actions/amazon-ecs-deploy-task-definition@v1
+        uses: aws-actions/amazon-ecs-deploy-task-definition@69e7aed9b8acdd75a6c585ac669c33831ab1b9a3 # v1.5.0
         with:
           task-definition: ${{ steps.task-def.outputs.task-definition }}
           service: ${{ inputs.app_name }}-ecs-service
