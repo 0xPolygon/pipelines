@@ -146,20 +146,75 @@ jobs:
         with:
           submodules: recursive
 
-      - name: Set up secrets
+      # build_params_gh_secret_keys is a JSON object of KEY -> value. The runner
+      # only masks that blob as a whole, not the values once they are reformatted
+      # (KEY=VALUE lines), so every value is registered with ::add-mask:: first --
+      # one call per line, since a mask only matches a single line -- and only
+      # then written anywhere. Nothing derived from the values is ever echoed.
+      # The JSON arrives through env: rather than being interpolated into the
+      # script, so its content is never parsed as shell. Do not add `cat .env`,
+      # `env`, `set -x` or similar to this step.
+      - name: Set up secrets and environment variables
+        env:
+          BUILD_PARAMS_SECRETS: ${{ secrets.build_params_gh_secret_keys }}
         run: |
-          if [ -n "${{ secrets.build_params_gh_secret_keys }}" ]; then
-            echo "${{ secrets.build_params_gh_secret_keys }}" > secrets.json
+          set -euo pipefail
+          umask 077
+
+          if [ -z "$BUILD_PARAMS_SECRETS" ]; then
+            exit 0
           fi
 
-      - name: Parse secrets and set environment variables
-        run: |
-          if [ -f secrets.json ]; then
-            echo "Setting environment variables from JSON..."
-            jq -r 'to_entries | .[] | "\(.key)=\(.value)"' secrets.json >> $GITHUB_ENV
-            jq -r 'to_entries | .[] | "\(.key)=\(.value)"' secrets.json | tr '\n' '\r\n' > .env
-            echo ".env contents:" && cat .env
+          # Callers have historically stored this either as plain JSON or with
+          # backslash-escaped quotes (which the old inline `echo "..."` unescaped).
+          # Accept both. jq's stderr is discarded because its errors can quote
+          # fragments of the input.
+          json="$BUILD_PARAMS_SECRETS"
+          if ! jq -e 'type == "object"' <<< "$json" > /dev/null 2>&1; then
+            json="${json//\\\"/\"}"
+            if ! jq -e 'type == "object"' <<< "$json" > /dev/null 2>&1; then
+              echo "::error::build_params_gh_secret_keys is not a valid JSON object"
+              exit 1
+            fi
           fi
+
+          # NUL-delimited key/value pairs, so values keep embedded and trailing
+          # newlines intact. Value rendering matches the former "\(.value)".
+          entries() {
+            jq -j 'to_entries[] | "\(.key)\u0000\(.value)\u0000"' <<< "$json"
+          }
+
+          # Pass 1: mask. Runs before anything is written or exported.
+          while IFS= read -r -d '' key && IFS= read -r -d '' value; do
+            while IFS= read -r line || [ -n "$line" ]; do
+              line="${line%$'\r'}"
+              [[ "$line" =~ [^[:space:]] ]] || continue
+              # Workflow-command data is %-decoded by the runner; escape so the
+              # mask matches the literal text.
+              line="${line//'%'/'%25'}"
+              echo "::add-mask::${line}"
+            done <<< "$value"
+          done < <(entries)
+
+          # Pass 2: write. GITHUB_ENV uses a random heredoc delimiter so a
+          # multi-line value cannot inject additional variables.
+          : > .env
+          printf '%s' "$json" > secrets.json
+          while IFS= read -r -d '' key && IFS= read -r -d '' value; do
+            if [ -z "$key" ] || [[ "$key" == *=* || "$key" == *'<<'* || "$key" == *$'\n'* || "$key" == *$'\r'* ]]; then
+              echo "::error::build_params_gh_secret_keys contains an invalid key name"
+              exit 1
+            fi
+            delim="ghadelim_$(openssl rand -hex 16)"
+            {
+              printf '%s<<%s\n' "$key" "$delim"
+              printf '%s\n' "$value"
+              printf '%s\n' "$delim"
+            } >> "$GITHUB_ENV"
+            # .env keeps its existing format: one KEY=VALUE per record, each
+            # terminated with a carriage return (the old `tr '\n' '\r'`).
+            printf '%s=%s\r' "$key" "${value//$'\n'/$'\r'}" >> .env
+          done < <(entries)
 
       # Artifact names and cache scopes cannot contain "/".
       - name: Derive platform slug
