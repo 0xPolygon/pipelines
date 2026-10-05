@@ -111,6 +111,12 @@ jobs:
           TASKDEF_FILE_SCRIPT_INPUT: ${{ inputs.taskdef_file_script }}
           TASKDEF_FILE_TEMPLATE_INPUT: ${{ inputs.taskdef_file_template }}
         run: |
+          # These values are written to GITHUB_ENV below; a newline would let a value
+          # inject extra variables.
+          if [[ "$TASKDEF_FILE_SCRIPT_INPUT$TASKDEF_FILE_TEMPLATE_INPUT" == *[$'\r\n']* ]]; then
+            echo "::error::taskdef_file_script/taskdef_file_template must not contain newlines"
+            exit 1
+          fi
           if [ "$TASKDEF_FILE_SCRIPT_INPUT" == "local" ]; then
             echo "taskdef_file_script=pipelines/Support/taskdef_template/taskdef_creator.py" >> "$GITHUB_ENV"
             echo "taskdef_file_template=pipelines/Support/taskdef_template/taskdef_template.json" >> "$GITHUB_ENV"
@@ -160,6 +166,12 @@ jobs:
           APP_NAME: ${{ inputs.app_name }}
           DOCKER_FILE: ${{ inputs.docker_file }}
         run: |
+          # APP_NAME and taskdef_file_template are written to GITHUB_ENV below; a newline
+          # would let a value inject extra variables.
+          if [[ "$APP_NAME$taskdef_file_template" == *[$'\r\n']* ]]; then
+            echo "::error::app_name/taskdef_file_template must not contain newlines"
+            exit 1
+          fi
           cd code
           current_dir=$(realpath .)
           target_dir=$(dirname "$(realpath "$DOCKER_FILE")")
