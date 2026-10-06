@@ -24,7 +24,9 @@
     "build:slack-notify": "ncc build packages/slack-notify/src/index.ts -o .github/actions/slack-notify/dist",
     "build:upsert-changeset-comment": "ncc build packages/upsert-changeset-comment/src/index.ts -o .github/actions/upsert-changeset-comment/dist",
     "ci:publish": "pnpm exec changeset publish",
-    "test:npm-release": "bash scripts/test-tag-step.sh"
+    "test:npm-release": "bash scripts/test-tag-step.sh",
+    "test:slack-pr-merged": "bash scripts/test-slack-pr-merged.sh",
+    "test": "pnpm run test:slack-pr-merged"
   },
   "devDependencies": {
     "@changesets/cli": "^2.30.0",
