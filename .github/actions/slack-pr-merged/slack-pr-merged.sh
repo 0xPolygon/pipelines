@@ -133,7 +133,7 @@ handle_message() {
   count="$(jq 'length' <<<"$refs")"
 
   if [ "$count" -eq 1 ]; then
-    add_reaction "$ts"
+    add_reaction "$ts" || return 1
     echo "Message ${ts}: single PR, reacted :${REACTION}:"
     return
   fi
@@ -160,7 +160,7 @@ handle_message() {
       --data-urlencode "thread_ts=${ts}" \
       --data-urlencode "text=$(jq -r '.text' <<<"$status")" \
       --data-urlencode "unfurl_links=false" \
-      --data-urlencode "unfurl_media=false" | slack_ok
+      --data-urlencode "unfurl_media=false" | slack_ok || return 1
     echo "Message ${ts}: replied $(jq -r '.merged' <<<"$status")/$(jq -r '.total' <<<"$status") merged"
   fi
 
