@@ -23,5 +23,6 @@ jobs:
     uses: ./.github/workflows/slack-pr-merged.yml
     secrets:
       SLACK_BOT_TOKEN: ${{ secrets.SLACK_BOT_TOKEN }}
+      PR_READ_TOKEN: ${{ secrets.PR_READ_TOKEN }}
     with:
       channel-ids: ${{ vars.SLACK_PR_MERGED_CHANNEL_IDS }}

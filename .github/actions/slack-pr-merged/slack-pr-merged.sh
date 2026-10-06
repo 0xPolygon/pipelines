@@ -4,12 +4,14 @@
 #
 #   - Message links exactly one PR (this one): adds the :git-merged: reaction.
 #   - Message links several PRs: posts a thread reply with each PR's state (:git-merged:,
-#     :github-closed:, pending) and adds the reaction only once every linked PR is merged.
-#     PRs this token cannot read are shown as "?" and never count as merged.
+#     :github-closed:, :hourglass_flowing_sand:) and adds the reaction only once every
+#     linked PR is merged. PRs this token cannot read are shown as "?" and never count
+#     as merged.
 #   - Messages that already carry the reaction are skipped.
 #
 # Usage: slack-pr-merged.sh
-# Env:   SLACK_BOT_TOKEN   bot token (scopes: channels:history, reactions:write, chat:write);
+# Env:   SLACK_BOT_TOKEN   bot token (scopes: channels:history, groups:history for private
+#                          channels, reactions:write, chat:write);
 #                          unset or empty makes the script a no-op
 #        SLACK_CHANNEL_IDS channels to scan, separated by spaces, commas or newlines;
 #                          unset or empty makes the script a no-op
@@ -56,7 +58,7 @@ JQ_STATUS='
   def tick:
     if .state == "merged" then ":\($emoji):"
     elif .state == "closed" then ":github-closed:"
-    elif .state == "open" then "pending"
+    elif .state == "open" then ":hourglass_flowing_sand:"
     else "?" end;
   ([.[] | select(.state == "merged")] | length) as $m
   | length as $t
@@ -119,23 +121,33 @@ add_reaction() {
 }
 
 # PR state of "owner/repo#N": merged, closed, open or unknown (unreadable with this token).
+# Any other failure, such as a rate limit or a 5xx, fails so the run can be re-run.
 pr_state() {
-  local ref="$1" this="$2" state
+  local ref="$1" this="$2" state errfile
   if [ "$ref" = "$this" ]; then
     echo merged
     return
   fi
+  errfile="$(mktemp)"
   if state="$(gh api "repos/${ref%#*}/pulls/${ref#*#}" \
-    --jq 'if .merged then "merged" elif .state == "closed" then "closed" else "open" end' 2>/dev/null)"; then
+    --jq 'if .merged then "merged" elif .state == "closed" then "closed" else "open" end' 2>"$errfile")"; then
+    rm -f "$errfile"
     echo "$state"
-  else
-    echo unknown
+    return
   fi
+  if grep -q 'HTTP 40[34]' "$errfile" && ! grep -qi 'rate limit' "$errfile"; then
+    rm -f "$errfile"
+    echo unknown
+    return
+  fi
+  echo "::error::GitHub lookup of ${ref} failed: $(cat "$errfile")" >&2
+  rm -f "$errfile"
+  return 1
 }
 
 # handle_message TS REFS_JSON: applies the rules to one candidate message.
 handle_message() {
-  local ts="$1" refs="$2" this="$3" count states ref status marker
+  local ts="$1" refs="$2" this="$3" count states ref state status marker
   count="$(jq 'length' <<<"$refs")"
 
   if [ "$count" -eq 1 ]; then
@@ -146,7 +158,8 @@ handle_message() {
 
   states="[]"
   while IFS= read -r ref; do
-    states="$(jq -c --arg ref "$ref" --arg state "$(pr_state "$ref" "$this")" \
+    state="$(pr_state "$ref" "$this")" || return 1
+    states="$(jq -c --arg ref "$ref" --arg state "$state" \
       '. + [{ref: $ref, state: $state}]' <<<"$states")"
   done < <(jq -r '.[]' <<<"$refs")
   status="$(build_status "${this%#*}" <<<"$states")"
