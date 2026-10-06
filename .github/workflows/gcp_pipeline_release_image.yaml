@@ -178,6 +178,12 @@ jobs:
             fi
           fi
 
+          # A NUL in a key or value would shift the NUL-delimited pairing below.
+          if ! jq -e 'all(to_entries[]; [.key, "\(.value)"] | all(explode | index([0]) == null))' <<< "$json" > /dev/null 2>&1; then
+            echo "::error::build_params_gh_secret_keys contains a NUL character"
+            exit 1
+          fi
+
           # NUL-delimited key/value pairs, so values keep embedded and trailing
           # newlines intact. Value rendering matches the former "\(.value)".
           entries() {
@@ -190,8 +196,11 @@ jobs:
               line="${line%$'\r'}"
               [[ "$line" =~ [^[:space:]] ]] || continue
               # Workflow-command data is %-decoded by the runner; escape so the
-              # mask matches the literal text.
+              # mask matches the literal text. A bare CR would end the command
+              # early (the runner splits stdout on it), so send it as %0D and
+              # let the runner mask each piece.
               line="${line//'%'/'%25'}"
+              line="${line//$'\r'/%0D}"
               echo "::add-mask::${line}"
             done <<< "$value"
           done < <(entries)
