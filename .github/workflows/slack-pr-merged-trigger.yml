@@ -1,0 +1,26 @@
+# Thin trigger for the Slack PR merged reusable workflow (slack-pr-merged.yml).
+# Consuming repos copy this file and point `uses:` at:
+#   0xPolygon/pipelines/.github/workflows/slack-pr-merged.yml@main
+# SLACK_BOT_TOKEN is an org secret and SLACK_PR_MERGED_CHANNEL_ID an org or repo
+# variable. When either is missing the job logs a notice and exits successfully.
+
+name: Slack PR merged
+
+on:
+  pull_request:
+    types: [closed]
+
+concurrency:
+  group: slack-pr-merged-${{ github.event.pull_request.number }}
+  cancel-in-progress: false
+
+permissions:
+  pull-requests: read
+
+jobs:
+  slack:
+    uses: ./.github/workflows/slack-pr-merged.yml
+    secrets:
+      SLACK_BOT_TOKEN: ${{ secrets.SLACK_BOT_TOKEN }}
+    with:
+      channel-id: ${{ vars.SLACK_PR_MERGED_CHANNEL_ID }}
