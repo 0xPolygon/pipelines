@@ -162,6 +162,12 @@ handle_message 1 '["org/repo#7","x/y#1"]' 'org/repo#7' >/dev/null
 check "re-run does not reply twice" "0" "$(calls chat.postMessage)"
 
 reset
+SLACK_FAIL=conversations.replies
+GH_STATE=([x/y#1]=open)
+handle_message 1 '["org/repo#7","x/y#1"]' 'org/repo#7' >/dev/null 2>&1
+check "thread read failure propagates without replying" "1 0" "$? $(calls chat.postMessage)"
+
+reset
 SLACK_FAIL=chat.postMessage
 GH_STATE=([x/y#1]=open)
 handle_message 1 '["org/repo#7","x/y#1"]' 'org/repo#7' >/dev/null 2>&1
@@ -173,6 +179,14 @@ handle_message 1 '["org/repo#7","x/y#1"]' 'org/repo#7' >/dev/null 2>&1
 check "GitHub lookup failure propagates without replying" "1 0" "$? $(calls chat.postMessage)"
 
 echo "main"
+reset
+# shellcheck disable=SC2016  # expanded only if the script evaluates it
+SLACK_CHANNEL_IDS=C1 LOOKBACK_DAYS='BASH_VERSINFO[$(touch "$WORK/pwned")]'
+(main >/dev/null 2>&1)
+check "non-numeric LOOKBACK_DAYS fails before any call or evaluation" "1 0 no" \
+  "$? $(calls conversations.history) $([ -e "$WORK/pwned" ] && echo yes || echo no)"
+unset LOOKBACK_DAYS
+
 reset
 SLACK_CHANNEL_IDS=" , "
 out="$(main 2>&1)"

@@ -147,7 +147,7 @@ pr_state() {
 
 # handle_message TS REFS_JSON: applies the rules to one candidate message.
 handle_message() {
-  local ts="$1" refs="$2" this="$3" count states ref state status marker
+  local ts="$1" refs="$2" this="$3" count states ref state status marker replies
   count="$(jq 'length' <<<"$refs")"
 
   if [ "$count" -eq 1 ]; then
@@ -166,12 +166,13 @@ handle_message() {
 
   # Best effort against re-runs: skip when the thread already shows this PR as merged.
   marker="|#${PR_NUMBER}> :${REACTION}:"
-  if slack conversations.replies \
+  replies="$(slack conversations.replies \
     --data-urlencode "channel=${CHANNEL}" \
     --data-urlencode "ts=${ts}" \
-    --data-urlencode "limit=200" |
-    jq -e --arg ts "$ts" --arg marker "$marker" \
-      '.ok == true and any(.messages[]?; .ts != $ts and ((.text // "") | contains($marker)))' >/dev/null; then
+    --data-urlencode "limit=200")" || return 1
+  slack_ok <<<"$replies" || return 1
+  if jq -e --arg ts "$ts" --arg marker "$marker" \
+    'any(.messages[]?; .ts != $ts and ((.text // "") | contains($marker)))' <<<"$replies" >/dev/null; then
     echo "Message ${ts}: thread already reports this PR as merged, not replying again"
   else
     slack chat.postMessage \
@@ -225,6 +226,10 @@ main() {
     exit 0
   fi
   local channels this oldest failed=0
+  if ! [[ "${LOOKBACK_DAYS:-14}" =~ ^[1-9][0-9]{0,2}$ ]]; then
+    echo "::error::LOOKBACK_DAYS must be a whole number of days between 1 and 999" >&2
+    exit 1
+  fi
   read -ra channels <<<"$(tr ',\n' '  ' <<<"${SLACK_CHANNEL_IDS:-}")"
   if [ "${#channels[@]}" -eq 0 ]; then
     echo "::notice::SLACK_CHANNEL_IDS is not set, skipping Slack update"
