@@ -3,9 +3,9 @@
 # link the merged PR and updates them. No AI involved, only the Slack and GitHub APIs.
 #
 #   - Message links exactly one PR (this one): adds the :git-merged: reaction.
-#   - Message links several PRs: posts a thread reply with the merge status and adds
-#     the reaction only once every linked PR is merged. PRs this token cannot read
-#     are shown as "?" and never count as merged.
+#   - Message links several PRs: posts a thread reply with each PR's state (:git-merged:,
+#     :github-closed:, pending) and adds the reaction only once every linked PR is merged.
+#     PRs this token cannot read are shown as "?" and never count as merged.
 #   - Messages that already carry the reaction are skipped.
 #
 # Usage: slack-pr-merged.sh
@@ -44,8 +44,8 @@ find_candidates() {
   jq -c --arg this "$1" --arg emoji "$REACTION" "$JQ_CANDIDATES"
 }
 
-# Reads a JSON array of {"ref": "owner/repo#N", "state": "merged"|"open"|"unknown"} on
-# stdin. Prints {"merged": n, "total": n, "all": bool, "text": "Merged: 1/2 - ..."}.
+# Reads a JSON array of {"ref": "owner/repo#N", "state": "merged"|"closed"|"open"|"unknown"}
+# on stdin. Prints {"merged": n, "total": n, "all": bool, "text": "Merged: 1/2 - ..."}.
 # $thisrepo (lowercase owner/repo) decides which refs get a short "#N" label.
 # shellcheck disable=SC2016
 JQ_STATUS='
@@ -53,7 +53,11 @@ JQ_STATUS='
   def short: if split("#")[0] == $thisrepo then "#\(num)"
              else "\(split("#")[0] | split("/")[1])#\(num)" end;
   def url_link: "<https://github.com/\(split("#")[0])/pull/\(num)|\(short)>";
-  def tick: if .state == "merged" then "\u2713" elif .state == "open" then "pending" else "?" end;
+  def tick:
+    if .state == "merged" then ":\($emoji):"
+    elif .state == "closed" then ":github-closed:"
+    elif .state == "open" then "pending"
+    else "?" end;
   ([.[] | select(.state == "merged")] | length) as $m
   | length as $t
   | {merged: $m, total: $t, all: ($m == $t),
@@ -61,7 +65,7 @@ JQ_STATUS='
 '
 
 build_status() {
-  jq -c --arg thisrepo "$1" "$JQ_STATUS"
+  jq -c --arg thisrepo "$1" --arg emoji "$REACTION" "$JQ_STATUS"
 }
 
 # slack METHOD [curl args...]: POSTs form-encoded data, retries once on HTTP 429, and
@@ -114,15 +118,16 @@ add_reaction() {
     --data-urlencode "name=${REACTION}" | slack_ok already_reacted
 }
 
-# PR state of "owner/repo#N": merged, open or unknown (unreadable with this token).
+# PR state of "owner/repo#N": merged, closed, open or unknown (unreadable with this token).
 pr_state() {
-  local ref="$1" this="$2" merged
+  local ref="$1" this="$2" state
   if [ "$ref" = "$this" ]; then
     echo merged
     return
   fi
-  if merged="$(gh api "repos/${ref%#*}/pulls/${ref#*#}" --jq '.merged' 2>/dev/null)"; then
-    if [ "$merged" = "true" ]; then echo merged; else echo open; fi
+  if state="$(gh api "repos/${ref%#*}/pulls/${ref#*#}" \
+    --jq 'if .merged then "merged" elif .state == "closed" then "closed" else "open" end' 2>/dev/null)"; then
+    echo "$state"
   else
     echo unknown
   fi
@@ -147,7 +152,7 @@ handle_message() {
   status="$(build_status "${this%#*}" <<<"$states")"
 
   # Best effort against re-runs: skip when the thread already shows this PR as merged.
-  marker="$(jq -rn --arg n "$PR_NUMBER" '"|#\($n)> \u2713"')"
+  marker="|#${PR_NUMBER}> :${REACTION}:"
   if slack conversations.replies \
     --data-urlencode "channel=${CHANNEL}" \
     --data-urlencode "ts=${ts}" \
