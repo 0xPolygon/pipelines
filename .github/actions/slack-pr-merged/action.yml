@@ -36,4 +36,4 @@ runs:
         REPO: ${{ github.repository }}
         PR_NUMBER: ${{ github.event.pull_request.number }}
         LOOKBACK_DAYS: ${{ inputs.lookback-days }}
-      run: "$GITHUB_ACTION_PATH/slack-pr-merged.sh"
+      run: '$GITHUB_ACTION_PATH/slack-pr-merged.sh'
