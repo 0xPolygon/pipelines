@@ -10,8 +10,8 @@ inputs:
     description: Slack bot token with channels:history, reactions:write and chat:write.
     required: false
     default: ''
-  channel-id:
-    description: Slack channel ID to scan.
+  channel-ids:
+    description: Slack channel IDs to scan, separated by spaces, commas or newlines.
     required: false
     default: ''
   github-token:
@@ -31,7 +31,7 @@ runs:
       shell: bash
       env:
         SLACK_BOT_TOKEN: ${{ inputs.slack-bot-token }}
-        SLACK_CHANNEL_ID: ${{ inputs.channel-id }}
+        SLACK_CHANNEL_IDS: ${{ inputs.channel-ids }}
         GH_TOKEN: ${{ inputs.github-token }}
         REPO: ${{ github.repository }}
         PR_NUMBER: ${{ github.event.pull_request.number }}

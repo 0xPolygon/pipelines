@@ -1,6 +1,6 @@
 #!/bin/bash
-# Reacts in Slack when a PR merges: finds recent messages in a channel that link the
-# merged PR and updates them. No AI involved, only the Slack and GitHub APIs.
+# Reacts in Slack when a PR merges: finds recent messages in one or more channels that
+# link the merged PR and updates them. No AI involved, only the Slack and GitHub APIs.
 #
 #   - Message links exactly one PR (this one): adds the :git-merged: reaction.
 #   - Message links several PRs: posts a thread reply with the merge status and adds
@@ -11,7 +11,8 @@
 # Usage: slack-pr-merged.sh
 # Env:   SLACK_BOT_TOKEN   bot token (scopes: channels:history, reactions:write, chat:write);
 #                          unset or empty makes the script a no-op
-#        SLACK_CHANNEL_ID  channel to scan; unset or empty makes the script a no-op
+#        SLACK_CHANNEL_IDS channels to scan, separated by spaces, commas or newlines;
+#                          unset or empty makes the script a no-op
 #        GH_TOKEN          token used by `gh api` to read PR state
 #        REPO              owner/repo of the merged PR
 #        PR_NUMBER         number of the merged PR
@@ -108,7 +109,7 @@ slack_ok() {
 
 add_reaction() {
   slack reactions.add \
-    --data-urlencode "channel=${SLACK_CHANNEL_ID}" \
+    --data-urlencode "channel=${CHANNEL}" \
     --data-urlencode "timestamp=$1" \
     --data-urlencode "name=${REACTION}" | slack_ok already_reacted
 }
@@ -148,7 +149,7 @@ handle_message() {
   # Best effort against re-runs: skip when the thread already shows this PR as merged.
   marker="$(jq -rn --arg n "$PR_NUMBER" '"|#\($n)> \u2713"')"
   if slack conversations.replies \
-    --data-urlencode "channel=${SLACK_CHANNEL_ID}" \
+    --data-urlencode "channel=${CHANNEL}" \
     --data-urlencode "ts=${ts}" \
     --data-urlencode "limit=200" |
     jq -e --arg ts "$ts" --arg marker "$marker" \
@@ -156,7 +157,7 @@ handle_message() {
     echo "Message ${ts}: thread already reports this PR as merged, not replying again"
   else
     slack chat.postMessage \
-      --data-urlencode "channel=${SLACK_CHANNEL_ID}" \
+      --data-urlencode "channel=${CHANNEL}" \
       --data-urlencode "thread_ts=${ts}" \
       --data-urlencode "text=$(jq -r '.text' <<<"$status")" \
       --data-urlencode "unfurl_links=false" \
@@ -170,45 +171,53 @@ handle_message() {
   fi
 }
 
-main() {
-  if [ -z "${SLACK_BOT_TOKEN:-}" ]; then
-    echo "::notice::SLACK_BOT_TOKEN is not set, skipping Slack update"
-    exit 0
-  fi
-  if [ -z "${SLACK_CHANNEL_ID:-}" ]; then
-    echo "::notice::SLACK_CHANNEL_ID is not set, skipping Slack update"
-    exit 0
-  fi
-
-  local this oldest cursor cursor_arg page candidates failed=0 seen=0
-  this="${REPO,,}#${PR_NUMBER}"
-  oldest="$(($(date +%s) - ${LOOKBACK_DAYS:-14} * 86400))"
-  echo "Looking for messages linking ${this} in ${SLACK_CHANNEL_ID} (last ${LOOKBACK_DAYS:-14} days)"
-
-  cursor=""
+# scan_channel THIS OLDEST: updates every message in $CHANNEL since OLDEST that links THIS.
+# Runs on the left of `||`, where errexit is off, so every failure returns explicitly.
+scan_channel() {
+  local this="$1" oldest="$2" cursor="" cursor_arg page candidates line failed=0 seen=0
+  echo "Looking for messages linking ${this} in ${CHANNEL} (last ${LOOKBACK_DAYS:-14} days)"
   while :; do
     cursor_arg=()
     [ -z "$cursor" ] || cursor_arg=(--data-urlencode "cursor=${cursor}")
     page="$(slack conversations.history \
-      --data-urlencode "channel=${SLACK_CHANNEL_ID}" \
+      --data-urlencode "channel=${CHANNEL}" \
       --data-urlencode "oldest=${oldest}" \
       --data-urlencode "limit=200" \
-      "${cursor_arg[@]}")"
-    slack_ok <<<"$page"
+      "${cursor_arg[@]}")" || return 1
+    slack_ok <<<"$page" || return 1
 
-    candidates="$(find_candidates "$this" <<<"$page")"
+    candidates="$(find_candidates "$this" <<<"$page")" || return 1
     while IFS= read -r line; do
       [ -n "$line" ] || continue
       seen=$((seen + 1))
       handle_message "$(jq -r '.ts' <<<"$line")" "$(jq -c '.refs' <<<"$line")" "$this" || failed=1
     done <<<"$candidates"
 
-    cursor="$(jq -r '.response_metadata.next_cursor // ""' <<<"$page")"
+    cursor="$(jq -r '.response_metadata.next_cursor // ""' <<<"$page")" || return 1
     [ -n "$cursor" ] || break
     sleep 1
   done
+  echo "Done: ${seen} message(s) in ${CHANNEL} linked ${this}"
+  return "$failed"
+}
 
-  echo "Done: ${seen} message(s) linked ${this}"
+main() {
+  if [ -z "${SLACK_BOT_TOKEN:-}" ]; then
+    echo "::notice::SLACK_BOT_TOKEN is not set, skipping Slack update"
+    exit 0
+  fi
+  local channels this oldest failed=0
+  read -ra channels <<<"$(tr ',\n' '  ' <<<"${SLACK_CHANNEL_IDS:-}")"
+  if [ "${#channels[@]}" -eq 0 ]; then
+    echo "::notice::SLACK_CHANNEL_IDS is not set, skipping Slack update"
+    exit 0
+  fi
+
+  this="${REPO,,}#${PR_NUMBER}"
+  oldest="$(($(date +%s) - ${LOOKBACK_DAYS:-14} * 86400))"
+  for CHANNEL in "${channels[@]}"; do
+    scan_channel "$this" "$oldest" || failed=1
+  done
   exit "$failed"
 }
 

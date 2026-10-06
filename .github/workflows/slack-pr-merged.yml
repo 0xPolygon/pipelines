@@ -5,8 +5,8 @@ name: Slack PR merged
 on:
   workflow_call:
     inputs:
-      channel-id:
-        description: Slack channel ID to scan. Empty makes the job a no-op.
+      channel-ids:
+        description: Slack channel IDs to scan, separated by spaces, commas or newlines. Empty makes the job a no-op.
         type: string
         required: false
         default: ''
@@ -36,6 +36,6 @@ jobs:
       - uses: 0xPolygon/pipelines/.github/actions/slack-pr-merged@main
         with:
           slack-bot-token: ${{ secrets.SLACK_BOT_TOKEN }}
-          channel-id: ${{ inputs.channel-id }}
+          channel-ids: ${{ inputs.channel-ids }}
           github-token: ${{ secrets.PR_READ_TOKEN || github.token }}
           lookback-days: ${{ inputs.lookback-days }}
