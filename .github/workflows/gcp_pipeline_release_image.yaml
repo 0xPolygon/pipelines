@@ -167,19 +167,20 @@ jobs:
 
           # Callers have historically stored this either as plain JSON or with
           # backslash-escaped quotes (which the old inline `echo "..."` unescaped).
-          # Accept both. jq's stderr is discarded because its errors can quote
-          # fragments of the input.
+          # Accept both. Input is slurped so it must be exactly one JSON object
+          # (jq -e only checks the last output). jq's stderr is discarded
+          # because its errors can quote fragments of the input.
           json="$BUILD_PARAMS_SECRETS"
-          if ! jq -e 'type == "object"' <<< "$json" > /dev/null 2>&1; then
+          if ! jq -s -e 'length == 1 and (.[0] | type == "object")' <<< "$json" > /dev/null 2>&1; then
             json="${json//\\\"/\"}"
-            if ! jq -e 'type == "object"' <<< "$json" > /dev/null 2>&1; then
+            if ! jq -s -e 'length == 1 and (.[0] | type == "object")' <<< "$json" > /dev/null 2>&1; then
               echo "::error::build_params_gh_secret_keys is not a valid JSON object"
               exit 1
             fi
           fi
 
           # A NUL in a key or value would shift the NUL-delimited pairing below.
-          if ! jq -e 'all(to_entries[]; [.key, "\(.value)"] | all(explode | index([0]) == null))' <<< "$json" > /dev/null 2>&1; then
+          if ! jq -s -e '.[0] | all(to_entries[]; [.key, "\(.value)"] | all(explode | index([0]) == null))' <<< "$json" > /dev/null 2>&1; then
             echo "::error::build_params_gh_secret_keys contains a NUL character"
             exit 1
           fi
@@ -187,7 +188,7 @@ jobs:
           # NUL-delimited key/value pairs, so values keep embedded and trailing
           # newlines intact. Value rendering matches the former "\(.value)".
           entries() {
-            jq -j 'to_entries[] | "\(.key)\u0000\(.value)\u0000"' <<< "$json"
+            jq -j 'to_entries[] | "\(.key)\u0000\(.value)\u0000"' <<< "$json" 2>/dev/null
           }
 
           # Pass 1: mask. Runs before anything is written or exported.
