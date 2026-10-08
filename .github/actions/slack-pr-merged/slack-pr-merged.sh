@@ -140,7 +140,8 @@ pr_state() {
     echo unknown
     return
   fi
-  echo "::error::GitHub lookup of ${ref} failed: $(cat "$errfile")" >&2
+  # Logs are public in public repos: never print the ref or gh's error, which includes the URL.
+  echo "::error::A linked PR lookup failed ($(grep -o 'HTTP [0-9]*' "$errfile" | head -1 || echo 'no HTTP status'))" >&2
   rm -f "$errfile"
   return 1
 }

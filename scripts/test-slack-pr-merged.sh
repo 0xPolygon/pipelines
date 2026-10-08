@@ -78,7 +78,7 @@ gh() {
     merged | closed | open) echo "${GH_STATE[$ref]}" ;;
     404) echo "gh: Not Found (HTTP 404)" >&2 && return 1 ;;
     403-rate) echo "gh: API rate limit exceeded (HTTP 403)" >&2 && return 1 ;;
-    500) echo "gh: Server Error (HTTP 500)" >&2 && return 1 ;;
+    500) echo "gh: Server Error (HTTP 500) (https://api.github.com/${path})" >&2 && return 1 ;;
   esac
 }
 
@@ -131,8 +131,9 @@ check "closed unmerged PR is closed" "closed" "$(pr_state 'x/y#1' 'org/repo#7')"
 check "unreadable PR is unknown" "unknown" "$(pr_state 'x/y#9' 'org/repo#7')"
 pr_state 'x/y#2' 'org/repo#7' >/dev/null 2>&1
 check "rate limit fails" "1" "$?"
-pr_state 'x/y#3' 'org/repo#7' >/dev/null 2>&1
+out="$(pr_state 'x/y#3' 'org/repo#7' 2>&1)"
 check "server error fails" "1" "$?"
+check "failure log names neither the linked repo nor the PR" "::error::A linked PR lookup failed (HTTP 500)" "$out"
 
 echo "handle_message"
 reset
