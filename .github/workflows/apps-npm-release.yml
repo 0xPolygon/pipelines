@@ -43,10 +43,12 @@ on:
       CHANGESET_RELEASE_BOT_APP_PRIVATE_KEY:
         required: true
 
-permissions:
-  contents: write
-  pull-requests: write
-  id-token: write # required for npm OIDC trusted publishing
+# Default-deny: every job below declares its own `permissions:`, so nothing
+# here is inherited, and a job added later without a block gets no grant.
+# Callers must still grant the union of the job-level blocks (contents write,
+# pull-requests write, id-token write) — a caller cannot grant less than a
+# called job requests.
+permissions: {}
 
 jobs:
   release:
@@ -54,17 +56,22 @@ jobs:
     # Skipped when `snapshot_tag` is set — that's a snapshot publish handled below.
     if: inputs.snapshot_tag == ''
     runs-on: ubuntu-latest
+    # Bounded: a git network call that cannot authenticate (e.g. changesets'
+    # deepen loop, which ignores fetch failures) fails here, not at the
+    # 6-hour default.
+    timeout-minutes: 20
+    permissions:
+      contents: write # release commits, tags, GitHub Releases
+      pull-requests: write # the changesets Release / Deploy PR
+      id-token: write # required for npm OIDC trusted publishing
     steps:
-      - uses: actions/create-github-app-token@d72941d797fd3113feb6b93fd0dec494b13a2547 # v1
-        id: app-token
-        with:
-          app-id: ${{ secrets.CHANGESET_RELEASE_BOT_APP_ID }}
-          private-key: ${{ secrets.CHANGESET_RELEASE_BOT_APP_PRIVATE_KEY }}
-
+      # Checkout with the default read-only job token and do not persist it
+      # to .git/config: nothing after this step pushes over git (changesets
+      # github-api mode writes through the API with the app token below).
       - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
         with:
           fetch-depth: 1
-          token: ${{ steps.app-token.outputs.token }}
+          persist-credentials: false
 
       - uses: pnpm/action-setup@41ff72655975bd51cab0327fa583b6e92b6d3061 # v4
 
@@ -85,7 +92,27 @@ jobs:
       # packages are being co-released. --no-frozen-lockfile because
       # `changeset version` updates package.json but not the lockfile, so
       # the lockfile is structurally stale at the release-PR merge commit.
-      - run: pnpm install --no-frozen-lockfile --config.link-workspace-packages=true
+      # --ignore-scripts: no caller needs an install-time script to release
+      # (root `prepare` only installs git hooks; allowlisted dependency builds
+      # serve tests/lint/runtime, not `changeset version`/`publish`), and
+      # skipping them keeps dependency code from running in a job that
+      # holds id-token: write.
+      - run: pnpm install --no-frozen-lockfile --config.link-workspace-packages=true --ignore-scripts
+
+      # Token-ordering trap: mint the app token AFTER checkout and install,
+      # never before. A token minted earlier is reachable from every later
+      # step — checkout would persist it into .git/config, and any
+      # dependency install script could read it. Minted here, it exists only
+      # for changesets/action. Scope it to exactly what changesets/action
+      # (github-api mode) uses: contents (commits, refs, tags, releases) and
+      # pull-requests (release PR list/create/update).
+      - uses: actions/create-github-app-token@bcd2ba49218906704ab6c1aa796996da409d3eb1 # v3.2.0
+        id: app-token
+        with:
+          app-id: ${{ secrets.CHANGESET_RELEASE_BOT_APP_ID }}
+          private-key: ${{ secrets.CHANGESET_RELEASE_BOT_APP_PRIVATE_KEY }}
+          permission-contents: write
+          permission-pull-requests: write
 
       - uses: changesets/action@a45c4d594aa4e2c509dc14a9f2b3b67ba3780d0d # v1.9.0
         with:
@@ -120,6 +147,14 @@ jobs:
     # only way to cut a real version.
     if: inputs.snapshot_tag != ''
     runs-on: ubuntu-latest
+    timeout-minutes: 20
+    permissions:
+      contents: read # checkout
+      # @changesets/changelog-github (used by most callers) looks up each
+      # commit's associated PRs with github.token in `Version snapshot`; a
+      # private/internal repo refuses that without pull-requests read.
+      pull-requests: read # changelog PR lookups
+      id-token: write # required for npm OIDC trusted publishing
     steps:
       # Refuse semver-shaped inputs. The snapshot path bypasses the
       # release pipeline entirely — using a real version string here
@@ -136,7 +171,16 @@ jobs:
             exit 1
           fi
 
-      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
+      # Credentials stay persisted here on purpose. `changeset version` finds the
+      # commit that added each changeset through @changesets/git, which deepens
+      # a shallow clone with `git fetch --deepen=50` in a loop that ignores the
+      # fetch's exit code: on a private or internal caller an unauthenticated
+      # fetch fails forever and the job hangs to its timeout (polygon-websites
+      # hit this, 0xPolygon/polygon-websites#497). The persisted token is this
+      # job's read-only github.token (contents: read, pull-requests: read), not
+      # the release bot; the release job's changesets/action authenticates its
+      # own deepen through ~/.netrc.
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4 # zizmor: ignore[artipacked]
         with:
           fetch-depth: 1
 
@@ -154,8 +198,14 @@ jobs:
       # version() rewrites workspace:* to e.g. 0.0.0-pre-3.9.8-<timestamp>
       # for every co-published package, and those versions don't exist on
       # npm. --config.link-workspace-packages=true keeps the install
-      # resolvable against the local workspace.
-      - run: pnpm install --no-frozen-lockfile --config.link-workspace-packages=true
+      # resolvable against the local workspace. --ignore-scripts for the same
+      # reason as the release job: this job also holds id-token: write.
+      - run: pnpm install --no-frozen-lockfile --config.link-workspace-packages=true --ignore-scripts
+
+      # One authenticated deepen first, so broken git auth fails in seconds
+      # instead of spinning changesets' deepen loop to the timeout.
+      - name: Check git can fetch (changesets deepens this shallow clone)
+        run: git fetch --deepen=1
 
       - name: Version snapshot
         # Bumps versions on the runner only — never committed.
