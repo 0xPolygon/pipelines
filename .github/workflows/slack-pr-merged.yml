@@ -1,0 +1,41 @@
+name: Slack PR merged
+
+# Reacts in Slack when a PR merges. See .github/actions/slack-pr-merged for the rules.
+# Callers trigger it on `pull_request: closed`; unmerged and fork PRs are skipped here.
+on:
+  workflow_call:
+    inputs:
+      channel-ids:
+        description: Slack channel IDs to scan, separated by spaces, commas or newlines. Empty makes the job a no-op.
+        type: string
+        required: false
+        default: ''
+      lookback-days:
+        type: number
+        required: false
+        default: 14
+    secrets:
+      SLACK_BOT_TOKEN:
+        required: false
+      PR_READ_TOKEN:
+        description: Optional token that can read PRs in other repos; defaults to the caller's GITHUB_TOKEN.
+        required: false
+
+permissions:
+  pull-requests: read
+
+jobs:
+  slack:
+    name: Slack PR merged
+    if: >-
+      github.event.pull_request.merged == true
+      && github.event.pull_request.head.repo.full_name == github.repository
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: 0xPolygon/pipelines/.github/actions/slack-pr-merged@main
+        with:
+          slack-bot-token: ${{ secrets.SLACK_BOT_TOKEN }}
+          channel-ids: ${{ inputs.channel-ids }}
+          github-token: ${{ secrets.PR_READ_TOKEN || github.token }}
+          lookback-days: ${{ inputs.lookback-days }}

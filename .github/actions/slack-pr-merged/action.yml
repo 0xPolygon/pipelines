@@ -1,0 +1,41 @@
+name: Slack PR merged
+description: >
+  Finds recent messages in the listed Slack channels that link the merged PR. Adds a
+  :git-merged: reaction when the message links only that PR. When it links
+  several PRs, posts a thread reply with their merge status and reacts once
+  all of them are merged. No-op when the bot token or channel list is empty.
+
+inputs:
+  slack-bot-token:
+    description: >
+      Slack bot token with channels:history, reactions:write and chat:write, plus
+      groups:history for private channels.
+    required: false
+    default: ''
+  channel-ids:
+    description: Slack channel IDs to scan, separated by spaces, commas or newlines.
+    required: false
+    default: ''
+  github-token:
+    description: >
+      Token used to read the state of PRs linked next to this one. PRs in repos
+      it cannot read are shown as "?" and never count as merged.
+    required: true
+  lookback-days:
+    description: How many days of channel history to scan.
+    required: false
+    default: '14'
+
+runs:
+  using: composite
+  steps:
+    - name: Update Slack messages linking this PR
+      shell: bash
+      env:
+        SLACK_BOT_TOKEN: ${{ inputs.slack-bot-token }}
+        SLACK_CHANNEL_IDS: ${{ inputs.channel-ids }}
+        GH_TOKEN: ${{ inputs.github-token }}
+        REPO: ${{ github.repository }}
+        PR_NUMBER: ${{ github.event.pull_request.number }}
+        LOOKBACK_DAYS: ${{ inputs.lookback-days }}
+      run: '$GITHUB_ACTION_PATH/slack-pr-merged.sh'
