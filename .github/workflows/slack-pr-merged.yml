@@ -33,7 +33,17 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 5
     steps:
-      - uses: 0xPolygon/pipelines/.github/actions/slack-pr-merged@main
+      # Runs the action from this workflow's own commit, so a caller that pins this
+      # workflow to a SHA also pins the script. Anonymous fetch: pipelines is public.
+      - name: Fetch the action at this workflow's commit
+        env:
+          WORKFLOW_REPO: ${{ job.workflow_repository }}
+          WORKFLOW_SHA: ${{ job.workflow_sha }}
+        run: |
+          git init -q .pipelines
+          git -C .pipelines fetch -q --depth 1 "https://github.com/${WORKFLOW_REPO}.git" "$WORKFLOW_SHA"
+          git -C .pipelines checkout -q FETCH_HEAD
+      - uses: ./.pipelines/.github/actions/slack-pr-merged
         with:
           slack-bot-token: ${{ secrets.SLACK_BOT_TOKEN }}
           channel-ids: ${{ inputs.channel-ids }}
