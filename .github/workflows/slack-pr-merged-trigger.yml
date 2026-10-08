@@ -4,7 +4,8 @@
 # Pinning the workflow to a SHA also pins the action it runs.
 # SLACK_BOT_TOKEN is an org secret and SLACK_PR_MERGED_CHANNEL_IDS an org or repo
 # variable holding one or more channel IDs. When either is missing the job logs a
-# notice and exits successfully.
+# notice and exits successfully. In a public repo, drop the PR_READ_TOKEN line: it is a
+# credential that reads private PRs.
 
 name: Slack PR merged
 
