@@ -1,0 +1,88 @@
+name: E2E snapshot restore
+description: >
+  Restore a kurtosis-pos devnet from a published snapshot image. Pulls the image
+  from GHCR, extracts volumes + docker-compose + addresses sidecar, patches the
+  pos-anvil host-port mapping, brings the devnet up, and replays the captured
+  anvil state. Exports E2E_SNAPSHOT_ADDRESSES_JSON to GITHUB_ENV so consumer
+  steps inherit the path to the addresses sidecar.
+
+inputs:
+  image:
+    description: >
+      Snapshot image reference (full registry/repo:tag). Default points at the
+      lst-api-published snapshot. Pin to a SHA tag (e.g. ":22c449550213") to
+      lock to a specific kurtosis-pos commit.
+    required: false
+    default: ghcr.io/0xpolygon/lst-api-e2e-snapshot:latest
+  kurtosis_pos_ref:
+    description: >
+      Git ref of 0xPolygon/kurtosis-pos to clone for the upstream extract.sh /
+      restore.sh helpers. Should match the ref used to build the snapshot —
+      the extract/restore scripts are tightly paired with their snapshot
+      contents. Default 'main' tracks the snapshot publisher's default.
+    required: false
+    default: main
+  out_dir:
+    description: >
+      Directory the snapshot is extracted into, relative to the consumer's
+      checkout root. Default './tmp/e2e-snapshot' avoids clobbering anything
+      else under ./tmp.
+    required: false
+    default: ./tmp/e2e-snapshot
+  registry:
+    description: >
+      Container registry to authenticate against. Default 'ghcr.io'. Override
+      only when the snapshot image lives elsewhere.
+    required: false
+    default: ghcr.io
+  registry_username:
+    description: >
+      Username for the registry login. Defaults to the workflow actor; override
+      when calling with a service account or PAT.
+    required: false
+    default: ${{ github.actor }}
+  registry_password:
+    description: >
+      Token for the registry login. Defaults to GITHUB_TOKEN, which works for
+      same-org GHCR pulls when the calling workflow grants `packages: read`.
+    required: false
+    default: ${{ github.token }}
+
+outputs:
+  addresses_json_path:
+    description: Absolute path to the extracted addresses sidecar JSON.
+    value: ${{ steps.restore.outputs.addresses_json_path }}
+  compose_file_path:
+    description: Absolute path to the bundled docker-compose.yaml.
+    value: ${{ steps.restore.outputs.compose_file_path }}
+
+runs:
+  using: composite
+  steps:
+    - name: Log in to container registry
+      shell: bash
+      env:
+        REGISTRY: ${{ inputs.registry }}
+        REGISTRY_USERNAME: ${{ inputs.registry_username }}
+        REGISTRY_PASSWORD: ${{ inputs.registry_password }}
+      run: echo "$REGISTRY_PASSWORD" | docker login "$REGISTRY" -u "$REGISTRY_USERNAME" --password-stdin
+
+    - name: Restore devnet from snapshot
+      id: restore
+      shell: bash
+      env:
+        IMAGE: ${{ inputs.image }}
+        KURTOSIS_POS_REF: ${{ inputs.kurtosis_pos_ref }}
+        OUT_DIR: ${{ inputs.out_dir }}
+      run: bash "${GITHUB_ACTION_PATH}/restore.sh"
+
+    - name: Export snapshot addresses path to GITHUB_ENV
+      shell: bash
+      env:
+        ADDRS_PATH: ${{ steps.restore.outputs.addresses_json_path }}
+      run: |
+        # The consuming repo's e2e suite reads this env var to switch from the
+        # kurtosis CLI path to the sidecar JSON path. Writing to GITHUB_ENV
+        # propagates it to every subsequent step in the calling job without
+        # the consumer having to know the magic name.
+        echo "E2E_SNAPSHOT_ADDRESSES_JSON=${ADDRS_PATH}" >> "$GITHUB_ENV"

@@ -1,0 +1,40 @@
+name: E2E devnet dump
+description: >
+  Capture devnet state into /tmp/devnet-dump for post-mortem after an e2e
+  failure. Snapshot mode dumps the docker-compose stack's ps + logs and the
+  compose file; cold-start mode dumps the kurtosis enclave. Best-effort —
+  individual failures are swallowed so a half-restored run still yields
+  whatever artefacts it can.
+
+  Bundled as a composite (not a reusable-workflow inline step or a
+  .github/scripts/ helper) so the shell logic is locally runnable AND
+  reachable when apps-e2e.yml runs in a consumer's checkout — a raw script
+  under .github/scripts/ is not on disk cross-repo; ${{ github.action_path }}
+  is.
+
+inputs:
+  use_snapshot:
+    description: '"1" for snapshot mode (compose dump), "0" for cold-start (enclave dump).'
+    required: true
+  compose_file:
+    description: >
+      Snapshot mode: path to the restored docker-compose.yaml (the restore
+      composite's compose_file_path output). May be empty if the restore
+      failed before writing it — the dump guards for that.
+    required: false
+    default: ''
+  enclave:
+    description: 'Cold-start mode: kurtosis enclave name to dump.'
+    required: false
+    default: pos
+
+runs:
+  using: composite
+  steps:
+    - name: Dump devnet state
+      shell: bash
+      env:
+        E2E_USE_SNAPSHOT: ${{ inputs.use_snapshot }}
+        COMPOSE_FILE: ${{ inputs.compose_file }}
+        E2E_KURTOSIS_ENCLAVE: ${{ inputs.enclave }}
+      run: bash "${GITHUB_ACTION_PATH}/dump-devnet.sh"

@@ -1,0 +1,187 @@
+name: E2E (kurtosis devnet)
+
+# Reusable e2e workflow for repos that integrate against a kurtosis-pos
+# devnet. Two paths:
+#
+#   - Snapshot mode (default): pull the published snapshot image and
+#     restore via the e2e-snapshot-restore composite. Wall-time ~30s.
+#     Use this for any consumer testing against kurtosis-pos main.
+#   - Cold-start mode: clone kurtosis-pos at `kurtosis_pos_ref` and run
+#     the enclave from source. Wall-time ~10min. Reach for this only
+#     when iterating on a kurtosis-pos branch that hasn't been
+#     snapshotted yet.
+#
+# Trigger files in consumer repos are thin: they specify the event
+# (workflow_dispatch + pull_request labeled) and forward inputs. If the
+# consumer's snapshot image is in a private registry its own token can't
+# reach, the trigger passes REGISTRY_USERNAME / REGISTRY_PASSWORD by name
+# under `secrets:` (never `secrets: inherit` — see Team Standards). See
+# apps-e2e-trigger.yml in this repo for the canonical example.
+
+on:
+  workflow_call:
+    inputs:
+      use_snapshot:
+        description: >
+          Restore from the published snapshot image (false = cold-start
+          kurtosis from source).
+        type: boolean
+        required: false
+        default: true
+      kurtosis_pos_ref:
+        description: >
+          Cold-start mode: git ref of 0xPolygon/kurtosis-pos to clone.
+          Snapshot mode: passed to the extract.sh / restore.sh helper
+          clone — should match the ref the snapshot was built with.
+        type: string
+        required: false
+        default: main
+      snapshot_image:
+        description: >
+          Snapshot image reference (full registry/repo:tag). Default
+          points at the lst-api-published snapshot. Override only when
+          the consumer publishes its own snapshot.
+        type: string
+        required: false
+        default: ghcr.io/0xpolygon/lst-api-e2e-snapshot:latest
+      cold_start_args_file:
+        description: >
+          Cold-start mode: path to the kurtosis args file in the
+          consumer's checkout (relative to GITHUB_WORKSPACE).
+        type: string
+        required: false
+        default: kurtosis-params.yml
+      e2e_command:
+        description: >
+          Shell command run by the suite step. Default `pnpm run e2e`
+          assumes the consumer's package.json wires its e2e entrypoint
+          there. Wrap any pre-commands with && (e.g. starting a Firestore
+          emulator) when needed; vitest globalSetup handlers are usually
+          the cleaner home for those.
+
+
+          ADAPTER CONTRACT — the suite this command runs must read the
+          devnet's connection details from the environment this workflow
+          sets, and the two modes expose them differently:
+
+            - Snapshot mode: contract addresses are in the JSON file at
+              `$E2E_SNAPSHOT_ADDRESSES_JSON` (exported by the restore
+              composite); RPCs are at the fixed host ports
+              `127.0.0.1:8545` (L1) / `127.0.0.1:9545` (L2).
+            - Cold-start mode: no addresses file. `$E2E_KURTOSIS_ENCLAVE`
+              (default `pos`) names the running enclave; query it via the
+              kurtosis CLI for addresses and dynamically-mapped ports.
+
+          A consumer therefore needs a dual-path adapter — see lst-api's
+          `packages/e2e/scripts/up.ts` for the reference. This is real
+          porting work, not a thin trigger.
+
+
+          SECRETS — the suite step runs with only the registry secrets
+          (below) and whatever `GITHUB_TOKEN` provides. There is no
+          generic mechanism to inject arbitrary consumer secrets into the
+          suite (`secrets: inherit` is prohibited by Team Standards). A
+          consumer needing, e.g., an RPC token must have it added as a
+          named secret on this workflow — open a PR here when that lands.
+        type: string
+        required: false
+        default: pnpm run e2e
+      timeout_minutes:
+        description: >
+          Job timeout. Default 45 covers cold-start (~10m bring-up +
+          ~10m suite + headroom); snapshot runs typically finish under 8.
+        type: number
+        required: false
+        default: 45
+    secrets:
+      REGISTRY_USERNAME:
+        description: >
+          Username for the snapshot-image registry login. Optional —
+          omit to use the workflow actor + GITHUB_TOKEN, which works for
+          same-org GHCR pulls. A cross-org consumer (e.g. matic.js in
+          maticnetwork pulling the 0xpolygon snapshot) passes its own
+          credentials here so the private package resolves.
+        required: false
+      REGISTRY_PASSWORD:
+        description: >
+          Token for the snapshot-image registry login. Pair with
+          REGISTRY_USERNAME. Optional; defaults to GITHUB_TOKEN.
+        required: false
+
+# `packages: read` lets the GITHUB_TOKEN pull from GHCR in snapshot mode;
+# ignored by cold-start runs that never touch the registry.
+permissions:
+  contents: read
+  packages: read
+
+jobs:
+  e2e:
+    name: e2e (kurtosis devnet)
+    runs-on: ubuntu-latest
+    timeout-minutes: ${{ inputs.timeout_minutes }}
+    env:
+      # Centralise the snapshot/cold-start switch as an env var so every
+      # downstream step references a single value. Snapshot is the
+      # default; only an explicit boolean false flips us to cold-start.
+      #
+      # GH Actions' `==`/`!=` use loose equality where `null == false`
+      # evaluates to true — so the obvious `inputs.use_snapshot == false`
+      # check would also fire on null and silently drop pull_request
+      # runs (which have null inputs) into cold-start. Stringify via
+      # toJSON first: toJSON(null) → "null", toJSON(false) → "false",
+      # toJSON(true) → "true". String comparison is unambiguous.
+      E2E_USE_SNAPSHOT: ${{ toJSON(inputs.use_snapshot) == 'false' && '0' || '1' }}
+    steps:
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
+
+      - uses: pnpm/action-setup@41ff72655975bd51cab0327fa583b6e92b6d3061 # v4
+
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
+        with:
+          node-version-file: .nvmrc
+          cache: pnpm
+
+      - run: pnpm install --frozen-lockfile
+
+      - name: Restore from snapshot
+        if: env.E2E_USE_SNAPSHOT == '1'
+        id: snapshot
+        uses: 0xPolygon/pipelines/.github/actions/e2e-snapshot-restore@main
+        with:
+          image: ${{ inputs.snapshot_image }}
+          kurtosis_pos_ref: ${{ inputs.kurtosis_pos_ref }}
+          # Fall back to the workflow actor + GITHUB_TOKEN when the caller
+          # passes no registry secrets — preserves the same-org GHCR pull
+          # the composite defaults to. A cross-org caller supplies its own.
+          registry_username: ${{ secrets.REGISTRY_USERNAME || github.actor }}
+          registry_password: ${{ secrets.REGISTRY_PASSWORD || github.token }}
+
+      - name: Cold-start kurtosis
+        if: env.E2E_USE_SNAPSHOT == '0'
+        uses: 0xPolygon/pipelines/.github/actions/e2e-cold-start@main
+        with:
+          kurtosis_pos_ref: ${{ inputs.kurtosis_pos_ref }}
+          args_file: ${{ inputs.cold_start_args_file }}
+
+      - name: Run e2e suite
+        env:
+          E2E_COMMAND: ${{ inputs.e2e_command }}
+        run: bash -c "$E2E_COMMAND"
+
+      # On failure, capture devnet state for post-mortem. Logic lives in
+      # the e2e-dump composite (bundled script) rather than inline here —
+      # keeps this YAML thin and the shell locally runnable.
+      - name: Dump devnet on failure
+        if: failure()
+        uses: 0xPolygon/pipelines/.github/actions/e2e-dump@main
+        with:
+          use_snapshot: ${{ env.E2E_USE_SNAPSHOT }}
+          compose_file: ${{ steps.snapshot.outputs.compose_file_path }}
+
+      - name: Upload devnet dump
+        if: failure()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: devnet-dump-${{ github.run_id }}
+          path: /tmp/devnet-dump
+          retention-days: 7
