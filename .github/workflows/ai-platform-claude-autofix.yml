@@ -39,6 +39,11 @@
 #     bot on a PR; remove it to re-enable.
 #   - Per-run limit: --max-turns caps how long any single run can go.
 #
+# SDLC pipeline PRs: both jobs skip PRs whose head branch starts with
+# sdlc/ (plan PRs sdlc/<slug>-plan, code PRs sdlc/<slug>). The AI SDLC
+# pipeline in 0xPolygon/intents revises those itself; two bots answering
+# the same review would race to push.
+#
 # Path policy (denied_paths input): newline-separated gitignore-style
 # patterns (exact file paths or globs) the bot must never modify;
 # everything else is allowed. Defaults to .github/** so a bare caller's
@@ -148,6 +153,7 @@ jobs:
         )
       ) &&
       github.event.pull_request.head.repo.full_name == github.repository &&
+      !startsWith(github.event.pull_request.head.ref, 'sdlc/') &&
       !contains(github.event.pull_request.labels.*.name, 'ai-needs-human')
     runs-on: ubuntu-latest
     permissions:
@@ -580,6 +586,14 @@ jobs:
           PR_INFO=$(gh pr view "$PR_NUMBER" --repo "${{ github.repository }}" --json baseRefName,headRefName,isCrossRepository,labels)
           echo "base_ref=$(echo "$PR_INFO" | jq -r '.baseRefName')" >> "$GITHUB_OUTPUT"
           echo "head_ref=$(echo "$PR_INFO" | jq -r '.headRefName')" >> "$GITHUB_OUTPUT"
+
+          case "$(echo "$PR_INFO" | jq -r '.headRefName')" in
+            sdlc/*)
+              echo "SDLC pipeline PR (sdlc/* branch); the pipeline revises it. Skipping."
+              echo "proceed=false" >> "$GITHUB_OUTPUT"
+              exit 0
+              ;;
+          esac
 
           if [ "$(echo "$PR_INFO" | jq -r '.isCrossRepository')" = "true" ]; then
             echo "Fork PR; refusing to run autofix in a privileged context."
