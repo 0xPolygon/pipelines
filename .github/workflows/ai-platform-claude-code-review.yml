@@ -35,6 +35,8 @@
 #         # Optional per-repo overrides; '' falls through to the defaults.
 #         # model: ${{ vars.CLAUDE_REVIEW_MODEL }}
 #         # anthropic_base_url: ${{ vars.ANTHROPIC_BASE_URL }}
+#         # effort: xhigh
+#         # timeout_minutes: 20
 #       secrets:
 #         CLAUDE_API_KEY: ${{ secrets.CLAUDE_API_KEY }}
 
@@ -71,6 +73,32 @@ on:
         type: string
         required: false
         default: ''
+      effort:
+        description: >-
+          Reasoning effort for the review. Empty (the default) uses the
+          caller's DEFAULT_CLAUDE_CODE_REVIEW_EFFORT Actions variable, then
+          leaves effort unset so the run matches a caller that does not set
+          this input: no --effort flag and no effort env. A non-empty value
+          must be low, medium, high, xhigh, or max. It is passed as Claude
+          Code --effort and, via the action's settings input, as
+          CLAUDE_CODE_EFFORT_LEVEL plus CLAUDE_CODE_ALWAYS_ENABLE_EFFORT=1.
+          The env pair is required for gateway model ids (for example
+          openai/gpt-6-luna on OpenRouter): Claude Code does not send
+          output_config.effort for an unrecognized model id unless
+          CLAUDE_CODE_ALWAYS_ENABLE_EFFORT is set, and claude-code-action's
+          run step does not inherit unlisted job env. OpenRouter maps
+          output_config.effort to reasoning.effort. xhigh is accepted for
+          openai/gpt-6-luna.
+        type: string
+        required: false
+        default: ''
+      timeout_minutes:
+        description: >-
+          Job timeout for claude-review, in minutes. Default 15, the previous
+          hard-coded limit. Raise it for large diffs that outrun the default.
+        type: number
+        required: false
+        default: 15
     secrets:
       CLAUDE_API_KEY:
         required: true
@@ -128,7 +156,7 @@ jobs:
       !startsWith(github.head_ref, 'changeset-release/') &&
       !contains(github.event.pull_request.labels.*.name, 'disable-claude-code-review')
     runs-on: ubuntu-latest
-    timeout-minutes: 15
+    timeout-minutes: ${{ inputs.timeout_minutes }}
     permissions:
       contents: read
       pull-requests: write
@@ -151,6 +179,9 @@ jobs:
       # rather than passed as an input. `||` also covers a caller wiring
       # `model` to an unset variable, which arrives as ''.
       CLAUDE_MODEL: ${{ inputs.model || vars.DEFAULT_CLAUDE_CODE_REVIEW_MODEL || 'claude-sonnet-5' }}
+      # Same resolution as the model. Not a Claude Code variable; the review
+      # steps only forward it when it is a known level (see the effort step).
+      CLAUDE_EFFORT: ${{ inputs.effort || vars.DEFAULT_CLAUDE_CODE_REVIEW_EFFORT || '' }}
     steps:
       # Default pull_request checkout (the PR merge commit) — no explicit
       # head-SHA ref, which CodeQL flags as untrusted checkout.
@@ -158,6 +189,30 @@ jobs:
         uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
         with:
           fetch-depth: 1
+
+      # Fail before either review step so a typo does not silently omit the
+      # flag. Empty effort writes empty outputs, which leaves claude_args and
+      # the action settings input identical to a run without this input.
+      - name: Resolve review effort
+        id: effort
+        env:
+          CLAUDE_EFFORT: ${{ env.CLAUDE_EFFORT }}
+        run: |
+          if [ -z "$CLAUDE_EFFORT" ]; then
+            echo "flag=" >> "$GITHUB_OUTPUT"
+            echo "settings=" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+          case "$CLAUDE_EFFORT" in
+            low|medium|high|xhigh|max) ;;
+            *)
+              echo "::error::Unknown effort '$CLAUDE_EFFORT'. Allowed values: low, medium, high, xhigh, max."
+              exit 1
+              ;;
+          esac
+          echo "Review effort: $CLAUDE_EFFORT (--effort, plus settings env CLAUDE_CODE_EFFORT_LEVEL and CLAUDE_CODE_ALWAYS_ENABLE_EFFORT=1)"
+          echo "flag= --effort $CLAUDE_EFFORT" >> "$GITHUB_OUTPUT"
+          printf 'settings=%s\n' "{\"env\":{\"CLAUDE_CODE_ALWAYS_ENABLE_EFFORT\":\"1\",\"CLAUDE_CODE_EFFORT_LEVEL\":\"$CLAUDE_EFFORT\"}}" >> "$GITHUB_OUTPUT"
 
       - name: Run Claude Code Review (comment)
         if: inputs.mode == 'comment'
@@ -169,7 +224,8 @@ jobs:
           # PRs it authors still get reviewed.
           allowed_bots: claude
           claude_args: |
-            --model ${{ env.CLAUDE_MODEL }}
+            --model ${{ env.CLAUDE_MODEL }}${{ steps.effort.outputs.flag }}
+          settings: ${{ steps.effort.outputs.settings }}
           plugin_marketplaces: 'https://github.com/anthropics/claude-code.git'
           plugins: 'code-review@claude-code-plugins'
           prompt: '/code-review:code-review --comment'
@@ -193,7 +249,7 @@ jobs:
           anthropic_api_key: ${{ secrets.CLAUDE_API_KEY }}
           allowed_bots: claude
           claude_args: |
-            --model ${{ env.CLAUDE_MODEL }}
+            --model ${{ env.CLAUDE_MODEL }}${{ steps.effort.outputs.flag }}
             --max-turns 60
             --allowedTools "Read,Grep,Glob,Bash(gh pr diff:*),Bash(gh pr view:*),Bash(gh pr review:*),Bash(gh api:*)"
           prompt: |
@@ -233,5 +289,6 @@ jobs:
             - Unresolved or new problems: `gh pr review ${{ github.event.pull_request.number }} --comment -b "Changes needed:\n- issue 1\n- issue 2"` — the body MUST start with exactly `Changes needed:`. That prefix is load-bearing: the autofix workflow treats a comment review from you that starts with it as changes-requested and triggers on it.
 
             You must end by running exactly one `gh pr review` command. Never dismiss a `CHANGES_REQUESTED` review — the only dismissal you ever perform is the stale-approval one in Step 1.
+          settings: ${{ steps.effort.outputs.settings }}
           additional_permissions: |
             actions: read
