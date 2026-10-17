@@ -1,0 +1,42 @@
+name: E2E cold-start
+description: >
+  Bring up a kurtosis-pos devnet from source. Installs the kurtosis CLI,
+  starts the engine, clones kurtosis-pos at the requested ref, scales EL
+  resource limits down to fit a 2-vCPU / 7-GB ubuntu-latest runner, and
+  runs the enclave from the consumer's args file.
+
+  This is the escape hatch for iterating on a kurtosis-pos branch that
+  hasn't been snapshotted yet. ~10 minute wall-time vs the ~30 second
+  snapshot path; consumers default to the snapshot and reach for cold
+  start only when they need an unpublished kurtosis-pos commit.
+
+inputs:
+  kurtosis_pos_ref:
+    description: >
+      Git ref of 0xPolygon/kurtosis-pos to clone (branch, tag, or SHA).
+    required: false
+    default: main
+  args_file:
+    description: >
+      Path to the kurtosis args file in the consumer's checkout (relative
+      to GITHUB_WORKSPACE). Each consumer ships its own — the args dictate
+      L1 backend, contract deployments, and chain IDs that the enclave
+      brings up.
+    required: false
+    default: kurtosis-params.yml
+  work_dir:
+    description: >
+      Scratch dir for the kurtosis-pos clone. Default `/tmp/kurtosis-pos`.
+    required: false
+    default: /tmp/kurtosis-pos
+
+runs:
+  using: composite
+  steps:
+    - name: Cold-start kurtosis-pos enclave
+      shell: bash
+      env:
+        KURTOSIS_POS_REF: ${{ inputs.kurtosis_pos_ref }}
+        ARGS_FILE: ${{ inputs.args_file }}
+        WORK_DIR: ${{ inputs.work_dir }}
+      run: bash "${GITHUB_ACTION_PATH}/cold-start.sh"
