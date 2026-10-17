@@ -161,7 +161,7 @@ jobs:
 
       - name: Run Claude Code Review (comment)
         if: inputs.mode == 'comment'
-        uses: anthropics/claude-code-action@f90699222fdbc06942ba7bd0cc5dfed38177ee55 # v1.0.214
+        uses: anthropics/claude-code-action@8cf3482550831fb35a4fc3fbf7ca139cf8028b4c # v1.0.233
         with:
           anthropic_api_key: ${{ secrets.CLAUDE_API_KEY }}
           show_full_output: false
@@ -188,7 +188,7 @@ jobs:
       # fix-review-feedback job triggers on that exact body prefix.
       - name: Run Claude Code Review (approve)
         if: inputs.mode == 'approve'
-        uses: anthropics/claude-code-action@f90699222fdbc06942ba7bd0cc5dfed38177ee55 # v1.0.214
+        uses: anthropics/claude-code-action@8cf3482550831fb35a4fc3fbf7ca139cf8028b4c # v1.0.233
         with:
           anthropic_api_key: ${{ secrets.CLAUDE_API_KEY }}
           allowed_bots: claude
