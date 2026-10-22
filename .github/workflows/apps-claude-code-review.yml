@@ -92,12 +92,13 @@ jobs:
           # PRs it authors still get reviewed.
           allowed_bots: claude
           # Subagents launched by the plugin don't inherit its command-level
-          # allowed-tools, so its gh calls are denied unless allowed here; and
-          # the action only installs the inline-comment MCP server when this
-          # list names it. Without both, reviews silently post nothing.
+          # allowed-tools, so their gh, git and file-reading calls are denied
+          # unless allowed here (read-only tools only); and the action only
+          # installs the inline-comment MCP server when this list names it.
+          # Without both, reviews silently post nothing.
           claude_args: |
             --model claude-opus-4-6
-            --allowedTools "mcp__github_inline_comment__create_inline_comment,Bash(gh pr comment:*),Bash(gh pr diff:*),Bash(gh pr view:*),Bash(gh pr list:*),Bash(gh issue view:*),Bash(gh issue list:*),Bash(gh search:*)"
+            --allowedTools "Read,Grep,Glob,Task,Agent,TodoWrite,mcp__github_inline_comment__create_inline_comment,Bash(gh pr comment:*),Bash(gh pr diff:*),Bash(gh pr view:*),Bash(gh pr list:*),Bash(gh pr checks:*),Bash(gh issue view:*),Bash(gh issue list:*),Bash(gh search:*),Bash(git log:*),Bash(git diff:*),Bash(git show:*),Bash(git blame:*),Bash(git rev-parse:*)"
           plugin_marketplaces: 'https://github.com/anthropics/claude-code.git'
           plugins: 'code-review@claude-code-plugins'
           prompt: '/code-review:code-review --comment'
