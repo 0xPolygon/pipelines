@@ -25,6 +25,14 @@ inputs:
       runtime env var requirements.
     required: false
     default: ''
+  health_path:
+    description: >
+      Path polled for readiness after the container starts. Any status below
+      400 counts as ready (redirects are not followed), so point it at a path
+      that answers 2xx without authentication. Override for services whose
+      liveness endpoint is not /health-check.
+    required: false
+    default: '/health-check'
 
 outputs:
   image_name:
@@ -167,15 +175,16 @@ runs:
       env:
         IMAGE_NAME: ${{ steps.resolve.outputs.image_name }}
         PORT: ${{ inputs.port }}
+        HEALTH_PATH: ${{ inputs.health_path }}
       run: |
         for i in $(seq 1 30); do
-          if curl -sf "http://localhost:${PORT}/health-check" > /dev/null; then
+          if curl -sf "http://localhost:${PORT}${HEALTH_PATH}" > /dev/null; then
             echo "Service ready after ${i}s"
             exit 0
           fi
           sleep 1
         done
-        echo "Service did not become ready in time"
+        echo "Service did not become ready in time (polled ${HEALTH_PATH})"
         docker logs "${IMAGE_NAME}-ci"
         exit 1
 
