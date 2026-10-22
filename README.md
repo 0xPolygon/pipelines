@@ -155,7 +155,7 @@ jobs:
 ### `actions/docker-test`
 
 Resolves a deployable service from a changeset git tag, builds its Docker image,
-starts the container, waits for `health_path` (default `/health-check`), runs the
+starts the container, waits for `health_path` (default `/health-check`) to answer 2xx (redirects count as not ready), runs the
 test suite via `TEST_BASE_URL`, then stops the container. Outputs the resolved `image_name`,
 `image_tag`, `dockerfile_path`, `checkout_ref`, and `should_build` for use by the
 subsequent `release` job. Packages without a `Dockerfile` in their package directory
