@@ -155,8 +155,8 @@ jobs:
 ### `actions/docker-test`
 
 Resolves a deployable service from a changeset git tag, builds its Docker image,
-starts the container, waits for `/health-check`, runs the test suite via
-`TEST_BASE_URL`, then stops the container. Outputs the resolved `image_name`,
+starts the container, waits for `health_path` (default `/health-check`) to answer 2xx (redirects count as not ready), runs the
+test suite via `TEST_BASE_URL`, then stops the container. Outputs the resolved `image_name`,
 `image_tag`, `dockerfile_path`, `checkout_ref`, and `should_build` for use by the
 subsequent `release` job. Packages without a `Dockerfile` in their package directory
 exit cleanly with `should_build=false`.
@@ -174,6 +174,7 @@ jobs:
         with:
           tag: ${{ inputs.tag || '' }}
           # test_vars: MY_RPC   # space-separated env var names to forward to container
+          # health_path: /api/health   # readiness path; defaults to /health-check
 ```
 
 ### `actions/slack-notify` and `actions/upsert-changeset-comment`

@@ -113,7 +113,7 @@ The `docker-test` composite action (`.github/actions/docker-test/`) is
 the test gate. The trigger file in the consuming repo has two jobs:
 
 - **`test`** — calls `docker-test`, which builds the Docker image, starts
-  the container with `PORT` injected, waits for `/health-check` (30s
+  the container with `PORT` injected, waits for `health_path` (default `/health-check`) to answer 2xx (30s
   timeout), runs `pnpm --filter <service> test` with
   `TEST_BASE_URL=http://localhost:<port>`, then stops the container.
 - **`release`** (`needs: test`) — calls `apps-docker-release.yml` to push to GCP.
