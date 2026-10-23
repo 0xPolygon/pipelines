@@ -84,15 +84,21 @@ jobs:
 
       - name: Run Claude Code Review (comment)
         if: inputs.mode == 'comment'
-        uses: anthropics/claude-code-action@f90699222fdbc06942ba7bd0cc5dfed38177ee55 # v1.0.214
+        uses: anthropics/claude-code-action@6b6870e649b5ff408753befeaee5fc7989d4e6a9 # v1.0.258
         with:
           anthropic_api_key: ${{ secrets.CLAUDE_API_KEY }}
           show_full_output: false
           # The action refuses non-human actors by default; allow claude[bot] so
           # PRs it authors still get reviewed.
           allowed_bots: claude
+          # Subagents launched by the plugin don't inherit its command-level
+          # allowed-tools, so their gh, git and file-reading calls are denied
+          # unless allowed here (read-only tools only); and the action only
+          # installs the inline-comment MCP server when this list names it.
+          # Without both, reviews silently post nothing.
           claude_args: |
-            --model claude-opus-4-6
+            --model claude-opus-5-5
+            --allowedTools "Read,Grep,Glob,Task,Agent,TodoWrite,mcp__github_inline_comment__create_inline_comment,Bash(gh pr comment:*),Bash(gh pr diff:*),Bash(gh pr view:*),Bash(gh pr list:*),Bash(gh pr checks:*),Bash(gh issue view:*),Bash(gh issue list:*),Bash(gh search:*),Bash(git log:*),Bash(git diff:*),Bash(git show:*),Bash(git blame:*),Bash(git rev-parse:*)"
           plugin_marketplaces: 'https://github.com/anthropics/claude-code.git'
           plugins: 'code-review@claude-code-plugins'
           prompt: '/code-review:code-review --comment'
@@ -120,7 +126,7 @@ jobs:
       # all - every API call inside the review then fails 401 Bad credentials.
       - name: Run Claude Code Review (approve, reviewer app)
         if: inputs.mode == 'approve' && env.HAS_REVIEWER_APP == 'true'
-        uses: anthropics/claude-code-action@f90699222fdbc06942ba7bd0cc5dfed38177ee55 # v1.0.214
+        uses: anthropics/claude-code-action@6b6870e649b5ff408753befeaee5fc7989d4e6a9 # v1.0.258
         with:
           anthropic_api_key: ${{ secrets.CLAUDE_API_KEY }}
           github_token: ${{ steps.reviewer-token.outputs.token }}
@@ -138,7 +144,7 @@ jobs:
       # docstring above for the self-approval limitation of that identity).
       - name: Run Claude Code Review (approve)
         if: inputs.mode == 'approve' && env.HAS_REVIEWER_APP != 'true'
-        uses: anthropics/claude-code-action@f90699222fdbc06942ba7bd0cc5dfed38177ee55 # v1.0.214
+        uses: anthropics/claude-code-action@6b6870e649b5ff408753befeaee5fc7989d4e6a9 # v1.0.258
         with:
           anthropic_api_key: ${{ secrets.CLAUDE_API_KEY }}
           allowed_bots: claude
