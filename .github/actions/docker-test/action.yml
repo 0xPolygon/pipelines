@@ -84,8 +84,15 @@ runs:
         VERSION="${REF##*@}"
         IMAGE_NAME="${SERVICE#@*/}"
 
-        PKG_DIR=$(pnpm --filter "${SERVICE}" exec -- node -e \
-          "process.stdout.write(process.cwd())" 2>/dev/null || echo "")
+        # Read the package directory from a file, not stdout: pnpm 11's
+        # pre-run dependency check (verifyDepsBeforeRun) prints its install
+        # summary to stdout before `exec` runs, which corrupts a captured
+        # path and silently skips the build.
+        PKG_DIR_FILE="$(mktemp)"
+        PKG_DIR_FILE="$PKG_DIR_FILE" pnpm --filter "${SERVICE}" exec -- node -e \
+          "require('fs').writeFileSync(process.env.PKG_DIR_FILE, process.cwd())" \
+          >/dev/null 2>&1 || true
+        PKG_DIR=$(cat "$PKG_DIR_FILE" 2>/dev/null || echo "")
 
         if [ -z "$PKG_DIR" ] || [ ! -f "${PKG_DIR}/package.json" ]; then
           echo "Package ${SERVICE} not found in workspace — skipping"
