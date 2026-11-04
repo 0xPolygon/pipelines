@@ -1,0 +1,23 @@
+name: Workflow lint trigger
+
+# Canonical trigger for security-zizmor.yml. In a consuming repo, call it by
+# full commit SHA instead of the local path:
+#
+#   uses: 0xPolygon/pipelines/.github/workflows/security-zizmor.yml@<sha> # <date or tag>
+#
+# Runs on every PR (no path filter) so it can be a required check.
+on:
+  pull_request:
+  schedule:
+    - cron: '41 6 * * 1' # Mondays
+  workflow_dispatch:
+
+permissions: {}
+
+jobs:
+  zizmor:
+    permissions:
+      contents: read
+      actions: read
+      security-events: write
+    uses: ./.github/workflows/security-zizmor.yml
