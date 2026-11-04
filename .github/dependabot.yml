@@ -1,0 +1,14 @@
+version: 2
+updates:
+  # Keeps the action pins in every workflow and composite action current. Callers
+  # pick the new versions up when they bump their pin of this repo.
+  - package-ecosystem: github-actions
+    directories: ['/', '/.github/actions/*']
+    schedule:
+      interval: weekly
+      day: monday
+    cooldown:
+      default-days: 7
+    groups:
+      actions:
+        patterns: ['*']

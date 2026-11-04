@@ -1,0 +1,47 @@
+name: Workflow lint
+
+# Lints the caller's GitHub Actions workflows, composite actions and Dependabot
+# config with zizmor. Findings go to code scanning when `advanced-security` is
+# true; otherwise the job fails on any finding at or above the thresholds.
+#
+# Callers trigger it on every `pull_request` plus a weekly `schedule` (see
+# security-zizmor-trigger.yml). No path filter on purpose: a required check
+# that is skipped by a path filter stays pending and blocks the merge.
+on:
+  workflow_call:
+    inputs:
+      min-severity:
+        type: string
+        required: false
+        default: medium
+      min-confidence:
+        type: string
+        required: false
+        default: medium
+      advanced-security:
+        description: Upload SARIF to code scanning. Set false for private repos without GitHub Code Security.
+        type: boolean
+        required: false
+        default: true
+
+permissions: {}
+
+jobs:
+  zizmor:
+    name: zizmor
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    permissions:
+      contents: read # checkout; implicit on public repos
+      actions: read # SARIF upload on private repos
+      security-events: write # SARIF upload
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: zizmorcore/zizmor-action@85b2b9fb8e3325e7a23d7d0a9d7ba5ae0f999e3e # v0.7.1
+        with:
+          version: 1.31.1 # the action defaults to latest; bump deliberately
+          min-severity: ${{ inputs.min-severity }}
+          min-confidence: ${{ inputs.min-confidence }}
+          advanced-security: ${{ inputs.advanced-security }}

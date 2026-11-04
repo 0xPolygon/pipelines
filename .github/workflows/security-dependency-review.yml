@@ -1,0 +1,66 @@
+name: Dependency review
+
+# PR gate: fails when the PR adds a dependency with a known vulnerability at or
+# above `fail-on-severity`, or one whose licence is outside the shared allowlist
+# below. Changing that list here changes it for every caller.
+#
+# Callers trigger it on `pull_request` (see security-dependency-review-trigger.yml).
+# Needs the dependency graph: public repos, or private repos with GitHub Code Security.
+on:
+  workflow_call:
+    inputs:
+      fail-on-severity:
+        description: Lowest advisory severity that fails the check (low, moderate, high, critical).
+        type: string
+        required: false
+        default: high
+      allow-dependencies-licenses:
+        description: >-
+          Packages exempt from the licence check, as comma-separated purls without a
+          version (e.g. `pkg:npm/@img/sharp-libvips-linux-x64, pkg:golang/github.com/ethereum/go-ethereum`).
+          For dependencies already in the tree under a licence the allowlist excludes;
+          a new dependency under that licence still fails.
+        type: string
+        required: false
+        default: ''
+
+permissions: {}
+
+jobs:
+  dependency-review:
+    name: Dependency review
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    permissions:
+      contents: read
+      pull-requests: write # comment-summary-in-pr
+    steps:
+      # Reads the PR's dependency diff through the API; no checkout needed.
+      - uses: actions/dependency-review-action@a1d282b36b6f3519aa1f3fc636f609c47dddb294 # v5.0.0
+        with:
+          fail-on-severity: ${{ inputs.fail-on-severity }}
+          # Permissive licences GitHub reports across the npm and Go trees of the
+          # repos that adopted this gate. Copyleft and unparsed licence data stay out.
+          allow-licenses: >-
+            MIT,
+            Apache-2.0,
+            BSD-2-Clause,
+            BSD-3-Clause,
+            ISC,
+            0BSD,
+            MPL-2.0,
+            Unlicense,
+            CC0-1.0,
+            BlueOak-1.0.0,
+            BSD-2-Clause-Views,
+            CC-BY-3.0,
+            CC-BY-4.0,
+            MIT-0,
+            MITNFA,
+            PostgreSQL,
+            Python-2.0,
+            Unicode-3.0,
+            Zlib,
+            LicenseRef-scancode-google-patent-license-golang
+          allow-dependencies-licenses: ${{ inputs.allow-dependencies-licenses }}
+          comment-summary-in-pr: on-failure
