@@ -1,0 +1,20 @@
+name: Check workspace protocol
+description: >
+  Fails when a workspace package depends on a sibling workspace package
+  (dependencies, devDependencies or optionalDependencies) through a plain
+  version range instead of `workspace:`. Such a dependency installs the
+  registry copy instead of this repo's source, and breaks the npm release
+  job's frozen install once `changeset version` bumps it. peerDependencies
+  are exempt. Expects the caller to have checked out the repo and set up
+  pnpm and Node; needs no `pnpm install`.
+
+runs:
+  using: composite
+  steps:
+    - name: Check intra-workspace dependencies use the workspace protocol
+      shell: bash
+      env:
+        # Assign github.action_path to an env var before shell use to prevent
+        # expression injection if the path contains special characters.
+        ACTION_PATH: ${{ github.action_path }}
+      run: node "$ACTION_PATH/check-workspace-protocol.mjs"

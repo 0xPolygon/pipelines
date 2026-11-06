@@ -41,6 +41,12 @@ jobs:
         with:
           passed: ${{ steps.check.outcome == 'success' }}
 
+      # Independent of the changeset itself: a sibling dependency on a plain
+      # version range installs the registry copy instead of this repo's
+      # source, and breaks the release job's frozen install once versions
+      # are bumped. Fail the PR now rather than the release later.
+      - uses: 0xPolygon/pipelines/.github/actions/check-workspace-protocol@main
+
       - name: Fail if no changeset
         if: steps.check.outcome == 'failure'
         run: exit 1

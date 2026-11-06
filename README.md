@@ -29,7 +29,7 @@ in its own separate GitHub Actions job with its own runner.
 | Workflow | Purpose | Required secrets |
 |----------|---------|-----------------|
 | `apps-ci.yml` | Lint, typecheck, and test on PRs | _(none)_ |
-| `apps-changeset-check.yml` | PR gate: requires a changeset; posts/deletes instructions comment | _(none)_ |
+| `apps-changeset-check.yml` | PR gate: requires a changeset (posts/deletes instructions comment) and that intra-workspace dependencies use `workspace:` | _(none)_ |
 | `apps-codegen-drift-check.yml` | PR gate: runs `pnpm -r --include-workspace-root run --if-present codegen-drift-check` (no-op when no package defines the script) | _(none)_ |
 | `apps-npm-release.yml` | Changesets release pipeline (version bumps, npm publish, git tags) and on-demand snapshot publish via the `snapshot_tag` input | `CHANGESET_RELEASE_BOT_APP_ID`, `CHANGESET_RELEASE_BOT_APP_PRIVATE_KEY` |
 | `apps-docker-release.yml` | GCP image push on version tag (delegates to `gcp_pipeline_release_image.yaml`) | `build_params_gh_secret_keys` |
@@ -53,6 +53,7 @@ system state automatically.
 |--------|---------|-------------------|
 | `actions/ci` | Checkout, install, lint, typecheck, test | No — pure shell |
 | `actions/check-dockerfile` | Pre-flight gate: resolve a changeset tag and report whether the package ships a Dockerfile | No — pure shell |
+| `actions/check-workspace-protocol` | Fail when a workspace package depends on a sibling through a plain version range instead of `workspace:` | No — dependency-free Node script |
 | `actions/docker-test` | Resolve service from tag, build image, start container, run tests, stop | No — pure shell |
 | `actions/npm-release` | Publish, tag, and release post-changesets merge | No — bash script |
 | `actions/slack-notify` | Post Slack Block Kit message from `pr.json` | Yes — ncc bundle |
@@ -151,6 +152,24 @@ jobs:
           tag: ${{ inputs.tag || '' }}
           test_vars: FIRESTORE_EMULATOR_HOST # ...
 ```
+
+### `actions/check-workspace-protocol`
+
+Fails when any workspace package declares a sibling workspace package in
+`dependencies`, `devDependencies` or `optionalDependencies` with a range that
+does not start with `workspace:`. `changeset version` leaves `workspace:`
+ranges alone and pnpm replaces them with real versions at publish, so the
+lockfile committed with a release PR stays current and the release job can
+install it frozen. A plain range on a sibling breaks that: pnpm resolves it
+from the registry instead of the repo, and the frozen install fails once the
+range is bumped. `peerDependencies` are exempt, since a semver peer range is
+how a published library states which sibling versions it supports.
+
+Runs in both `apps-changeset-check.yml` (so the PR fails first) and the
+`apps-npm-release.yml` release job (before its frozen install). It expects a
+checked-out repo with pnpm and Node set up, and needs no `pnpm install`. The
+script has no dependencies, so it ships as plain source in the action
+directory rather than as a compiled bundle.
 
 ### `actions/docker-test`
 

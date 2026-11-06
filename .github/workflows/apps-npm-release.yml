@@ -83,21 +83,24 @@ jobs:
           registry-url: 'https://registry.npmjs.org'
           # No node-auth-token — npm auth handled by OIDC
 
-      # The release PR replaces workspace:* with real semver ranges for all
-      # intra-monorepo deps (e.g. ^2.0.0). Those versions don't exist on
-      # npm yet — they're what we're about to publish.
-      # --config.link-workspace-packages=true overrides .npmrc so pnpm
-      # resolves those ranges against local workspace versions instead of
-      # the registry, making the install succeed regardless of which
-      # packages are being co-released. --no-frozen-lockfile because
-      # `changeset version` updates package.json but not the lockfile, so
-      # the lockfile is structurally stale at the release-PR merge commit.
+      # A sibling dependency declared with a plain version range would be
+      # resolved from the registry instead of this repo, and would break the
+      # frozen install below as soon as `changeset version` bumps it. The PR
+      # changeset check runs the same guard; repeating it here turns a stray
+      # range into a clear error rather than a lockfile mismatch.
+      - uses: 0xPolygon/pipelines/.github/actions/check-workspace-protocol@main
+
+      # Frozen: the lockfile committed at the release-PR merge commit is the
+      # one the release must install. `changeset version` leaves
+      # `workspace:` ranges untouched (pnpm swaps in real versions only at
+      # publish) and the only ranges it does bump, sibling peerDependencies,
+      # are not recorded in the lockfile, so the lockfile is still current.
       # --ignore-scripts: no caller needs an install-time script to release
       # (root `prepare` only installs git hooks; allowlisted dependency builds
       # serve tests/lint/runtime, not `changeset version`/`publish`), and
       # skipping them keeps dependency code from running in a job that
       # holds id-token: write.
-      - run: pnpm install --no-frozen-lockfile --config.link-workspace-packages=true --ignore-scripts
+      - run: pnpm install --frozen-lockfile --ignore-scripts
 
       # Token-ordering trap: mint the app token AFTER checkout and install,
       # never before. A token minted earlier is reachable from every later
@@ -194,13 +197,13 @@ jobs:
           registry-url: 'https://registry.npmjs.org'
           # No node-auth-token — npm auth handled by OIDC trusted publishing
 
-      # See the comment on the equivalent step in the `release` job: snapshot
-      # version() rewrites workspace:* to e.g. 0.0.0-pre-3.9.8-<timestamp>
-      # for every co-published package, and those versions don't exist on
-      # npm. --config.link-workspace-packages=true keeps the install
-      # resolvable against the local workspace. --ignore-scripts for the same
-      # reason as the release job: this job also holds id-token: write.
-      - run: pnpm install --no-frozen-lockfile --config.link-workspace-packages=true --ignore-scripts
+      # Frozen for the same reason as the release job. The install runs
+      # before `changeset version --snapshot`, which changes only `version`
+      # fields on the runner and leaves `workspace:` ranges alone; pnpm
+      # rewrites them to the 0.0.0-<tag>-<timestamp> versions at publish.
+      # --ignore-scripts for the same reason as the release job: this job
+      # also holds id-token: write.
+      - run: pnpm install --frozen-lockfile --ignore-scripts
 
       # One authenticated deepen first, so broken git auth fails in seconds
       # instead of spinning changesets' deepen loop to the timeout.
