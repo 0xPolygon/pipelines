@@ -36,6 +36,7 @@
 #         # model: ${{ vars.CLAUDE_REVIEW_MODEL }}
 #         # anthropic_base_url: ${{ vars.ANTHROPIC_BASE_URL }}
 #         # fetch_depth: 0   # full history — see the input's description below
+#         # allowed_bots: claude,my-pipeline-app   # also widen the if: guard above
 #       secrets:
 #         CLAUDE_API_KEY: ${{ secrets.CLAUDE_API_KEY }}
 
@@ -88,6 +89,15 @@ on:
         type: number
         required: false
         default: 1
+      allowed_bots:
+        description: >-
+          Comma-separated bot names (without "[bot]") whose PRs and pushes
+          claude-code-action may review. The default allows claude[bot] only.
+          A caller that adds a bot here must also let that bot through its own
+          `if:` guard, e.g. a pipeline App that pushes fixes to its PRs.
+        type: string
+        required: false
+        default: 'claude'
     secrets:
       CLAUDE_API_KEY:
         required: true
@@ -182,9 +192,9 @@ jobs:
         with:
           anthropic_api_key: ${{ secrets.CLAUDE_API_KEY }}
           show_full_output: false
-          # The action refuses non-human actors by default; allow claude[bot] so
-          # PRs it authors still get reviewed.
-          allowed_bots: claude
+          # The action refuses non-human actors by default; allow claude[bot] (and
+          # any bots the caller adds) so PRs they author still get reviewed.
+          allowed_bots: ${{ inputs.allowed_bots }}
           claude_args: |
             --model ${{ env.CLAUDE_MODEL }}
           plugin_marketplaces: 'https://github.com/anthropics/claude-code.git'
@@ -208,7 +218,7 @@ jobs:
         uses: anthropics/claude-code-action@4845bacbb38b3c4b15d948f035349786f678e068 # v1.0.267
         with:
           anthropic_api_key: ${{ secrets.CLAUDE_API_KEY }}
-          allowed_bots: claude
+          allowed_bots: ${{ inputs.allowed_bots }}
           claude_args: |
             --model ${{ env.CLAUDE_MODEL }}
             --max-turns 60
