@@ -227,8 +227,12 @@ jobs:
 - Bump the pin deliberately (Dependabot's `github-actions` ecosystem or
   Renovate can open the PRs) rather than tracking `@main`.
 - Pin the `uses:` of every job and step in the trigger file. A pinned
-  reusable workflow still resolves nested `0xPolygon/pipelines/.github/actions/*@main`
-  references inside it at `main` until those are pinned here too.
+  reusable workflow runs this repo's composite actions from the same commit:
+  each reusable workflow checks out `${{ job.workflow_repository }}` at
+  `${{ job.workflow_sha }}` into `.pipelines/` and calls
+  `./.pipelines/.github/actions/<name>`, never `@main`. Composite actions
+  you call directly from a trigger file are pinned by your own `uses:` ref.
+  (`job.workflow_*` is not available on GitHub Enterprise Server.)
 
 > **Status:** this repo does not yet publish release tags that contain the
 > current `apps-*` workflows (the existing `v1`–`v3` tags predate them), so the

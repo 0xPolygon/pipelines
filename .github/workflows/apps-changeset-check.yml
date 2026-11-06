@@ -35,9 +35,20 @@ jobs:
         run: pnpm exec changeset status --since=origin/$BASE_REF
         continue-on-error: true
 
+      # Check out this workflow's own commit so the composite actions below run
+      # from the same SHA as this workflow. A caller that pins this workflow
+      # to a SHA then gets matching actions instead of whatever is on main.
+      # `.pipelines` keeps it out of the caller's files at the workspace root.
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+        with:
+          repository: ${{ job.workflow_repository }}
+          ref: ${{ job.workflow_sha }}
+          path: .pipelines
+          persist-credentials: false
+
       - name: Manage changeset comment
         if: steps.check.outcome == 'success' || steps.check.outcome == 'failure'
-        uses: 0xPolygon/pipelines/.github/actions/upsert-changeset-comment@main
+        uses: ./.pipelines/.github/actions/upsert-changeset-comment
         with:
           passed: ${{ steps.check.outcome == 'success' }}
 
@@ -45,7 +56,7 @@ jobs:
       # version range installs the registry copy instead of this repo's
       # source, and breaks the release job's frozen install once versions
       # are bumped. Fail the PR now rather than the release later.
-      - uses: 0xPolygon/pipelines/.github/actions/check-workspace-protocol@main
+      - uses: ./.pipelines/.github/actions/check-workspace-protocol
 
       - name: Fail if no changeset
         if: steps.check.outcome == 'failure'

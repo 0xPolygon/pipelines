@@ -32,7 +32,18 @@ jobs:
           PR_NUMBER: ${{ inputs.pr-number }}
         run: gh api "/repos/$REPOSITORY/pulls/$PR_NUMBER" > pr.json
 
-      - uses: 0xPolygon/pipelines/.github/actions/slack-notify@main
+      # Check out this workflow's own commit so the composite actions below run
+      # from the same SHA as this workflow. A caller that pins this workflow
+      # to a SHA then gets matching actions instead of whatever is on main.
+      # `.pipelines` keeps it out of the caller's files at the workspace root.
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+        with:
+          repository: ${{ job.workflow_repository }}
+          ref: ${{ job.workflow_sha }}
+          path: .pipelines
+          persist-credentials: false
+
+      - uses: ./.pipelines/.github/actions/slack-notify
         with:
           slack-webhook-url: ${{ secrets.SLACK_WEBHOOK_URL }}
           is-test: ${{ inputs.is-test }}
