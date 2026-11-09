@@ -218,6 +218,69 @@ jobs:
 
 ---
 
+## Security gates
+
+Reusable workflows for the CI security standard for GitHub Actions (npm and Go). They hold
+the audited action pins, tool versions and licence allowlist in one place, so a consuming repo
+carries a short trigger pinned to a commit of this repo instead of its own copy. `pipelines` is
+public, so repos in any org can call them; an org that restricts allowed actions has to allow
+`0xPolygon/pipelines/*`.
+
+| Workflow | When the caller runs it | Purpose |
+|----------|-------------------------|---------|
+| `security-dependency-review.yml` | `pull_request` | Fails on a new dependency with a high-severity advisory or a licence outside the shared allowlist |
+| `security-zizmor.yml` | `pull_request` (no path filter) + weekly `schedule` | Lints workflows, composite actions and Dependabot config with zizmor |
+| `go-mod-check.yml` | `pull_request` (no path filter) | `go mod verify` and `go mod tidy -diff` with `GOFLAGS=-mod=readonly` |
+| `security-govulncheck.yml` | weekly `schedule` + `pull_request` on `go.mod`/`go.sum` | govulncheck on the caller's module |
+
+`security-dependency-review-trigger.yml` and `security-zizmor-trigger.yml` are the canonical
+triggers and run on this repo too. A Go repo adds:
+
+```yaml
+name: Go security
+
+on:
+  pull_request:
+  schedule:
+    - cron: '23 6 * * 1'
+
+permissions: {}
+
+jobs:
+  go-mod:
+    if: github.event_name == 'pull_request'
+    permissions:
+      contents: read
+    uses: 0xPolygon/pipelines/.github/workflows/go-mod-check.yml@<full-40-char-sha> # <tag or date>
+  govulncheck:
+    permissions:
+      contents: read
+    uses: 0xPolygon/pipelines/.github/workflows/security-govulncheck.yml@<full-40-char-sha> # <tag or date>
+```
+
+Run govulncheck on every PR as above, or add a separate trigger with
+`paths: [go.mod, go.sum]` if it is too slow for that.
+
+**Licences.** The allowlist in `security-dependency-review.yml` is shared. A package that is
+already in a repo's tree under a licence outside it (LGPL `sharp-libvips`, GPL `go-ethereum`,
+licence data GitHub cannot parse) is exempted by name in that repo's trigger, so bumping it does
+not fail the check while a new dependency under that licence still does:
+
+```yaml
+    with:
+      allow-dependencies-licenses: >-
+        pkg:npm/@img/sharp-libvips-linux-x64,
+        pkg:golang/github.com/ethereum/go-ethereum
+```
+
+To find the packages a repo needs to exempt, evaluate its dependency-graph SBOM
+(`GET /repos/{owner}/{repo}/dependency-graph/sbom`) against the allowlist. Packages without
+licence data only produce a warning.
+
+**Versions.** Dependabot keeps the action pins here current (`.github/dependabot.yml`, 7-day
+cooldown). The zizmor version (`version:` input) and the govulncheck version (`go install`) are
+pinned by hand and bumped deliberately.
+
 ## Shared org infrastructure workflows
 
 ### Current
