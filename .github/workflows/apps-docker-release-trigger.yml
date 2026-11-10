@@ -26,7 +26,7 @@ jobs:
       checkout_ref: ${{ steps.docker-test.outputs.checkout_ref }}
       should_build: ${{ steps.docker-test.outputs.should_build }}
     steps:
-      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4.3.1
       - id: docker-test
         uses: ./.github/actions/docker-test
         with:

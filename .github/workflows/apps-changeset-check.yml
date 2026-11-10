@@ -13,13 +13,13 @@ jobs:
     if: "!startsWith(github.head_ref, 'changeset-release')"
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4.3.1
         with:
           fetch-depth: 0 # Required: changesets needs full history to find where HEAD diverged from the base branch
 
-      - uses: pnpm/action-setup@41ff72655975bd51cab0327fa583b6e92b6d3061 # v4
+      - uses: pnpm/action-setup@41ff72655975bd51cab0327fa583b6e92b6d3061 # v4.2.0
 
-      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4.4.0
         with:
           node-version-file: .nvmrc
           check-latest: true
@@ -35,11 +35,28 @@ jobs:
         run: pnpm exec changeset status --since=origin/$BASE_REF
         continue-on-error: true
 
+      # Check out this workflow's own commit so the composite actions below run
+      # from the same SHA as this workflow. A caller that pins this workflow
+      # to a SHA then gets matching actions instead of whatever is on main.
+      # `.pipelines` keeps it out of the caller's files at the workspace root.
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+        with:
+          repository: ${{ job.workflow_repository }}
+          ref: ${{ job.workflow_sha }}
+          path: .pipelines
+          persist-credentials: false
+
       - name: Manage changeset comment
         if: steps.check.outcome == 'success' || steps.check.outcome == 'failure'
-        uses: 0xPolygon/pipelines/.github/actions/upsert-changeset-comment@main
+        uses: ./.pipelines/.github/actions/upsert-changeset-comment
         with:
           passed: ${{ steps.check.outcome == 'success' }}
+
+      # Independent of the changeset itself: a sibling dependency on a plain
+      # version range installs the registry copy instead of this repo's
+      # source, and breaks the release job's frozen install once versions
+      # are bumped. Fail the PR now rather than the release later.
+      - uses: ./.pipelines/.github/actions/check-workspace-protocol
 
       - name: Fail if no changeset
         if: steps.check.outcome == 'failure'
