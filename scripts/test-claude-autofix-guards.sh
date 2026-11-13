@@ -92,7 +92,18 @@ allow_entries() {
     | tr ',' '\n' || true
 }
 
-ALLOW_RE='^(Bash\((gh pr (view|diff|checks|comment|edit) |gh api repos/|gh run (list|view)|git (log|diff|show|status))|Read$|Edit\(\./\*\*\)$|Write\(\./\*\*\)$|Grep$|Glob$|mcp__github_file_ops__(commit|delete)_files$)'
+# Every allowed entry must equal one of these full forms; a widened rule
+# (a trailing wildcard, an extra verb) matches none of them.
+EXPR='\$\{\{ [^}]+ \}\}'
+REPO='\$\{\{ github\.repository \}\}'
+ALLOW_RE="^(Bash\\(gh pr (view|diff|checks|comment) ${EXPR}:\\*\\)"
+ALLOW_RE="${ALLOW_RE}|Bash\\(gh pr edit ${EXPR} --add-label \\\$\\{\\{ env\\.STOP_LABEL \\}\\}( --repo ${REPO})?\\)"
+ALLOW_RE="${ALLOW_RE}|Bash\\(gh api repos/${REPO}/pulls/\\\$\\{\\{ github\\.event\\.pull_request\\.number \\}\\}/(comments|reviews) --paginate\\)"
+ALLOW_RE="${ALLOW_RE}|Bash\\(gh api repos/${REPO}/commits/${EXPR}/check-runs:\\*\\)"
+ALLOW_RE="${ALLOW_RE}|Bash\\(gh api repos/${REPO}/check-runs/\\*\\)"
+ALLOW_RE="${ALLOW_RE}|Bash\\(gh run (list|view):\\*\\)"
+ALLOW_RE="${ALLOW_RE}|Bash\\(git (status|diff|diff --stat|log --oneline -n 50)\\)"
+ALLOW_RE="${ALLOW_RE}|Read|Edit\\(\\./\\*\\*\\)|Grep|Glob|mcp__github_file_ops__(commit|delete)_files)\$"
 
 echo "Checking $F"
 
@@ -132,6 +143,10 @@ check "G8 command list has no interpreter or package-manager entry" 0 \
   "$(allow_entries | cnt -E 'Bash\((npm|pnpm|yarn|npx|node|python|pip|make|bash|sh|curl|wget)([^[:alnum:]]|$)')"
 check "S4 every command-list entry matches a permitted form" 0 \
   "$(allow_entries | grep -cvE "$ALLOW_RE" || true)"
+check "B2 no git allow entry uses a ':*' prefix" 0 \
+  "$(allow_entries | cnt -E '^Bash\(git .*:\*')"
+check "n7 no Write( entry in any command list" 0 \
+  "$(nc | grep -- '--allowedTools' | cnt -F 'Write(')"
 check "S4 six --allowedTools lines (three per agent step)" 6 \
   "$(nc | cnt -- '--allowedTools')"
 
@@ -158,6 +173,12 @@ check "A1 each --disallowedTools line includes Edit(~/.config/**)" 0 \
   "$(nc | grep -- '--disallowedTools' | grep -cvF 'Edit(~/.config/**)' || true)"
 check "A1 each --disallowedTools line includes Edit(.git/**)" 0 \
   "$(nc | grep -- '--disallowedTools' | grep -cvF 'Edit(.git/**)' || true)"
+for pat in 'Edit(**/.git)' 'Edit(**/.git/**)' 'Bash(git *--output*)' 'Bash(gh pr comment *--body-file*)' 'Bash(gh pr comment * -F*)'; do
+  check "B2/M1/m4 each --disallowedTools line includes $pat" 0 \
+    "$(nc | grep -- '--disallowedTools' | grep -cvF "$pat" || true)"
+done
+check "m6 both agent steps block writes outside the working directory" 2 \
+  "$(nc | cnt -F "settings: '{\"permissions\":{\"blockWritesOutsideWorkingDirectories\":true}}'")"
 
 echo "Requester gate and dependency-bot list"
 check "G11 dependency-bot list defined once" 1 \
@@ -172,6 +193,26 @@ check "G13 id-token: write kept on both privileged jobs" 2 \
   "$(nc | cnt 'id-token: write')"
 check "G15 every action reference is pinned to a full commit SHA with a version comment" 0 \
   "$(nc | grep -E '^[[:space:]]*(- )?uses:' | grep -cvE '@[0-9a-f]{40} # v[0-9]' || true)"
+
+echo "git_auth output"
+# git_auth's stdout is captured by callers ($(git_auth ls-remote ... | cut -f1)),
+# so it must print nothing of its own.
+GA_FILE="$(mktemp)"
+awk '/^ *git_auth\(\) \{/ { p = 1 } p { print } p && /^ *\}/ { exit }' "$F" > "$GA_FILE"
+SHA40="0123456789abcdef0123456789abcdef01234567"
+git() { printf '%s\trefs/heads/x\n' "$SHA40"; }
+GIT_BASIC="ZHVtbXk="
+GITHUB_SERVER_URL="https://example.invalid"
+# shellcheck disable=SC1090
+. "$GA_FILE"
+GOT="$(set +u; git_auth ls-remote o r | cut -f1)"
+rm -f "$GA_FILE"
+if [ "$GOT" = "$SHA40" ] && [ "${#GOT}" -eq 40 ]; then
+  pass "B1 captured git_auth output is exactly the 40-hex SHA"
+else
+  fail "B1 captured git_auth output is exactly the 40-hex SHA (got: $GOT)"
+fi
+unset -f git
 
 echo
 echo "Passed: $PASS  Failed: $FAIL"
