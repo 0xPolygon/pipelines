@@ -1,8 +1,11 @@
 name: Release Trigger
 
 on:
-  # Standard release on merge to the default branch — runs the changesets
-  # version PR cycle, then publishes + tags + releases when that PR merges.
+  # Standard release on merge to the default branch. The reusable workflow
+  # runs `version` (changesets release PR), then once that PR merges `build`
+  # (pack tarballs), `publish` (approval-gated npm publish) and `finalize`
+  # (git tags and GitHub Releases). Releases run only from a push to the
+  # default branch.
   push:
     branches: [main]
   # Snapshot publish: bumps versions on the runner only and publishes under
@@ -21,6 +24,11 @@ on:
 permissions:
   contents: write
   pull-requests: write
+  # The called workflow's jobs each narrow these further. `id-token` is used
+  # only by `publish` (and `snapshot`) for npm OIDC trusted publishing; the
+  # `publish` job also needs a protected `npm-publish` environment in this
+  # repository (see the README, "npm release: what a consuming repository
+  # must configure").
   id-token: write # required for npm OIDC trusted publishing
 
 jobs:

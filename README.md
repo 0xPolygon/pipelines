@@ -31,7 +31,7 @@ in its own separate GitHub Actions job with its own runner.
 | `apps-ci.yml` | Lint, typecheck, and test on PRs | _(none)_ |
 | `apps-changeset-check.yml` | PR gate: requires a changeset (posts/deletes instructions comment) and that intra-workspace dependencies use `workspace:` | _(none)_ |
 | `apps-codegen-drift-check.yml` | PR gate: runs `pnpm -r --include-workspace-root run --if-present codegen-drift-check` (no-op when no package defines the script) | _(none)_ |
-| `apps-npm-release.yml` | Changesets release pipeline (version bumps, npm publish, git tags) and on-demand snapshot publish via the `snapshot_tag` input | `CHANGESET_RELEASE_BOT_APP_ID`, `CHANGESET_RELEASE_BOT_APP_PRIVATE_KEY` |
+| `apps-npm-release.yml` | Changesets release pipeline in jobs `version` (release PR), `build` (pack tarballs), `publish` (approval-gated npm publish via the `npm-publish` environment), `finalize` (git tags and GitHub Releases), plus on-demand snapshot publish via the `snapshot_tag` input. See [npm release](#npm-release-what-a-consuming-repository-must-configure) | `CHANGESET_RELEASE_BOT_APP_ID`, `CHANGESET_RELEASE_BOT_APP_PRIVATE_KEY` |
 | `apps-docker-release.yml` | GCP image push on version tag (delegates to `gcp_pipeline_release_image.yaml`) | `build_params_gh_secret_keys` |
 | `apps-pr-labeler.yml` | Labels `.github/`-only PRs as `do-not-notify`; removes label when non-`.github/` changes are added | _(none)_ |
 | `apps-slack-merge-notify.yml` | Posts a Slack Block Kit message when a PR is merged | `SLACK_WEBHOOK_URL` |
@@ -55,7 +55,11 @@ system state automatically.
 | `actions/check-dockerfile` | Pre-flight gate: resolve a changeset tag and report whether the package ships a Dockerfile | No — pure shell |
 | `actions/check-workspace-protocol` | Fail when a workspace package depends on a sibling through a plain version range instead of `workspace:` | No — dependency-free Node script |
 | `actions/docker-test` | Resolve service from tag, build image, start container, run tests, stop | No — pure shell |
-| `actions/npm-release` | Publish, tag, and release post-changesets merge | No — bash script |
+| `actions/npm-pack` | Pack every public workspace package whose version is not on npm into tarballs and write `manifest.json`; holds no publish credential | No — dependency-free Node script |
+| `actions/npm-publish-tarballs` | Publish the tarballs listed in `manifest.json` after checking each file's SHA-256 and the npm client version; needs no checkout or install | No — dependency-free Node script |
+| `actions/check-changesets-cli` | Fail unless the repository's resolved `@changesets/cli` is 2.x | No — dependency-free Node script |
+| `actions/release-guard` | Fail unless the run is a push to the repository's default branch | No — dependency-free Node script |
+| `actions/check-release-tags` | Confirm every package in `manifest.json` has a git tag and a GitHub Release, read through the GitHub REST API | No — dependency-free Node script |
 | `actions/slack-notify` | Post Slack Block Kit message from `pr.json` | Yes — ncc bundle |
 | `actions/upsert-changeset-comment` | Post or remove changeset nag comment on a PR | Yes — ncc bundle |
 
@@ -166,10 +170,65 @@ range is bumped. `peerDependencies` are exempt, since a semver peer range is
 how a published library states which sibling versions it supports.
 
 Runs in both `apps-changeset-check.yml` (so the PR fails first) and the
-`apps-npm-release.yml` release job (before its frozen install). It expects a
+`apps-npm-release.yml` `version` job (before its frozen install). It expects a
 checked-out repo with pnpm and Node set up, and needs no `pnpm install`. The
 script has no dependencies, so it ships as plain source in the action
 directory rather than as a compiled bundle.
+
+### npm release: what a consuming repository must configure
+
+`apps-npm-release.yml` runs from a push to the default branch only; any other
+event with an empty `snapshot_tag` fails. Its jobs are `version`, `build`,
+`publish` and `finalize` (formerly a single `release` job, so anything keyed
+on the old job name needs updating). A repository with only private packages
+skips `publish` and is tagged by `finalize` without any approval.
+
+- **`@changesets/cli` 2.x.** Version 3.x prints no tag lines the workflow can
+  read, so `finalize` fails on every run unless the repository's resolved
+  `@changesets/cli` is 2.x, including runs that publish nothing. After a
+  publish, `finalize` also checks that each published package has a git tag,
+  and a GitHub Release when changelogs are enabled (`.changeset/config.json`
+  `changelog` is not `false`) and the package has a `CHANGELOG.md`, because
+  changesets creates a Release from the changelog and none without it.
+- **`publishConfig.access`.** Set it to `public` on every public package. A
+  public package that resolves to restricted access fails the pack step.
+- **Public npm registry only.** Every registry lookup and publish names
+  `https://registry.npmjs.org/` explicitly. A selected package that sets
+  `publishConfig.registry`, or a scoped `publishConfig."<scope>:registry"`, to
+  any other registry fails the pack step and, checked again on the tarball's
+  own `package.json`, the publish job before anything is published.
+- **Root as a workspace member.** As in changesets, the root package is
+  published only when the repository is a single package, or when
+  `pnpm-workspace.yaml` (or `workspaces`) lists the root itself (`.`).
+- **Node.** The `publish` job uses an exact Node version pinned by the
+  workflow, not the repository's `.nvmrc`, and its bundled npm must meet the
+  trusted-publishing minimum.
+- **Lifecycle scripts.** `build` runs `prepublishOnly` (if present) and
+  `pnpm pack`, which runs `prepack` and `prepare`. A package's `publish` and
+  `postpublish` scripts do not run. The publish step runs with
+  `--ignore-scripts`. Packing happens with nothing in the workspace but the
+  repository: the workflow's own checkout is removed first, and the pack step
+  fails if a tarball contains a `.pipelines/` path.
+- **`npm-publish` environment.** Create it in the repository with required
+  reviewers, "prevent self-review" on, administrator bypass off, and
+  deployment branches limited to the default branch. The workflow does not
+  create or configure the environment; verify it with
+  `scripts/check-publish-environment.sh <owner>/<repo>`.
+- **Trust config.** Each package's npm trusted-publisher configuration names
+  the repository's release trigger workflow file and the environment
+  `npm-publish`. Verify the environment with the script **before** recreating
+  a package's trust config with the environment pin. Once a package's trust
+  config names the environment, the snapshot path (which runs without an
+  environment) fails for that package until the snapshot path changes.
+- **Two people per release.** With self-review prevented, the person whose
+  merge started the run cannot approve the publish. If another push lands
+  while a release waits for approval, a second approval request can appear
+  for the same versions; the second run finds them already published and
+  skips them.
+- **Artifact retention.** The tarballs are kept for 7 days. If approval or a
+  re-run of `finalize` comes later, re-run all jobs to pack them again.
+- **Trigger permissions.** Copy `apps-npm-release-trigger.yml`; its top-level
+  `permissions` must cover every scope the called jobs request.
 
 ### `actions/docker-test`
 

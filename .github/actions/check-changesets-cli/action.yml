@@ -1,0 +1,17 @@
+name: Check @changesets/cli version
+description: >
+  Fails unless the repository's resolved `@changesets/cli` is a 2.x release.
+  The release workflow creates tags and GitHub Releases from the
+  `New tag:` lines that `changeset tag` prints in 2.x. Run it after the
+  dependency install, before the step that creates tags.
+
+runs:
+  using: composite
+  steps:
+    - name: Check @changesets/cli is 2.x
+      shell: bash
+      env:
+        # Assign github.action_path to an env var before shell use to prevent
+        # expression injection if the path contains special characters.
+        ACTION_PATH: ${{ github.action_path }}
+      run: node "$ACTION_PATH/check-changesets-cli.mjs"

@@ -2,14 +2,25 @@ name: npm release
 
 # The release flow for Apps Team monorepos using changesets + pnpm deploy.
 #
-# Replaces an earlier bash-script-driven version that committed a
-# regenerated lockfile and tagged it separately. The whole post-publish
-# dance turned out to be solving a problem `pnpm deploy` already solved:
-# Docker bundles workspace source directly, so registry resolution at the
-# release tag is irrelevant — the lockfile commit was a no-op in
-# practice (release histories had zero `chore: update lockfile after
-# publish` entries despite many releases). Removing it lets the workflow
-# collapse to a single `changesets/action` invocation.
+# A push to the default branch runs these jobs:
+#
+#   version   opens or updates the changesets "Release / Deploy" PR and
+#             reports whether changesets are still pending.
+#   build     runs once no changesets are pending. Packs every public
+#             package whose version is not yet on npm into tarballs, with a
+#             manifest, and uploads them as one artifact. Holds no publish
+#             credential.
+#   publish   runs only when there are tarballs. Downloads the artifact and
+#             publishes the tarballs with the npm client that ships with the
+#             pinned Node version, authenticating through OIDC trusted
+#             publishing. It checks out and installs no repository code.
+#   finalize  runs after publish (or straight after build when there was
+#             nothing public to publish). Creates the git tag and GitHub
+#             Release for each taggable package, so service repos that only
+#             ship Docker images are tagged without waiting on a publish.
+#
+# No release-path job restores a dependency cache: every job installs from the
+# committed lockfile.
 #
 # `createGithubReleases: true` extracts each version's `## <version>`
 # section from the matching package's `CHANGELOG.md` and posts it as the
@@ -51,9 +62,9 @@ on:
 permissions: {}
 
 jobs:
-  release:
-    # Standard release flow: changesets PR → publish → tag → GitHub Release.
-    # Skipped when `snapshot_tag` is set — that's a snapshot publish handled below.
+  version:
+    # Opens or updates the changesets Release / Deploy PR. Skipped when
+    # `snapshot_tag` is set — that's a snapshot publish handled below.
     if: inputs.snapshot_tag == ''
     runs-on: ubuntu-latest
     # Bounded: a git network call that cannot authenticate (e.g. changesets'
@@ -61,10 +72,24 @@ jobs:
     # 6-hour default.
     timeout-minutes: 20
     permissions:
-      contents: write # release commits, tags, GitHub Releases
+      contents: write # release PR commits and branch
       pull-requests: write # the changesets Release / Deploy PR
-      id-token: write # required for npm OIDC trusted publishing
+    outputs:
+      has_changesets: ${{ steps.changesets.outputs.hasChangesets }}
     steps:
+      # Fail before anything else runs unless this is a push to the default
+      # branch. The guard comes from this workflow's own commit; the checkout
+      # below clears the workspace, so this copy is gone before changesets runs.
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+        with:
+          repository: ${{ job.workflow_repository }}
+          ref: ${{ job.workflow_sha }}
+          path: .pipelines-guard
+          sparse-checkout: .github/actions/release-guard
+          persist-credentials: false
+
+      - uses: ./.pipelines-guard/.github/actions/release-guard
+
       # Checkout with the default read-only job token and do not persist it
       # to .git/config: nothing after this step pushes over git (changesets
       # github-api mode writes through the API with the app token below).
@@ -79,15 +104,7 @@ jobs:
         with:
           node-version-file: .nvmrc
           check-latest: true
-          cache: pnpm
-          registry-url: 'https://registry.npmjs.org'
-          # No node-auth-token — npm auth handled by OIDC
 
-      # A sibling dependency declared with a plain version range would be
-      # resolved from the registry instead of this repo, and would break the
-      # frozen install below as soon as `changeset version` bumps it. The PR
-      # changeset check runs the same guard; repeating it here turns a stray
-      # range into a clear error rather than a lockfile mismatch.
       # Check out this workflow's own commit so the composite actions below run
       # from the same SHA as this workflow. A caller that pins this workflow
       # to a SHA then gets matching actions instead of whatever is on main.
@@ -99,24 +116,28 @@ jobs:
           path: .pipelines
           persist-credentials: false
 
+      # A sibling dependency declared with a plain version range would be
+      # resolved from the registry instead of this repo, and would break the
+      # frozen install below as soon as `changeset version` bumps it. The PR
+      # changeset check runs the same guard; repeating it here turns a stray
+      # range into a clear error rather than a lockfile mismatch.
       - uses: ./.pipelines/.github/actions/check-workspace-protocol
 
       # changesets/action in github-api mode commits untracked files too, so
       # the pipelines checkout must be gone before it runs or it would land in
       # the Version Packages commit.
       - name: Remove the pipelines checkout
-        run: rm -rf .pipelines
+        run: rm -rf .pipelines .pipelines-guard
 
       # Frozen: the lockfile committed at the release-PR merge commit is the
       # one the release must install. `changeset version` leaves
       # `workspace:` ranges untouched (pnpm swaps in real versions only at
-      # publish) and the only ranges it does bump, sibling peerDependencies,
+      # pack) and the only ranges it does bump, sibling peerDependencies,
       # are not recorded in the lockfile, so the lockfile is still current.
       # --ignore-scripts: no caller needs an install-time script to release
       # (root `prepare` only installs git hooks; allowlisted dependency builds
-      # serve tests/lint/runtime, not `changeset version`/`publish`), and
-      # skipping them keeps dependency code from running in a job that
-      # holds id-token: write.
+      # serve tests/lint/runtime, not `changeset version`), and skipping them
+      # keeps dependency code from running in a job that holds a release token.
       - run: pnpm install --frozen-lockfile --ignore-scripts
 
       # Token-ordering trap: mint the app token AFTER checkout and install,
@@ -124,8 +145,8 @@ jobs:
       # step — checkout would persist it into .git/config, and any
       # dependency install script could read it. Minted here, it exists only
       # for changesets/action. Scope it to exactly what changesets/action
-      # (github-api mode) uses: contents (commits, refs, tags, releases) and
-      # pull-requests (release PR list/create/update).
+      # (github-api mode) uses: contents (commits, refs) and pull-requests
+      # (release PR list/create/update).
       - uses: actions/create-github-app-token@bcd2ba49218906704ab6c1aa796996da409d3eb1 # v3.2.0
         id: app-token
         with:
@@ -135,6 +156,7 @@ jobs:
           permission-pull-requests: write
 
       - uses: changesets/action@a45c4d594aa4e2c509dc14a9f2b3b67ba3780d0d # v1.9.0
+        id: changesets
         with:
           title: 'changesets: Release / Deploy'
           commit: 'release: version packages'
@@ -142,18 +164,228 @@ jobs:
           # the repository's signed-commits requirement. git-cli (the
           # default) produces unsigned commits.
           commitMode: github-api
-          # On a push that consumed all changesets (the release-PR merge),
-          # run publish: capture published packages, push their tags, and
-          # create a GitHub Release per tag with the body extracted from
-          # each package's CHANGELOG.md `## <version>` section.
-          publish: pnpm exec changeset publish
+          # Keeps the release PR's "publish" wording. The command prints no
+          # `New tag:` line, so this job creates no tags or Releases:
+          # publishing happens in the build, publish and finalize jobs.
+          publish: echo "Publishing continues in the build, publish and finalize jobs"
+        env:
+          GITHUB_TOKEN: ${{ steps.app-token.outputs.token }}
+
+  build:
+    # Runs once no changesets are pending (the push that merged the release
+    # PR). Packs the unpublished public packages. It holds no publish
+    # credential: the permissions below grant read access to this repo only.
+    needs: version
+    if: inputs.snapshot_tag == '' && needs.version.outputs.has_changesets == 'false'
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    permissions:
+      contents: read # checkout
+    outputs:
+      has_tarballs: ${{ steps.pack.outputs.has_tarballs }}
+      count: ${{ steps.pack.outputs.count }}
+    steps:
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4.3.1
+        with:
+          fetch-depth: 1
+          persist-credentials: false
+
+      - uses: pnpm/action-setup@41ff72655975bd51cab0327fa583b6e92b6d3061 # v4.2.0
+
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4.4.0
+        with:
+          node-version-file: .nvmrc
+          check-latest: true
+
+      # Frozen and scriptless, as in the version job.
+      - run: pnpm install --frozen-lockfile --ignore-scripts
+
+      # Checked out after the install so the repo's package discovery and the
+      # install never see it. See the version job for why it is this
+      # workflow's own commit.
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+        with:
+          repository: ${{ job.workflow_repository }}
+          ref: ${{ job.workflow_sha }}
+          path: .pipelines
+          persist-credentials: false
+
+      # Tarballs and manifest.json go outside the checkout.
+      - uses: ./.pipelines/.github/actions/npm-pack
+        id: pack
+        with:
+          out-dir: ${{ runner.temp }}/npm-tarballs
+
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        if: steps.pack.outputs.has_tarballs == 'true'
+        with:
+          name: npm-tarballs
+          path: ${{ runner.temp }}/npm-tarballs
+          if-no-files-found: error
+          retention-days: 7
+
+  publish:
+    # Runs only when build packed at least one tarball. Checks out and
+    # installs no repository code: it downloads the artifact and publishes it
+    # with the npm client bundled with the pinned Node version, using the
+    # runner's OIDC identity.
+    needs: [version, build]
+    if: inputs.snapshot_tag == '' && needs.build.outputs.has_tarballs == 'true'
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    # The environment's reviewers approve the publish. A repository that
+    # publishes public packages must configure `npm-publish` with required
+    # reviewers, self-review prevented, no administrator bypass, and
+    # deployment limited to the default branch. The workflow does not create
+    # or configure the environment; verify it with
+    # scripts/check-publish-environment.sh. The name is fixed (npm trust
+    # configs pin it). A release with nothing public skips this job and asks
+    # no approval.
+    environment: npm-publish
+    permissions:
+      id-token: write # npm OIDC trusted publishing
+    steps:
+      # An exact Node version, so the bundled npm is the same on every run:
+      # Node 24.22.3 ships npm 11.19.1, above the 11.5.1 that trusted
+      # publishing requires (the publish action re-checks the version).
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4.4.0
+        with:
+          node-version: '24.22.3'
+          check-latest: false
+          registry-url: 'https://registry.npmjs.org'
+          # No node-auth-token — npm auth handled by OIDC
+
+      # Only the publish action is needed from this workflow's own commit.
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+        with:
+          repository: ${{ job.workflow_repository }}
+          ref: ${{ job.workflow_sha }}
+          path: .pipelines
+          sparse-checkout: |
+            .github/actions/release-guard
+            .github/actions/npm-publish-tarballs
+          persist-credentials: false
+
+      - uses: ./.pipelines/.github/actions/release-guard
+
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          name: npm-tarballs
+          path: ${{ runner.temp }}/npm-tarballs
+
+      - uses: ./.pipelines/.github/actions/npm-publish-tarballs
+        with:
+          directory: ${{ runner.temp }}/npm-tarballs
+
+  finalize:
+    # Creates the git tag and GitHub Release for each taggable package. Runs
+    # after publish succeeds, or after build when there was nothing public to
+    # publish (publish is then skipped, not failed).
+    needs: [version, build, publish]
+    if: >-
+      always() && inputs.snapshot_tag == ''
+      && needs.version.outputs.has_changesets == 'false'
+      && needs.build.result == 'success'
+      && (needs.publish.result == 'success'
+          || (needs.publish.result == 'skipped'
+              && needs.build.outputs.has_tarballs == 'false'))
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    permissions:
+      contents: write # tags and GitHub Releases
+    steps:
+      # Fail before anything else runs unless this is a push to the default
+      # branch. The guard comes from this workflow's own commit; the checkout
+      # below clears the workspace, so this copy is gone before changesets runs.
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+        with:
+          repository: ${{ job.workflow_repository }}
+          ref: ${{ job.workflow_sha }}
+          path: .pipelines-guard
+          sparse-checkout: .github/actions/release-guard
+          persist-credentials: false
+
+      - uses: ./.pipelines-guard/.github/actions/release-guard
+
+      # Same checkout as the version job: read-only job token, not persisted.
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4.3.1
+        with:
+          fetch-depth: 1
+          persist-credentials: false
+
+      - uses: pnpm/action-setup@41ff72655975bd51cab0327fa583b6e92b6d3061 # v4.2.0
+
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4.4.0
+        with:
+          node-version-file: .nvmrc
+          check-latest: true
+
+      - run: pnpm install --frozen-lockfile --ignore-scripts
+
+      # Tags and Releases are created from the `New tag:` lines that
+      # `changeset tag` prints in @changesets/cli 2.x, so finalize fails on any
+      # other major, whether or not anything was published in this run.
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+        with:
+          repository: ${{ job.workflow_repository }}
+          ref: ${{ job.workflow_sha }}
+          path: .pipelines
+          sparse-checkout: .github/actions/check-changesets-cli
+          persist-credentials: false
+
+      - uses: ./.pipelines/.github/actions/check-changesets-cli
+
+      - name: Remove the pipelines checkout
+        run: rm -rf .pipelines
+
+      # Minted after checkout and install, for changesets/action only, and
+      # limited to tags and Releases.
+      - uses: actions/create-github-app-token@bcd2ba49218906704ab6c1aa796996da409d3eb1 # v3.2.0
+        id: app-token
+        with:
+          app-id: ${{ secrets.CHANGESET_RELEASE_BOT_APP_ID }}
+          private-key: ${{ secrets.CHANGESET_RELEASE_BOT_APP_PRIVATE_KEY }}
+          permission-contents: write
+
+      - uses: changesets/action@a45c4d594aa4e2c509dc14a9f2b3b67ba3780d0d # v1.9.0
+        id: changesets
+        with:
+          title: 'changesets: Release / Deploy'
+          commit: 'release: version packages'
+          commitMode: github-api
+          # `changeset tag` prints a `New tag:` line per untagged package;
+          # the action creates each tag and a GitHub Release from the
+          # package's CHANGELOG.md `## <version>` section.
+          publish: pnpm exec changeset tag
           createGithubReleases: true
         env:
           GITHUB_TOKEN: ${{ steps.app-token.outputs.token }}
-          # No NPM_TOKEN — using OIDC trusted publishing.
-          # changesets/action v1.9.0 only writes auth token to .npmrc when
-          # NPM_TOKEN is set; leaving it unset allows npm to use OIDC
-          # automatically.
+
+      # Verifies the end state rather than the action's outputs: every
+      # package that was published has a git tag and a GitHub Release. Fails when a
+      # repo's @changesets/cli prints tags in a format changesets/action
+      # cannot read (it reads `New tag:` lines), and passes on a re-run after
+      # the tags already exist.
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        if: needs.publish.result == 'success'
+        with:
+          name: npm-tarballs
+          path: ${{ runner.temp }}/npm-tarballs
+
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+        if: needs.publish.result == 'success'
+        with:
+          repository: ${{ job.workflow_repository }}
+          ref: ${{ job.workflow_sha }}
+          path: .pipelines
+          sparse-checkout: .github/actions/check-release-tags
+          persist-credentials: false
+
+      - uses: ./.pipelines/.github/actions/check-release-tags
+        if: needs.publish.result == 'success'
+        with:
+          directory: ${{ runner.temp }}/npm-tarballs
+          token: ${{ github.token }}
 
   snapshot:
     # Snapshot publish: bumps versions in-place on the runner (never
@@ -210,7 +442,6 @@ jobs:
         with:
           node-version-file: .nvmrc
           check-latest: true
-          cache: pnpm
           registry-url: 'https://registry.npmjs.org'
           # No node-auth-token — npm auth handled by OIDC trusted publishing
 
