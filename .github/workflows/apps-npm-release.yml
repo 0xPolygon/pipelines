@@ -19,6 +19,9 @@ name: npm release
 #             Release for each taggable package, so service repos that only
 #             ship Docker images are tagged without waiting on a publish.
 #
+# No release-path job restores a dependency cache: every job installs from the
+# committed lockfile.
+#
 # `createGithubReleases: true` extracts each version's `## <version>`
 # section from the matching package's `CHANGELOG.md` and posts it as the
 # release body — same canonical algorithm as changesets-action's
@@ -382,7 +385,6 @@ jobs:
         with:
           node-version-file: .nvmrc
           check-latest: true
-          cache: pnpm
           registry-url: 'https://registry.npmjs.org'
           # No node-auth-token — npm auth handled by OIDC trusted publishing
 
