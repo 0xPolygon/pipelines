@@ -90,6 +90,8 @@
 #
 # Requires: Claude GitHub App installed + an Anthropic API key passed by
 # the caller as the CLAUDE_API_KEY secret.
+#
+# Self-hosted runners need Python 3.11 or newer.
 
 name: Claude PR Autofix
 
@@ -415,16 +417,16 @@ jobs:
           HEAD_REF: ${{ github.event.pull_request.head.ref }}
         run: |
           set -euo pipefail
+          # The checkout credential, encoded for the per-command header, is masked in logs.
+          GIT_BASIC=$(printf 'x-access-token:%s' "$GH_TOKEN" | base64 | tr -d '\n')
+          echo "::add-mask::${GIT_BASIC}"
           # Authenticate one git command with the workflow token, passed through the
           # environment for that command only. Nothing is written to the repository's
           # git config, so no later step inherits the credential.
           git_auth() {
-            local basic
-            basic=$(printf 'x-access-token:%s' "$GH_TOKEN" | base64 | tr -d '\n')
-            echo "::add-mask::${basic}"
             GIT_CONFIG_COUNT=1 \
               GIT_CONFIG_KEY_0="http.${GITHUB_SERVER_URL}/.extraheader" \
-              GIT_CONFIG_VALUE_0="AUTHORIZATION: basic ${basic}" \
+              GIT_CONFIG_VALUE_0="AUTHORIZATION: basic ${GIT_BASIC}" \
               git "$@"
           }
           SHA=$(git_auth ls-remote origin "refs/heads/$HEAD_REF" | cut -f1)
@@ -447,6 +449,8 @@ jobs:
           CLAUDE_CODE_SUBPROCESS_ENV_SCRUB: '1'
         with:
           anthropic_api_key: ${{ secrets.CLAUDE_API_KEY }}
+          # File tools cannot write outside the working directory.
+          settings: '{"permissions":{"blockWritesOutsideWorkingDirectories":true}}'
           # Bot actor gate — see the allowed_bots input. Note that events
           # created with the default GITHUB_TOKEN (e.g. Codegenie without a
           # custom app token) never trigger workflow runs at all, regardless
@@ -477,7 +481,7 @@ jobs:
                `gh api repos/${{ github.repository }}/pulls/${{ github.event.pull_request.number }}/comments --paginate`
                and `gh api repos/${{ github.repository }}/pulls/${{ github.event.pull_request.number }}/reviews --paginate`
                for requested changes and inline comments.
-            2. Check the git log first: if a prior [claude-autofix] commit
+            2. Check prior attempts with `git log --oneline -n 50` first: if a prior [claude-autofix] commit
                already attempted a fix for an item and it was re-raised, do not
                repeat the same approach. Try a meaningfully different fix or
                explain why the current code is correct.
@@ -515,8 +519,9 @@ jobs:
 
             TOOLS:
             You can read and edit files and run only the gh and git commands
-            shown above, in the forms shown (PR number first). Any other command
-            is denied; do not retry a denied command in another form. You cannot
+            shown above, in the forms shown (PR number first). The pull request diff
+            comes from `gh pr diff <number>`. Pass comment text with `--body`.
+            Any other command is denied; do not retry a denied command in another form. You cannot
             install dependencies or run tests, builds, linters or scripts in
             this job. Work from the feedback, the logs and the source. If a fix
             cannot be made with confidence without running something, say so in
@@ -536,10 +541,10 @@ jobs:
             --max-turns 60
             --setting-sources user
             --strict-mcp-config
-            --allowedTools "Bash(gh pr view ${{ github.event.pull_request.number }}:*),Bash(gh pr diff ${{ github.event.pull_request.number }}:*),Bash(gh pr checks ${{ github.event.pull_request.number }}:*),Bash(gh pr comment ${{ github.event.pull_request.number }}:*),Bash(gh pr edit ${{ github.event.pull_request.number }} --add-label ${{ env.STOP_LABEL }}:*),Bash(gh api repos/${{ github.repository }}/pulls/${{ github.event.pull_request.number }}/comments:*),Bash(gh api repos/${{ github.repository }}/pulls/${{ github.event.pull_request.number }}/reviews:*)"
-            --allowedTools "Bash(git log:*),Bash(git diff:*),Bash(git show:*),Bash(git status:*)"
-            --allowedTools "Read,Edit(./**),Write(./**),Grep,Glob,mcp__github_file_ops__commit_files,mcp__github_file_ops__delete_files"
-            --disallowedTools "Edit(.git/**),Edit(~/.gitconfig),Edit(~/.config/**),Edit(~/.claude/**),Edit(~/.claude.json),Edit(/${{ runner.temp }}/**),Read(//proc/**)"
+            --allowedTools "Bash(gh pr view ${{ github.event.pull_request.number }}:*),Bash(gh pr diff ${{ github.event.pull_request.number }}:*),Bash(gh pr checks ${{ github.event.pull_request.number }}:*),Bash(gh pr comment ${{ github.event.pull_request.number }}:*),Bash(gh pr edit ${{ github.event.pull_request.number }} --add-label ${{ env.STOP_LABEL }}),Bash(gh pr edit ${{ github.event.pull_request.number }} --add-label ${{ env.STOP_LABEL }} --repo ${{ github.repository }}),Bash(gh api repos/${{ github.repository }}/pulls/${{ github.event.pull_request.number }}/comments --paginate),Bash(gh api repos/${{ github.repository }}/pulls/${{ github.event.pull_request.number }}/reviews --paginate)"
+            --allowedTools "Bash(git status),Bash(git log --oneline -n 50),Bash(git diff),Bash(git diff --stat)"
+            --allowedTools "Read,Edit(./**),Grep,Glob,mcp__github_file_ops__commit_files,mcp__github_file_ops__delete_files"
+            --disallowedTools "Edit(.git/**),Edit(**/.git),Edit(**/.git/**),Bash(git *--output*),Bash(gh pr comment *--body-file*),Bash(gh pr comment * -F*),Edit(~/.gitconfig),Edit(~/.config/**),Edit(~/.claude/**),Edit(~/.claude.json),Edit(/${{ runner.temp }}/**),Read(//proc/**)"
 
       # Hard gate: prompt compliance is advisory only. Diff what was actually
       # pushed against the path policy; on violation, revert the branch to
@@ -563,16 +568,16 @@ jobs:
           DENIED_PATHS: ${{ inputs.denied_paths }}
         run: |
           set -euo pipefail
+          # The checkout credential, encoded for the per-command header, is masked in logs.
+          GIT_BASIC=$(printf 'x-access-token:%s' "$GH_TOKEN" | base64 | tr -d '\n')
+          echo "::add-mask::${GIT_BASIC}"
           # Authenticate one git command with the workflow token, passed through the
           # environment for that command only. Nothing is written to the repository's
           # git config, so no later step inherits the credential.
           git_auth() {
-            local basic
-            basic=$(printf 'x-access-token:%s' "$GH_TOKEN" | base64 | tr -d '\n')
-            echo "::add-mask::${basic}"
             GIT_CONFIG_COUNT=1 \
               GIT_CONFIG_KEY_0="http.${GITHUB_SERVER_URL}/.extraheader" \
-              GIT_CONFIG_VALUE_0="AUTHORIZATION: basic ${basic}" \
+              GIT_CONFIG_VALUE_0="AUTHORIZATION: basic ${GIT_BASIC}" \
               git "$@"
           }
           # The agent step points origin at its own short-lived credential and
@@ -1157,16 +1162,16 @@ jobs:
           HEAD_REF: ${{ steps.pr.outputs.head_ref }}
         run: |
           set -euo pipefail
+          # The checkout credential, encoded for the per-command header, is masked in logs.
+          GIT_BASIC=$(printf 'x-access-token:%s' "$GH_TOKEN" | base64 | tr -d '\n')
+          echo "::add-mask::${GIT_BASIC}"
           # Authenticate one git command with the workflow token, passed through the
           # environment for that command only. Nothing is written to the repository's
           # git config, so no later step inherits the credential.
           git_auth() {
-            local basic
-            basic=$(printf 'x-access-token:%s' "$GH_TOKEN" | base64 | tr -d '\n')
-            echo "::add-mask::${basic}"
             GIT_CONFIG_COUNT=1 \
               GIT_CONFIG_KEY_0="http.${GITHUB_SERVER_URL}/.extraheader" \
-              GIT_CONFIG_VALUE_0="AUTHORIZATION: basic ${basic}" \
+              GIT_CONFIG_VALUE_0="AUTHORIZATION: basic ${GIT_BASIC}" \
               git "$@"
           }
           SHA=$(git_auth ls-remote origin "refs/heads/$HEAD_REF" | cut -f1)
@@ -1189,6 +1194,8 @@ jobs:
           CLAUDE_CODE_SUBPROCESS_ENV_SCRUB: '1'
         with:
           anthropic_api_key: ${{ secrets.CLAUDE_API_KEY }}
+          # File tools cannot write outside the working directory.
+          settings: '{"permissions":{"blockWritesOutsideWorkingDirectories":true}}'
           # No allowed_bots here: on repository_dispatch the action skips its
           # actor check entirely (src/entrypoints/prepare.ts only checks
           # entity and workflow_run contexts), so the input would be inert.
@@ -1218,7 +1225,8 @@ jobs:
                For Actions-based failures, read the real output with
                `gh run list --commit ${{ steps.pr.outputs.head_sha }}` and
                `gh run view <run-id> --log-failed`.
-            2. Identify the root cause of each failure. Check the git log: if a
+            2. Identify the root cause of each failure. Check prior attempts with
+               `git log --oneline -n 50`: if a
                prior [claude-autofix] commit already tried to fix this exact
                failure and it is STILL failing, your previous approach was wrong.
                Try a fundamentally different approach or, if you have none,
@@ -1254,8 +1262,9 @@ jobs:
 
             TOOLS:
             You can read and edit files and run only the gh and git commands
-            shown above, in the forms shown (PR number first). Any other command
-            is denied; do not retry a denied command in another form. You cannot
+            shown above, in the forms shown (PR number first). The pull request diff
+            comes from `gh pr diff <number>`. Pass comment text with `--body`.
+            Any other command is denied; do not retry a denied command in another form. You cannot
             install dependencies or run tests, builds, linters or scripts in
             this job. Work from the feedback, the logs and the source. If a fix
             cannot be made with confidence without running something, say so in
@@ -1275,10 +1284,10 @@ jobs:
             --max-turns 60
             --setting-sources user
             --strict-mcp-config
-            --allowedTools "Bash(gh pr view ${{ steps.pr.outputs.pr_number }}:*),Bash(gh pr diff ${{ steps.pr.outputs.pr_number }}:*),Bash(gh pr checks ${{ steps.pr.outputs.pr_number }}:*),Bash(gh pr comment ${{ steps.pr.outputs.pr_number }}:*),Bash(gh pr edit ${{ steps.pr.outputs.pr_number }} --add-label ${{ env.STOP_LABEL }}:*),Bash(gh api repos/${{ github.repository }}/commits/${{ steps.pr.outputs.head_sha }}/check-runs:*),Bash(gh api repos/${{ github.repository }}/check-runs/*),Bash(gh run list:*),Bash(gh run view:*)"
-            --allowedTools "Bash(git log:*),Bash(git diff:*),Bash(git show:*),Bash(git status:*)"
-            --allowedTools "Read,Edit(./**),Write(./**),Grep,Glob,mcp__github_file_ops__commit_files,mcp__github_file_ops__delete_files"
-            --disallowedTools "Edit(.git/**),Edit(~/.gitconfig),Edit(~/.config/**),Edit(~/.claude/**),Edit(~/.claude.json),Edit(/${{ runner.temp }}/**),Read(//proc/**)"
+            --allowedTools "Bash(gh pr view ${{ steps.pr.outputs.pr_number }}:*),Bash(gh pr diff ${{ steps.pr.outputs.pr_number }}:*),Bash(gh pr checks ${{ steps.pr.outputs.pr_number }}:*),Bash(gh pr comment ${{ steps.pr.outputs.pr_number }}:*),Bash(gh pr edit ${{ steps.pr.outputs.pr_number }} --add-label ${{ env.STOP_LABEL }}),Bash(gh pr edit ${{ steps.pr.outputs.pr_number }} --add-label ${{ env.STOP_LABEL }} --repo ${{ github.repository }}),Bash(gh api repos/${{ github.repository }}/commits/${{ steps.pr.outputs.head_sha }}/check-runs:*),Bash(gh api repos/${{ github.repository }}/check-runs/*),Bash(gh run list:*),Bash(gh run view:*)"
+            --allowedTools "Bash(git status),Bash(git log --oneline -n 50),Bash(git diff),Bash(git diff --stat)"
+            --allowedTools "Read,Edit(./**),Grep,Glob,mcp__github_file_ops__commit_files,mcp__github_file_ops__delete_files"
+            --disallowedTools "Edit(.git/**),Edit(**/.git),Edit(**/.git/**),Bash(git *--output*),Bash(gh pr comment *--body-file*),Bash(gh pr comment * -F*),Edit(~/.gitconfig),Edit(~/.config/**),Edit(~/.claude/**),Edit(~/.claude.json),Edit(/${{ runner.temp }}/**),Read(//proc/**)"
 
       # Hard gate: see the note on the fix-review-feedback job's step of the
       # same name. Reverts policy-violating pushes, comments, and applies the
@@ -1296,16 +1305,16 @@ jobs:
           DENIED_PATHS: ${{ inputs.denied_paths }}
         run: |
           set -euo pipefail
+          # The checkout credential, encoded for the per-command header, is masked in logs.
+          GIT_BASIC=$(printf 'x-access-token:%s' "$GH_TOKEN" | base64 | tr -d '\n')
+          echo "::add-mask::${GIT_BASIC}"
           # Authenticate one git command with the workflow token, passed through the
           # environment for that command only. Nothing is written to the repository's
           # git config, so no later step inherits the credential.
           git_auth() {
-            local basic
-            basic=$(printf 'x-access-token:%s' "$GH_TOKEN" | base64 | tr -d '\n')
-            echo "::add-mask::${basic}"
             GIT_CONFIG_COUNT=1 \
               GIT_CONFIG_KEY_0="http.${GITHUB_SERVER_URL}/.extraheader" \
-              GIT_CONFIG_VALUE_0="AUTHORIZATION: basic ${basic}" \
+              GIT_CONFIG_VALUE_0="AUTHORIZATION: basic ${GIT_BASIC}" \
               git "$@"
           }
           # The agent step points origin at its own short-lived credential and
