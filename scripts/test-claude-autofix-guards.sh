@@ -119,7 +119,7 @@ check "G4 git network calls go through git_auth (ls-remote, fetch, definitions)"
 
 echo "Interpreter isolation"
 check "G5 every python3 invocation uses -P (invocations, with -P)" "8 8" \
-  "$(nc | cnt 'python3 ') $(nc | cnt 'python3 -P ')"
+  "$(nc | grep -v -- '--disallowedTools' | cnt 'python3 ') $(nc | cnt 'python3 -P ')"
 
 echo "Step order"
 check_before "G6 review job: matcher install precedes checkout" fix-review-feedback \
@@ -160,6 +160,41 @@ check "S4 no --setting-sources value names project or local" 0 \
 check "G9 subprocess environment scrub set on both agent steps" 2 \
   "$(nc | cnt "CLAUDE_CODE_SUBPROCESS_ENV_SCRUB: '1'")"
 
+echo "Agent command isolation"
+# Non-comment lines of the isolation step in JOB (from its name line to the
+# next step at the same indent).
+isolation_step() {
+  awk -v job="$1" '
+    /^jobs:/ { injobs = 1 }
+    injobs && /^  [a-z][a-z-]*:[[:space:]]*$/ { cur = $1; sub(/:$/, "", cur) }
+    cur == job && /^      - name: Install agent command isolation$/ { on = 1; print; next }
+    on && /^      - / { on = 0 }
+    on && $0 !~ /^[[:space:]]*#/ { print }
+  ' "$F"
+}
+for job in fix-review-feedback fix-failing-checks; do
+  check_before "I1 $job: isolation install precedes checkout" "$job" \
+    'name: Install agent command isolation' 'uses: actions/checkout@'
+  check_before "I1 $job: requester gate precedes isolation install" "$job" \
+    'id: authz' 'name: Install agent command isolation'
+  check "I2 $job: isolation step defined once, gated on the requester check, no continue-on-error" "1 1 0" \
+    "$(isolation_step "$job" | cnt '^      - name:') $(isolation_step "$job" | cnt "steps.authz.outputs.proceed == 'true'") $(isolation_step "$job" | cnt 'continue-on-error')"
+  check "I3 $job: isolation step installs exactly bubblewrap and socat" "1 0" \
+    "$(isolation_step "$job" | cnt -E 'apt-get install -y --no-install-recommends bubblewrap socat;') $(isolation_step "$job" | cnt -E 'allow-unauthenticated|add-apt-repository|sources\.list|apt-key')"
+  check "I4 $job: isolation step exits non-zero when the install fails" "2" \
+    "$(isolation_step "$job" | cnt '^ *exit 1$')"
+done
+check "I5 isolation step defined twice in the workflow" 2 \
+  "$(nc | cnt 'name: Install agent command isolation')"
+for cmd in node python python3 bash sh zsh perl ruby npx npm pnpm yarn bun deno make go cargo curl wget env xargs; do
+  for pat in "Bash($cmd)" "Bash($cmd *)"; do
+    check "I6 each --disallowedTools line includes $pat" 0 \
+      "$(nc | grep -- '--disallowedTools' | grep -cvF "$pat" || true)"
+  done
+done
+check "I6 each --disallowedTools line includes Bash(python*)" 0 \
+  "$(nc | grep -- '--disallowedTools' | grep -cvF 'Bash(python*)' || true)"
+
 echo "File tool scope"
 check "A1 command list has no bare Edit or Write entry" 0 \
   "$(allow_entries | cnt -E '^(Edit|Write)$')"
@@ -195,7 +230,7 @@ check "G11 dependency-bot list defined once" 1 \
   "$(nc | cnt 'dependabot\[bot\]')"
 check "S4 dependency-bot list variable defined once" 1 \
   "$(nc | cnt '^[[:space:]]*DEPENDENCY_BOT_LOGINS:')"
-check "G12 permission lookups / steps gated on the requester check" "2 8" \
+check "G12 permission lookups / steps gated on the requester check" "2 10" \
   "$(nc | cnt 'getCollaboratorPermissionLevel') $(nc | cnt "steps.authz.outputs.proceed == 'true'")"
 
 echo "Workflow-wide"
