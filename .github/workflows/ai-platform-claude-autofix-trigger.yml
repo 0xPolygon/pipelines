@@ -66,4 +66,4 @@ jobs:
       # pull_request_review, the pusher on check_suite / workflow_run). The default is
       # '*' — any installed App. Uncomment to restrict to named logins:
       #
-      # allowed_bots: 'claude[bot],polygon-websites-reviewer[bot]'
+      # allowed_bots: 'claude[bot],my-reviewer[bot]'

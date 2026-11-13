@@ -42,8 +42,7 @@
 #   check_suite is not on the list; repository_dispatch and workflow_run are.
 #   The event name cannot be faked either: GitHub forbids overriding
 #   GITHUB_EVENT_NAME (or any GITHUB_*/RUNNER_* variable) via `env` — the
-#   runner re-sets it after the env block (see PT-289; pipelines#70 tried
-#   exactly that and never worked). Funnelling both source events through
+#   runner re-sets it after the env block. Funnelling both source events through
 #   one repository_dispatch keeps a single fixer code path and a single
 #   payload shape. Failures produced by this workflow's own jobs are
 #   excluded, so a crashed autofix run can't re-trigger itself.
@@ -60,7 +59,7 @@
 #
 # SDLC pipeline PRs: both jobs skip PRs whose head branch starts with
 # sdlc/ (plan PRs sdlc/<slug>-plan, code PRs sdlc/<slug>). The AI SDLC
-# pipeline in 0xPolygon/intents revises those itself; two bots answering
+# pipeline revises those itself; two bots answering
 # the same review would race to push.
 #
 # Path policy (denied_paths input): newline-separated gitignore-style
@@ -133,8 +132,7 @@ on:
           the failing commit, including this workflow's own claude[bot]
           pushes. Defaults to '*' (any bot):
           both jobs already refuse fork PRs, so every bot that can reach
-          them is an App the org installed, and a human's review body is
-          exactly as injectable as a bot's. Restrict with a comma-separated
+          them is an App the org installed. Restrict with a comma-separated
           login list (e.g. 'claude[bot],my-reviewer[bot]') if you want only
           specific reviewers to spend autofix credit. Independently of this
           list, pull requests opened by a dependency-update account are
