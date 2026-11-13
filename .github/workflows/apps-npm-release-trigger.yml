@@ -25,11 +25,13 @@ permissions:
   contents: write
   pull-requests: write
   # The called workflow's jobs each narrow these further. `id-token` is used
-  # only by `publish` (and `snapshot`) for npm OIDC trusted publishing; the
+  # by `attest` (signing), `publish` and `snapshot` (npm OIDC trusted
+  # publishing); the
   # `publish` job also needs a protected `npm-publish` environment in this
   # repository (see the README, "npm release: what a consuming repository
   # must configure").
   id-token: write # required for npm OIDC trusted publishing
+  attestations: write # the attest job stores build provenance attestations
 
 jobs:
   release:

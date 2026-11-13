@@ -11,11 +11,11 @@
 set -uo pipefail
 
 # --- Expected shape. Change these in one place when jobs are added. ---
-EXPECTED_JOBS="version build publish finalize snapshot"
+EXPECTED_JOBS="version build attest publish finalize snapshot"
 # Jobs that may hold `id-token: write`, sorted, space separated.
-EXPECTED_ID_TOKEN_JOBS="publish snapshot"
+EXPECTED_ID_TOKEN_JOBS="attest publish snapshot"
 # Jobs that must run release-guard, and jobs that must not.
-GUARDED_JOBS="version publish finalize"
+GUARDED_JOBS="version attest publish finalize"
 UNGUARDED_JOBS="snapshot"
 
 REPO_ROOT="$(cd "$(dirname "$0")/.." && pwd)"
@@ -104,6 +104,27 @@ check "publish setup-node uses an exact x.y.z node-version" $?
 grep -qE '^[[:space:]]+check-latest: false$' "$PUB"
 check "publish setup-node has check-latest: false" $?
 
+# --- attest job: no caller code, no install, publish waits for it ---
+ATT="$WORK/attest.yml"
+job_block attest >"$ATT"
+! grep -qE 'pnpm/action-setup|pnpm install|actions/setup-node' "$ATT"
+check "attest does not set up pnpm or node, or install" $?
+awk '
+  function flush() { if (inco && !(own && dst)) bad=1; inco=0; own=0; dst=0 }
+  /^      - /{ flush(); if ($0 ~ /actions\/checkout@/) inco=1 }
+  inco && /job\.workflow_repository/ { own=1 }
+  inco && /^[[:space:]]+path: \.pipelines$/ { dst=1 }
+  END { flush(); exit bad }' "$ATT"
+check "attest checks out only the workflow's own repository into .pipelines" $?
+grep -qE '^[[:space:]]+subject-path: .*\.tgz$' "$ATT"
+check "attest subject-path is the tarballs only" $?
+grep -qE '^    needs: \[version, build\]$' "$ATT"
+check "attest needs [version, build]" $?
+grep -qE '^    needs: \[version, build, attest\]$' "$PUB"
+check "publish needs [version, build, attest]" $?
+grep -qE '^      attestations: read' "$PUB"
+check "publish has attestations: read" $?
+
 # --- finalize tags services-only releases without approval (publish skipped) ---
 job_block finalize | awk '/^    if:/{f=1;next} f&&/^    [a-z-]+:/{f=0} f' >"$WORK/final-if"
 grep -qF "needs.publish.result == 'skipped'" "$WORK/final-if"
@@ -172,7 +193,7 @@ const idTokenJobs = Object.entries(jobs)
   .map(([n]) => n)
   .sort()
   .join(' ');
-check('id-token permission only in: publish snapshot', idTokenJobs === 'publish snapshot', idTokenJobs);
+check('id-token permission only in: attest publish snapshot', idTokenJobs === 'attest publish snapshot', idTokenJobs);
 check('no job requests id-token other than write', Object.values(jobs).every((j) => !isMap(j.permissions) || !('id-token' in j.permissions) || j.permissions['id-token'] === 'write'));
 
 // Exact job conditions and needs.
@@ -187,7 +208,7 @@ const expectedIf = {
 for (const [name, want] of Object.entries(expectedIf)) {
   check(`${name} if: is exactly the expected condition`, norm(jobs[name]?.if) === want, norm(jobs[name]?.if));
 }
-const expectedNeeds = { version: [], build: ['version'], publish: ['version', 'build'], finalize: ['version', 'build', 'publish'], snapshot: [] };
+const expectedNeeds = { version: [], build: ['version'], publish: ['version', 'build', 'attest'], finalize: ['version', 'build', 'publish'], snapshot: [] };
 for (const [name, want] of Object.entries(expectedNeeds)) {
   const have = [].concat(jobs[name]?.needs ?? []);
   check(`${name} needs: [${want.join(', ')}]`, json(have) === json(want), json(have));

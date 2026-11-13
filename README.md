@@ -31,7 +31,7 @@ in its own separate GitHub Actions job with its own runner.
 | `apps-ci.yml` | Lint, typecheck, and test on PRs | _(none)_ |
 | `apps-changeset-check.yml` | PR gate: requires a changeset (posts/deletes instructions comment) and that intra-workspace dependencies use `workspace:` | _(none)_ |
 | `apps-codegen-drift-check.yml` | PR gate: runs `pnpm -r --include-workspace-root run --if-present codegen-drift-check` (no-op when no package defines the script) | _(none)_ |
-| `apps-npm-release.yml` | Changesets release pipeline in jobs `version` (release PR), `build` (pack tarballs), `publish` (approval-gated npm publish via the `npm-publish` environment), `finalize` (git tags and GitHub Releases), plus on-demand snapshot publish via the `snapshot_tag` input. See [npm release](#npm-release-what-a-consuming-repository-must-configure) | `CHANGESET_RELEASE_BOT_APP_ID`, `CHANGESET_RELEASE_BOT_APP_PRIVATE_KEY` |
+| `apps-npm-release.yml` | Changesets release pipeline in jobs `version` (release PR), `build` (pack tarballs), `attest` (build provenance for the tarballs), `publish` (verifies the attestations, then approval-gated npm publish via the `npm-publish` environment), `finalize` (git tags and GitHub Releases), plus on-demand snapshot publish via the `snapshot_tag` input. See [npm release](#npm-release-what-a-consuming-repository-must-configure) | `CHANGESET_RELEASE_BOT_APP_ID`, `CHANGESET_RELEASE_BOT_APP_PRIVATE_KEY` |
 | `apps-docker-release.yml` | GCP image push on version tag (delegates to `gcp_pipeline_release_image.yaml`) | `build_params_gh_secret_keys` |
 | `apps-pr-labeler.yml` | Labels `.github/`-only PRs as `do-not-notify`; removes label when non-`.github/` changes are added | _(none)_ |
 | `apps-slack-merge-notify.yml` | Posts a Slack Block Kit message when a PR is merged | `SLACK_WEBHOOK_URL` |
@@ -179,7 +179,7 @@ directory rather than as a compiled bundle.
 
 `apps-npm-release.yml` runs from a push to the default branch only; any other
 event with an empty `snapshot_tag` fails. Its jobs are `version`, `build`,
-`publish` and `finalize` (formerly a single `release` job, so anything keyed
+`attest`, `publish` and `finalize` (formerly a single `release` job, so anything keyed
 on the old job name needs updating). A repository with only private packages
 skips `publish` and is tagged by `finalize` without any approval.
 
@@ -228,7 +228,14 @@ skips `publish` and is tagged by `finalize` without any approval.
 - **Artifact retention.** The tarballs are kept for 7 days. If approval or a
   re-run of `finalize` comes later, re-run all jobs to pack them again.
 - **Trigger permissions.** Copy `apps-npm-release-trigger.yml`; its top-level
-  `permissions` must cover every scope the called jobs request.
+  `permissions` must cover every scope the called jobs request, including
+  `attestations: write` for the `attest` job.
+- **Build provenance.** `attest` records a provenance attestation for each
+  tarball and `publish` verifies each one with `gh attestation verify`
+  (`--repo` set to the calling repository, `--signer-workflow` set to
+  `0xPolygon/pipelines/.github/workflows/apps-npm-release.yml`) before it
+  publishes anything. Attestations need a repository plan that supports them
+  (public repositories, or private repositories on GitHub Enterprise Cloud).
 
 ### `actions/docker-test`
 
