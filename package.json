@@ -26,7 +26,8 @@
     "ci:publish": "pnpm exec changeset publish",
     "test:npm-release": "bash scripts/test-tag-step.sh",
     "test:slack-pr-merged": "bash scripts/test-slack-pr-merged.sh",
-    "test": "pnpm run test:slack-pr-merged"
+    "test:actions": "node --test \".github/actions/**/*.test.mjs\"",
+    "test": "pnpm run test:slack-pr-merged && pnpm run test:actions"
   },
   "devDependencies": {
     "@changesets/cli": "^2.30.0",
