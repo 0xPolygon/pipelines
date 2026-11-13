@@ -42,8 +42,7 @@
 #   check_suite is not on the list; repository_dispatch and workflow_run are.
 #   The event name cannot be faked either: GitHub forbids overriding
 #   GITHUB_EVENT_NAME (or any GITHUB_*/RUNNER_* variable) via `env` — the
-#   runner re-sets it after the env block (see PT-289; pipelines#70 tried
-#   exactly that and never worked). Funnelling both source events through
+#   runner re-sets it after the env block. Funnelling both source events through
 #   one repository_dispatch keeps a single fixer code path and a single
 #   payload shape. Failures produced by this workflow's own jobs are
 #   excluded, so a crashed autofix run can't re-trigger itself.
@@ -60,7 +59,7 @@
 #
 # SDLC pipeline PRs: both jobs skip PRs whose head branch starts with
 # sdlc/ (plan PRs sdlc/<slug>-plan, code PRs sdlc/<slug>). The AI SDLC
-# pipeline in 0xPolygon/intents revises those itself; two bots answering
+# pipeline revises those itself; two bots answering
 # the same review would race to push.
 #
 # Path policy (denied_paths input): newline-separated gitignore-style
@@ -76,13 +75,26 @@
 # repo-relative path. Invalid patterns fail closed: the run skips with a
 # PR comment instead of running unrestricted.
 #
-# Security: the two Claude jobs run with a write token and repo secrets, so they
-# refuse fork PRs (untrusted code must not run in this privileged context),
-# and attacker-controllable event fields (branch names) are passed to
-# scripts via env, never interpolated into script bodies.
+# Security: the two Claude jobs run with a write token and repo secrets. They
+# refuse fork PRs and pull requests opened by dependency-update accounts,
+# check the requester before anything is checked out, give the agent a fixed
+# command set with no general shell, load agent settings only from this
+# workflow, and do not keep the checkout credential in the repository's git
+# config. Event fields such as branch names are passed to scripts via env,
+# never interpolated into script bodies.
+#
+# What the agent can do: read and edit files, read review feedback and check
+# logs, comment, label, and commit. It does not install dependencies or run
+# tests, builds or scripts.
 #
 # Requires: Claude GitHub App installed + an Anthropic API key passed by
 # the caller as the CLAUDE_API_KEY secret.
+#
+# Self-hosted runners need Python 3.11 or newer.
+# The jobs install bubblewrap and socat from the runner's package mirrors;
+# runners without sudo and apt fail closed. The same step relaxes the AppArmor
+# restriction on unprivileged user namespaces, a host setting that persists on
+# self-hosted runners.
 
 name: Claude PR Autofix
 
@@ -124,10 +136,11 @@ on:
           the failing commit, including this workflow's own claude[bot]
           pushes. Defaults to '*' (any bot):
           both jobs already refuse fork PRs, so every bot that can reach
-          them is an App the org installed, and a human's review body is
-          exactly as injectable as a bot's. Restrict with a comma-separated
+          them is an App the org installed. Restrict with a comma-separated
           login list (e.g. 'claude[bot],my-reviewer[bot]') if you want only
-          specific reviewers to spend autofix credit.
+          specific reviewers to spend autofix credit. Independently of this
+          list, pull requests opened by a dependency-update account are
+          skipped, and a human reviewer must have write access.
         type: string
         required: false
         default: '*'
@@ -145,6 +158,10 @@ permissions: {}
 
 env:
   STOP_LABEL: ai-needs-human
+  # Accounts that open automated dependency updates. Their pull requests are
+  # left to their own tooling and to human review; autofix does not act on
+  # them. This is the only place the list is defined.
+  DEPENDENCY_BOT_LOGINS: 'dependabot[bot],renovate[bot]'
 
 jobs:
   # ------------------------------------------------------------------
@@ -184,27 +201,104 @@ jobs:
       contents: write
       pull-requests: write
       issues: write
+      # Required by the agent action, which exchanges the job's OIDC token for its GitHub App token.
       id-token: write
       actions: read
     steps:
-      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+      # Decide whether this run may proceed before anything from the pull
+      # request is checked out: dependency-update pull requests are left
+      # alone, an automated reviewer must be permitted by allowed_bots, and a
+      # human reviewer must have write access to this repository.
+      - name: Check requester and PR author
+        id: authz
+        uses: actions/github-script@3a2844b7e9c422d3c10d287c895573f7108da1b3 # v9.0.0
+        env:
+          ALLOWED_BOTS: ${{ inputs.allowed_bots }}
         with:
-          ref: ${{ github.event.pull_request.head.sha }}
-          fetch-depth: 0
+          script: |
+            const norm = (s) => String(s || '').trim().toLowerCase().replace(/\[bot\]$/, '');
+            const list = (s) => String(s || '').split(',').map(norm).filter(Boolean);
+            const pr = context.payload.pull_request;
+            const reviewer = context.payload.review.user;
+            core.setOutput('proceed', 'false');
+            if (list(process.env.DEPENDENCY_BOT_LOGINS).includes(norm(pr.user.login))) {
+              core.info(`PR author ${pr.user.login} is a dependency-update account. Skipping.`);
+              return;
+            }
+            if (reviewer.type === 'Bot' || reviewer.login.endsWith('[bot]')) {
+              const allowed = String(process.env.ALLOWED_BOTS || '').trim();
+              if (allowed !== '*' && !list(allowed).includes(norm(reviewer.login))) {
+                core.info(`Reviewer ${reviewer.login} is not in allowed_bots. Skipping.`);
+                return;
+              }
+            } else {
+              const { data } = await github.rest.repos.getCollaboratorPermissionLevel({
+                ...context.repo,
+                username: reviewer.login
+              });
+              if (!['admin', 'write'].includes(data.permission)) {
+                core.info(`Reviewer ${reviewer.login} does not have write access. Skipping.`);
+                return;
+              }
+            }
+            core.setOutput('proceed', 'true');
 
       # Pinned to the audited version — enforcement semantics depend on exact
       # matcher behavior. Separate step so the install runs without GH_TOKEN
       # in its environment. Skipped when no path policy is configured, so an
       # unrestricted caller gains no new network failure mode.
+      # Install the matcher's pinned dependency at the start of the job.
+      # Helper scripts run with -P (Python's safe-path mode).
       - name: Install path matcher dependency
-        if: inputs.denied_paths != ''
-        run: python3 -m pip install --quiet pathspec==1.1.1
+        if: steps.authz.outputs.proceed == 'true' && inputs.denied_paths != ''
+        run: python3 -P -m pip install --quiet pathspec==1.1.1
+
+      # Commands the agent starts run in an isolated environment without the
+      # job's credentials. The packages it needs are installed here, as the
+      # agent action itself does (anthropics/claude-code-action action.yml,
+      # same pinned SHA). Without them the job stops.
+      - name: Install agent command isolation
+        if: steps.authz.outputs.proceed == 'true'
+        run: |
+          if ! command -v apt-get >/dev/null || ! command -v sudo >/dev/null; then
+            echo "::error::apt-get and sudo are required to install the agent's command isolation"
+            exit 1
+          fi
+          installed=0
+          for i in 1 2 3; do
+            if sudo apt-get update -qq && sudo apt-get install -y --no-install-recommends bubblewrap socat; then
+              installed=1
+              break
+            fi
+            echo "apt-get attempt $i failed, retrying..."
+            sleep 5
+          done
+          if [ "$installed" != 1 ]; then
+            echo "::error::could not install the agent's command isolation packages"
+            exit 1
+          fi
+          # Ubuntu 24.04+ restricts unprivileged user namespaces via AppArmor.
+          # The sysctl does not exist on older kernels.
+          if [ -f /proc/sys/kernel/apparmor_restrict_unprivileged_userns ]; then
+            sudo sysctl -w kernel.apparmor_restrict_unprivileged_userns=0
+          fi
+
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+        if: steps.authz.outputs.proceed == 'true'
+        with:
+          ref: ${{ github.event.pull_request.head.sha }}
+          fetch-depth: 0
+          # Later steps authenticate their own git network calls one command
+          # at a time (see git_auth), so the checkout credential is not kept
+          # in the repository's git config.
+          persist-credentials: false
 
       # Parse denied_paths, validate every pattern, and build the prompt
       # snippet. Fails closed: invalid patterns skip the run with a PR
       # comment instead of running unrestricted.
       - name: Parse and validate path policy
         id: policy
+        if: steps.authz.outputs.proceed == 'true'
         env:
           GH_TOKEN: ${{ github.token }}
           PR_NUMBER: ${{ github.event.pull_request.number }}
@@ -277,7 +371,7 @@ jobs:
           sys.exit(1 if violations else 0)
           PYEOF
           # The hard gate re-verifies this hash before trusting the script:
-          # Claude runs with Bash in between and $RUNNER_TEMP is writable.
+          # the agent can write files under $RUNNER_TEMP in between.
           echo "script_sha=$(sha256sum "$RUNNER_TEMP/pathpolicy.py" | cut -d' ' -f1)" >> "$GITHUB_OUTPUT"
 
           strip_comments() { grep -Ev '^[[:space:]]*(#|$)' "$1" || true; }
@@ -289,7 +383,7 @@ jobs:
             exit 0
           fi
 
-          if ! python3 "$RUNNER_TEMP/pathpolicy.py" validate "$RUNNER_TEMP/denied_paths.txt"; then
+          if ! python3 -P "$RUNNER_TEMP/pathpolicy.py" validate "$RUNNER_TEMP/denied_paths.txt"; then
             { echo "valid=false"; echo "enforce=false"; echo "prompt_block="; } >> "$GITHUB_OUTPUT"
             gh pr comment "$PR_NUMBER" --repo "${{ github.repository }}" --body \
               "Claude autofix skipped: the \`denied_paths\` configuration in the caller workflow contains an invalid pattern (see the run log). Autofix will not run until the configuration is fixed. ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}"
@@ -330,6 +424,9 @@ jobs:
             ''|*[!0-9]*) echo "::error::max_attempts must be a positive integer (got '$MAX_ATTEMPTS')"; exit 1;;
           esac
           [ "$MAX_ATTEMPTS" -ge 1 ] || { echo "::error::max_attempts must be at least 1"; exit 1; }
+          # The count below reads local refs only; without the base ref it would
+          # report zero attempts.
+          git rev-parse --verify --quiet "refs/remotes/origin/$BASE_REF" > /dev/null || { echo "::error::base branch is not available in the checkout"; exit 1; }
           ATTEMPTS=$(git log --oneline "origin/$BASE_REF..HEAD" | grep -c '\[claude-autofix\]' || true)
           echo "Prior autofix attempts on this PR: $ATTEMPTS (max: $MAX_ATTEMPTS)"
           if [ "$ATTEMPTS" -ge "$MAX_ATTEMPTS" ]; then
@@ -348,10 +445,26 @@ jobs:
         id: before
         if: steps.attempts.outputs.proceed == 'true' && steps.policy.outputs.enforce == 'true'
         env:
+          GH_TOKEN: ${{ github.token }}
           HEAD_REF: ${{ github.event.pull_request.head.ref }}
         run: |
           set -euo pipefail
-          echo "sha=$(git ls-remote origin "refs/heads/$HEAD_REF" | cut -f1)" >> "$GITHUB_OUTPUT"
+          # The checkout credential, encoded for the per-command header, is masked in logs.
+          GIT_BASIC=$(printf 'x-access-token:%s' "$GH_TOKEN" | base64 | tr -d '\n')
+          echo "::add-mask::${GIT_BASIC}"
+          # Authenticate one git command with the workflow token, passed through the
+          # environment for that command only. Nothing is written to the repository's
+          # git config, so no later step inherits the credential.
+          git_auth() {
+            GIT_CONFIG_COUNT=1 \
+              GIT_CONFIG_KEY_0="http.${GITHUB_SERVER_URL}/.extraheader" \
+              GIT_CONFIG_VALUE_0="AUTHORIZATION: basic ${GIT_BASIC}" \
+              git "$@"
+          }
+          SHA=$(git_auth ls-remote origin "refs/heads/$HEAD_REF" | cut -f1)
+          # Fail here rather than start the agent without a pre-run snapshot.
+          case "$SHA" in ''|*[!0-9a-f]*) echo "::error::could not read the branch head"; exit 1;; esac
+          echo "sha=$SHA" >> "$GITHUB_OUTPUT"
 
       - name: Fix review feedback
         # The trailing clause makes the gate coupling explicit: when the
@@ -362,8 +475,14 @@ jobs:
           steps.policy.outputs.valid == 'true' &&
           (steps.policy.outputs.enforce != 'true' || steps.before.outcome == 'success')
         uses: anthropics/claude-code-action@4845bacbb38b3c4b15d948f035349786f678e068 # v1.0.267
+        env:
+          # Commands the agent starts do not receive the model API credential.
+          # GH_TOKEN is kept, so gh keeps working.
+          CLAUDE_CODE_SUBPROCESS_ENV_SCRUB: '1'
         with:
           anthropic_api_key: ${{ secrets.CLAUDE_API_KEY }}
+          # File tools cannot write outside the working directory.
+          settings: '{"permissions":{"blockWritesOutsideWorkingDirectories":true}}'
           # Bot actor gate — see the allowed_bots input. Note that events
           # created with the default GITHUB_TOKEN (e.g. Codegenie without a
           # custom app token) never trigger workflow runs at all, regardless
@@ -390,18 +509,20 @@ jobs:
             feedback that blocks approval.
 
             ASSESS:
-            1. Read the review feedback: `gh pr view ${{ github.event.pull_request.number }} --comments`
-               and `gh api repos/${{ github.repository }}/pulls/${{ github.event.pull_request.number }}/comments`
+            1. Read the review feedback: `gh pr view ${{ github.event.pull_request.number }} --comments`,
+               `gh api repos/${{ github.repository }}/pulls/${{ github.event.pull_request.number }}/comments --paginate`
+               and `gh api repos/${{ github.repository }}/pulls/${{ github.event.pull_request.number }}/reviews --paginate`
                for requested changes and inline comments.
-            2. Check the git log first: if a prior [claude-autofix] commit
+            2. Check prior attempts with `git log --oneline -n 50` first: if a prior [claude-autofix] commit
                already attempted a fix for an item and it was re-raised, do not
                repeat the same approach. Try a meaningfully different fix or
                explain why the current code is correct.
 
             FIX:
             3. Address every actionable requested change. Follow existing code
-               style and CLAUDE.md if present. Never delete, skip, or weaken
-               tests to get green.
+               style, and the repository's CLAUDE.md if present (read it with
+               the Read tool; it is not loaded automatically). Never delete,
+               skip, or weaken tests to get green.
 
             REPORT:
             4. Commit your changes to the current branch with the
@@ -413,8 +534,9 @@ jobs:
                `fix(auth): handle expired session in middleware [claude-autofix]`
                The tag is how the loop-prevention gate counts attempts; omitting
                it breaks the safety mechanism.
-            5. Reply via `gh pr comment` summarizing what you changed. For
-               feedback you intentionally did NOT act on, explain why.
+            5. Reply via `gh pr comment ${{ github.event.pull_request.number }} --body "..."`
+               summarizing what you changed. For feedback you intentionally did
+               NOT act on, explain why.
 
             If there is genuinely nothing actionable, do NOT push an empty or
             cosmetic commit. Just reply with a comment and stop.
@@ -422,16 +544,42 @@ jobs:
             Do not force-push. Do not modify unrelated code. If feedback
             requires a product decision, ask in a comment instead of guessing --
             and when you do, also run
-            `gh pr edit ${{ github.event.pull_request.number }} --add-label ${{ env.STOP_LABEL }} --repo ${{ github.repository }}`
+            `gh pr edit ${{ github.event.pull_request.number }} --add-label ${{ env.STOP_LABEL }}`
             so the PR is flagged for a human (this case pushes no commit, so
             the attempt cap alone would never catch it). A human removes the
             label once they've answered.
 
+            TOOLS:
+            You can read and edit files and run only the gh and git commands
+            shown above, in the forms shown (PR number first). The pull request diff
+            comes from `gh pr diff <number>`. Pass comment text with `--body`.
+            Run commands from the repository root; do not change directory. Keep the literal
+            strings `-F`, `--body-file`, `-R` and `--repo` out of comment text.
+            Do not pass --repo or -R.
+            Any other command is denied; do not retry a denied command in another form. You cannot
+            install dependencies or run tests, builds, linters or scripts in
+            this job. Work from the feedback, the logs and the source. If a fix
+            cannot be made with confidence without running something, say so in
+            your comment and apply the label as described.
+
             ${{ steps.policy.outputs.prompt_block }}
+          # The agent gets a fixed set of commands: reading this pull request
+          # and its feedback, commenting, labelling, and read-only git. It has
+          # no general shell, so nothing from the repository is installed,
+          # built or run in this job. Settings, hooks and MCP servers are taken
+          # only from this workflow, not from the repository.
+          # File edits are limited to the repository's working tree, outside
+          # its git metadata; the runner's own tool configuration is not
+          # writable.
           claude_args: |
             --model ${{ inputs.model }}
             --max-turns 60
-            --allowedTools "Bash,Read,Edit,Write,Grep,Glob,mcp__github_file_ops__commit_files,mcp__github_file_ops__delete_files"
+            --setting-sources user
+            --strict-mcp-config
+            --allowedTools "Bash(gh pr view ${{ github.event.pull_request.number }}:*),Bash(gh pr diff ${{ github.event.pull_request.number }}:*),Bash(gh pr checks ${{ github.event.pull_request.number }}:*),Bash(gh pr comment ${{ github.event.pull_request.number }}:*),Bash(gh pr edit ${{ github.event.pull_request.number }} --add-label ${{ env.STOP_LABEL }}),Bash(gh api repos/${{ github.repository }}/pulls/${{ github.event.pull_request.number }}/comments --paginate),Bash(gh api repos/${{ github.repository }}/pulls/${{ github.event.pull_request.number }}/reviews --paginate)"
+            --allowedTools "Bash(git status),Bash(git log --oneline -n 50),Bash(git diff),Bash(git diff --stat)"
+            --allowedTools "Read,Edit(./**),Grep,Glob,mcp__github_file_ops__commit_files,mcp__github_file_ops__delete_files"
+            --disallowedTools "Edit(.git/**),Edit(**/.git),Edit(**/.git/**),Bash(git *--output*),Bash(gh pr comment *--body-file*),Bash(gh pr comment * -F*),Edit(~/.gitconfig),Edit(~/.config/**),Edit(~/.claude/**),Edit(~/.claude.json),Edit(/${{ runner.temp }}/**),Read(//proc/**),Bash(cd *),Bash(pushd *),Bash(git -C *),Bash(git -c *),Bash(git --git-dir*),Bash(git --work-tree*),Bash(git --exec-path*),Bash(git -*),Bash(gh pr * --repo*),Bash(gh pr * -R*),Bash(gh run * --repo*),Bash(gh run * -R*),Bash(node),Bash(node *),Bash(python),Bash(python *),Bash(python3),Bash(python3 *),Bash(bash),Bash(bash *),Bash(sh),Bash(sh *),Bash(zsh),Bash(zsh *),Bash(perl),Bash(perl *),Bash(ruby),Bash(ruby *),Bash(npx),Bash(npx *),Bash(npm),Bash(npm *),Bash(pnpm),Bash(pnpm *),Bash(yarn),Bash(yarn *),Bash(bun),Bash(bun *),Bash(deno),Bash(deno *),Bash(make),Bash(make *),Bash(go),Bash(go *),Bash(cargo),Bash(cargo *),Bash(curl),Bash(curl *),Bash(wget),Bash(wget *),Bash(env),Bash(env *),Bash(xargs),Bash(xargs *),Bash(python*),Bash(exec *),Bash(eval *),Bash(source *),Bash(. *),Bash(command *),Bash(/*),Bash(./*),Bash(awk *),Bash(sed *),Bash(php *)"
 
       # Hard gate: prompt compliance is advisory only. Diff what was actually
       # pushed against the path policy; on violation, revert the branch to
@@ -440,8 +588,8 @@ jobs:
       # kill-switch label. The revert commit carries the [claude-autofix]
       # tag so a reverted violation still counts as an attempt. Runs with
       # always() so a crashed Claude step that already pushed is still gated.
-      # Fails closed: matcher tampering (Claude has Bash and $RUNNER_TEMP is
-      # writable) or a matcher error labels the PR and fails the job rather
+      # Fails closed: matcher tampering (the agent can write files under
+      # $RUNNER_TEMP) or a matcher error labels the PR and fails the job rather
       # than passing the push.
       - name: Enforce path policy
         id: gate
@@ -455,11 +603,22 @@ jobs:
           DENIED_PATHS: ${{ inputs.denied_paths }}
         run: |
           set -euo pipefail
-          # The Claude action step swaps the checkout's git credentials for
-          # its own app token and revokes it when the step ends, so plain git
-          # network calls (ls-remote/fetch) 401 afterwards. Re-point origin at
-          # the workflow token before any network call below.
-          git remote set-url origin "https://x-access-token:${GH_TOKEN}@github.com/${{ github.repository }}.git"
+          # The checkout credential, encoded for the per-command header, is masked in logs.
+          GIT_BASIC=$(printf 'x-access-token:%s' "$GH_TOKEN" | base64 | tr -d '\n')
+          echo "::add-mask::${GIT_BASIC}"
+          # Authenticate one git command with the workflow token, passed through the
+          # environment for that command only. Nothing is written to the repository's
+          # git config, so no later step inherits the credential.
+          git_auth() {
+            GIT_CONFIG_COUNT=1 \
+              GIT_CONFIG_KEY_0="http.${GITHUB_SERVER_URL}/.extraheader" \
+              GIT_CONFIG_VALUE_0="AUTHORIZATION: basic ${GIT_BASIC}" \
+              git "$@"
+          }
+          # The agent step points origin at its own short-lived credential and
+          # revokes it when the step ends. Reset origin to a credential-free URL;
+          # the network calls below authenticate per command.
+          git remote set-url origin "${GITHUB_SERVER_URL}/${{ github.repository }}.git"
           # Label + comment + fail the step. `commented=true` tells the
           # notify step this failure already produced its own PR comment.
           fail_closed() {
@@ -498,12 +657,12 @@ jobs:
               fail_closed "Claude autofix could not verify the pushed changes against \`denied_paths\` ($1), and the pushed range could not be safely auto-reverted (it contains commits not attributable to the bot). A human must review the branch. Remove the \`$STOP_LABEL\` label to re-enable the bot. Run log: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}"
             fi
           }
-          AFTER_SHA=$(git ls-remote origin "refs/heads/$HEAD_REF" | cut -f1)
+          AFTER_SHA=$(git_auth ls-remote origin "refs/heads/$HEAD_REF" | cut -f1)
           if [ "$AFTER_SHA" = "$BEFORE_SHA" ]; then
             echo "Branch unchanged; nothing to enforce."
             exit 0
           fi
-          git fetch origin "$HEAD_REF"
+          git_auth fetch --no-recurse-submodules origin "$HEAD_REF"
 
           # Rebuild the pattern file from the trusted workflow input and verify
           # the matcher script still hashes to what the pre-run validation
@@ -516,7 +675,7 @@ jobs:
           # could have overwritten in site-packages; reinstall it clean.
           # (In-job tamper-proofing is best-effort — hosted runners grant
           # the job passwordless sudo.)
-          python3 -m pip install --quiet --force-reinstall --no-cache-dir pathspec==1.1.1 \
+          python3 -P -m pip install --quiet --force-reinstall --no-cache-dir pathspec==1.1.1 \
             || unverifiable "the matcher dependency could not be reinstalled"
 
           # Union the paths touched by EVERY commit in the range — an
@@ -530,7 +689,7 @@ jobs:
             git diff --name-only --no-renames -z "$c^" "$c" >> "$RUNNER_TEMP/changed_paths.zlist"
           done
           set +e
-          VIOLATIONS=$(python3 "$RUNNER_TEMP/pathpolicy.py" check "$RUNNER_TEMP/denied_paths.txt" \
+          VIOLATIONS=$(python3 -P "$RUNNER_TEMP/pathpolicy.py" check "$RUNNER_TEMP/denied_paths.txt" \
             < "$RUNNER_TEMP/changed_paths.zlist")
           RC=$?
           set -e
@@ -645,6 +804,16 @@ jobs:
           echo "base_ref=$(echo "$PR_INFO" | jq -r '.baseRefName')" >> "$GITHUB_OUTPUT"
           echo "head_ref=$(echo "$PR_INFO" | jq -r '.headRefName')" >> "$GITHUB_OUTPUT"
 
+          # Pull requests opened by a dependency-update account are left to
+          # their own tooling (see DEPENDENCY_BOT_LOGINS).
+          PR_AUTHOR=$(gh api "repos/${{ github.repository }}/pulls/$PR_NUMBER" --jq '.user.login')
+          case ",${DEPENDENCY_BOT_LOGINS,,}," in
+            *",${PR_AUTHOR,,},"*)
+              echo "PR author $PR_AUTHOR is a dependency-update account. Skipping."
+              exit 0
+              ;;
+          esac
+
           case "$(echo "$PR_INFO" | jq -r '.headRefName')" in
             sdlc/*)
               echo "SDLC pipeline PR (sdlc/* branch); the pipeline revises it. Skipping."
@@ -720,6 +889,7 @@ jobs:
       contents: write
       pull-requests: write
       issues: write
+      # Required by the agent action, which exchanges the job's OIDC token for its GitHub App token.
       id-token: write
       actions: read
       checks: read
@@ -787,17 +957,119 @@ jobs:
 
           echo "proceed=true" >> "$GITHUB_OUTPUT"
 
-      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+      # The pull request's author and the account that raised this dispatch
+      # are checked before anything is checked out: dependency-update pull
+      # requests are left alone, and the dispatching account must be the
+      # workflow itself, a permitted bot, or a human with write access.
+      - name: Check requester and PR author
+        id: authz
         if: steps.pr.outputs.proceed == 'true'
+        uses: actions/github-script@3a2844b7e9c422d3c10d287c895573f7108da1b3 # v9.0.0
+        env:
+          PR_NUMBER: ${{ steps.pr.outputs.pr_number }}
+          ALLOWED_BOTS: ${{ inputs.allowed_bots }}
         with:
-          ref: ${{ steps.pr.outputs.head_sha }}
-          fetch-depth: 0
+          script: |
+            const norm = (s) => String(s || '').trim().toLowerCase().replace(/\[bot\]$/, '');
+            const list = (s) => String(s || '').split(',').map(norm).filter(Boolean);
+            core.setOutput('proceed', 'false');
+            const { data: pr } = await github.rest.pulls.get({
+              ...context.repo,
+              pull_number: Number(process.env.PR_NUMBER)
+            });
+            if (list(process.env.DEPENDENCY_BOT_LOGINS).includes(norm(pr.user.login))) {
+              core.info(`PR author ${pr.user.login} is a dependency-update account. Skipping.`);
+              return;
+            }
+            const actor = context.actor;
+            if (actor === 'github-actions[bot]') {
+              core.setOutput('proceed', 'true');
+              return;
+            }
+            if (actor.endsWith('[bot]')) {
+              const allowed = String(process.env.ALLOWED_BOTS || '').trim();
+              if (allowed !== '*' && !list(allowed).includes(norm(actor))) {
+                core.info(`Actor ${actor} is not in allowed_bots. Skipping.`);
+                return;
+              }
+            } else {
+              const { data } = await github.rest.repos.getCollaboratorPermissionLevel({
+                ...context.repo,
+                username: actor
+              });
+              if (!['admin', 'write'].includes(data.permission)) {
+                core.info(`Actor ${actor} does not have write access. Skipping.`);
+                return;
+              }
+            }
+            core.setOutput('proceed', 'true');
 
       # Pinned to the audited version; see the note on the fix-review-feedback
       # job's step of the same name.
+      # Install the matcher's pinned dependency at the start of the job.
+      # Helper scripts run with -P (Python's safe-path mode).
       - name: Install path matcher dependency
-        if: steps.pr.outputs.proceed == 'true' && inputs.denied_paths != ''
-        run: python3 -m pip install --quiet pathspec==1.1.1
+        if: steps.pr.outputs.proceed == 'true' && steps.authz.outputs.proceed == 'true' && inputs.denied_paths != ''
+        run: python3 -P -m pip install --quiet pathspec==1.1.1
+
+      # Commands the agent starts run in an isolated environment without the
+      # job's credentials. The packages it needs are installed here, as the
+      # agent action itself does (anthropics/claude-code-action action.yml,
+      # same pinned SHA). Without them the job stops.
+      - name: Install agent command isolation
+        if: steps.pr.outputs.proceed == 'true' && steps.authz.outputs.proceed == 'true'
+        run: |
+          if ! command -v apt-get >/dev/null || ! command -v sudo >/dev/null; then
+            echo "::error::apt-get and sudo are required to install the agent's command isolation"
+            exit 1
+          fi
+          installed=0
+          for i in 1 2 3; do
+            if sudo apt-get update -qq && sudo apt-get install -y --no-install-recommends bubblewrap socat; then
+              installed=1
+              break
+            fi
+            echo "apt-get attempt $i failed, retrying..."
+            sleep 5
+          done
+          if [ "$installed" != 1 ]; then
+            echo "::error::could not install the agent's command isolation packages"
+            exit 1
+          fi
+          # Ubuntu 24.04+ restricts unprivileged user namespaces via AppArmor.
+          # The sysctl does not exist on older kernels.
+          if [ -f /proc/sys/kernel/apparmor_restrict_unprivileged_userns ]; then
+            sudo sysctl -w kernel.apparmor_restrict_unprivileged_userns=0
+          fi
+
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+        if: steps.pr.outputs.proceed == 'true' && steps.authz.outputs.proceed == 'true'
+        with:
+          ref: ${{ steps.pr.outputs.head_sha }}
+          fetch-depth: 0
+          # Later steps authenticate their own git network calls one command
+          # at a time (see git_auth), so the checkout credential is not kept
+          # in the repository's git config.
+          persist-credentials: false
+
+      # The agent reads its instructions and configuration files from the
+      # working tree. Take them from the pull request's base branch, which has
+      # been through review, as the agent action itself does on pull request
+      # events. Paths that do not exist on the base branch are removed.
+      - name: Use agent configuration from the base branch
+        if: steps.pr.outputs.proceed == 'true' && steps.authz.outputs.proceed == 'true'
+        env:
+          BASE_REF: ${{ steps.pr.outputs.base_ref }}
+        run: |
+          set -euo pipefail
+          git rev-parse --verify --quiet "refs/remotes/origin/$BASE_REF" > /dev/null \
+            || { echo "::error::base branch is not available in the checkout"; exit 1; }
+          PATHS=(.claude .mcp.json .claude.json .gitmodules .ripgreprc CLAUDE.md CLAUDE.local.md .husky)
+          for p in "${PATHS[@]}"; do
+            rm -rf -- "$p"
+            git checkout "origin/$BASE_REF" -- "$p" 2> /dev/null || true
+          done
+          git reset --quiet -- "${PATHS[@]}" 2> /dev/null || true
 
       # Parse denied_paths, validate every pattern, and build the prompt
       # snippet. Fails closed: invalid patterns skip the run with a PR
@@ -805,7 +1077,7 @@ jobs:
       # fix-review-feedback job's step of the same name.
       - name: Parse and validate path policy
         id: policy
-        if: steps.pr.outputs.proceed == 'true'
+        if: steps.pr.outputs.proceed == 'true' && steps.authz.outputs.proceed == 'true'
         env:
           GH_TOKEN: ${{ github.token }}
           PR_NUMBER: ${{ steps.pr.outputs.pr_number }}
@@ -878,7 +1150,7 @@ jobs:
           sys.exit(1 if violations else 0)
           PYEOF
           # The hard gate re-verifies this hash before trusting the script:
-          # Claude runs with Bash in between and $RUNNER_TEMP is writable.
+          # the agent can write files under $RUNNER_TEMP in between.
           echo "script_sha=$(sha256sum "$RUNNER_TEMP/pathpolicy.py" | cut -d' ' -f1)" >> "$GITHUB_OUTPUT"
 
           strip_comments() { grep -Ev '^[[:space:]]*(#|$)' "$1" || true; }
@@ -890,7 +1162,7 @@ jobs:
             exit 0
           fi
 
-          if ! python3 "$RUNNER_TEMP/pathpolicy.py" validate "$RUNNER_TEMP/denied_paths.txt"; then
+          if ! python3 -P "$RUNNER_TEMP/pathpolicy.py" validate "$RUNNER_TEMP/denied_paths.txt"; then
             { echo "valid=false"; echo "enforce=false"; echo "prompt_block="; } >> "$GITHUB_OUTPUT"
             gh pr comment "$PR_NUMBER" --repo "${{ github.repository }}" --body \
               "Claude autofix skipped: the \`denied_paths\` configuration in the caller workflow contains an invalid pattern (see the run log). Autofix will not run until the configuration is fixed. ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}"
@@ -915,7 +1187,7 @@ jobs:
       # stop (with the kill-switch label) at the cap.
       - name: Check attempt count
         id: attempts
-        if: steps.pr.outputs.proceed == 'true' && steps.policy.outputs.valid == 'true'
+        if: steps.pr.outputs.proceed == 'true' && steps.authz.outputs.proceed == 'true' && steps.policy.outputs.valid == 'true'
         env:
           GH_TOKEN: ${{ github.token }}
           PR_NUMBER: ${{ steps.pr.outputs.pr_number }}
@@ -930,6 +1202,9 @@ jobs:
             ''|*[!0-9]*) echo "::error::max_attempts must be a positive integer (got '$MAX_ATTEMPTS')"; exit 1;;
           esac
           [ "$MAX_ATTEMPTS" -ge 1 ] || { echo "::error::max_attempts must be at least 1"; exit 1; }
+          # The count below reads local refs only; without the base ref it would
+          # report zero attempts.
+          git rev-parse --verify --quiet "refs/remotes/origin/$BASE_REF" > /dev/null || { echo "::error::base branch is not available in the checkout"; exit 1; }
           ATTEMPTS=$(git log --oneline "origin/$BASE_REF..HEAD" | grep -c '\[claude-autofix\]' || true)
           echo "Prior autofix attempts: $ATTEMPTS (max: $MAX_ATTEMPTS)"
           if [ "$ATTEMPTS" -ge "$MAX_ATTEMPTS" ]; then
@@ -948,10 +1223,26 @@ jobs:
         id: before
         if: steps.attempts.outputs.proceed == 'true' && steps.policy.outputs.enforce == 'true'
         env:
+          GH_TOKEN: ${{ github.token }}
           HEAD_REF: ${{ steps.pr.outputs.head_ref }}
         run: |
           set -euo pipefail
-          echo "sha=$(git ls-remote origin "refs/heads/$HEAD_REF" | cut -f1)" >> "$GITHUB_OUTPUT"
+          # The checkout credential, encoded for the per-command header, is masked in logs.
+          GIT_BASIC=$(printf 'x-access-token:%s' "$GH_TOKEN" | base64 | tr -d '\n')
+          echo "::add-mask::${GIT_BASIC}"
+          # Authenticate one git command with the workflow token, passed through the
+          # environment for that command only. Nothing is written to the repository's
+          # git config, so no later step inherits the credential.
+          git_auth() {
+            GIT_CONFIG_COUNT=1 \
+              GIT_CONFIG_KEY_0="http.${GITHUB_SERVER_URL}/.extraheader" \
+              GIT_CONFIG_VALUE_0="AUTHORIZATION: basic ${GIT_BASIC}" \
+              git "$@"
+          }
+          SHA=$(git_auth ls-remote origin "refs/heads/$HEAD_REF" | cut -f1)
+          # Fail here rather than start the agent without a pre-run snapshot.
+          case "$SHA" in ''|*[!0-9a-f]*) echo "::error::could not read the branch head"; exit 1;; esac
+          echo "sha=$SHA" >> "$GITHUB_OUTPUT"
 
       - name: Fix failing checks
         # The trailing clause makes the gate coupling explicit: when the
@@ -962,8 +1253,14 @@ jobs:
           steps.policy.outputs.valid == 'true' &&
           (steps.policy.outputs.enforce != 'true' || steps.before.outcome == 'success')
         uses: anthropics/claude-code-action@4845bacbb38b3c4b15d948f035349786f678e068 # v1.0.267
+        env:
+          # Commands the agent starts do not receive the model API credential.
+          # GH_TOKEN is kept, so gh keeps working.
+          CLAUDE_CODE_SUBPROCESS_ENV_SCRUB: '1'
         with:
           anthropic_api_key: ${{ secrets.CLAUDE_API_KEY }}
+          # File tools cannot write outside the working directory.
+          settings: '{"permissions":{"blockWritesOutsideWorkingDirectories":true}}'
           # No allowed_bots here: on repository_dispatch the action skips its
           # actor check entirely (src/entrypoints/prepare.ts only checks
           # entity and workflow_run contexts), so the input would be inert.
@@ -988,10 +1285,13 @@ jobs:
             ASSESS:
             1. Find the failing check(s):
                `gh api repos/${{ github.repository }}/commits/${{ steps.pr.outputs.head_sha }}/check-runs`
+               and, for a check's annotations,
+               `gh api repos/${{ github.repository }}/check-runs/<id>/annotations`.
                For Actions-based failures, read the real output with
                `gh run list --commit ${{ steps.pr.outputs.head_sha }}` and
                `gh run view <run-id> --log-failed`.
-            2. Identify the root cause of each failure. Check the git log: if a
+            2. Identify the root cause of each failure. Check prior attempts with
+               `git log --oneline -n 50`: if a
                prior [claude-autofix] commit already tried to fix this exact
                failure and it is STILL failing, your previous approach was wrong.
                Try a fundamentally different approach or, if you have none,
@@ -1010,8 +1310,8 @@ jobs:
                the tag "[claude-autofix]". Example:
                `fix(build): add missing import in payment service [claude-autofix]`
                The tag is required for loop-prevention accounting.
-            5. Post a short `gh pr comment` summarizing what was broken and what
-               you fixed.
+            5. Post a short `gh pr comment ${{ steps.pr.outputs.pr_number }} --body "..."`
+               summarizing what was broken and what you fixed.
 
             Rules:
             - Do not force-push.
@@ -1020,16 +1320,42 @@ jobs:
               runner issue), comment that it appears flaky. Do not change code.
             - If you cannot fix it, comment your diagnosis so a human can take
               over, and also run
-              `gh pr edit ${{ steps.pr.outputs.pr_number }} --add-label ${{ env.STOP_LABEL }} --repo ${{ github.repository }}`
+              `gh pr edit ${{ steps.pr.outputs.pr_number }} --add-label ${{ env.STOP_LABEL }}`
               so the PR is flagged (this case pushes no commit, so the attempt
               cap alone would never catch it). A human removes the label once
               they've intervened.
 
+            TOOLS:
+            You can read and edit files and run only the gh and git commands
+            shown above, in the forms shown (PR number first). The pull request diff
+            comes from `gh pr diff <number>`. Pass comment text with `--body`.
+            Run commands from the repository root; do not change directory. Keep the literal
+            strings `-F`, `--body-file`, `-R` and `--repo` out of comment text.
+            Do not pass --repo or -R.
+            Any other command is denied; do not retry a denied command in another form. You cannot
+            install dependencies or run tests, builds, linters or scripts in
+            this job. Work from the feedback, the logs and the source. If a fix
+            cannot be made with confidence without running something, say so in
+            your comment and apply the label as described.
+
             ${{ steps.policy.outputs.prompt_block }}
+          # The agent gets a fixed set of commands: reading this pull request
+          # and its check results, commenting, labelling, and read-only git. It
+          # has no general shell, so nothing from the repository is installed,
+          # built or run in this job. Settings, hooks and MCP servers are taken
+          # only from this workflow, not from the repository.
+          # File edits are limited to the repository's working tree, outside
+          # its git metadata; the runner's own tool configuration is not
+          # writable.
           claude_args: |
             --model ${{ inputs.model }}
             --max-turns 60
-            --allowedTools "Bash,Read,Edit,Write,Grep,Glob,mcp__github_file_ops__commit_files,mcp__github_file_ops__delete_files"
+            --setting-sources user
+            --strict-mcp-config
+            --allowedTools "Bash(gh pr view ${{ steps.pr.outputs.pr_number }}:*),Bash(gh pr diff ${{ steps.pr.outputs.pr_number }}:*),Bash(gh pr checks ${{ steps.pr.outputs.pr_number }}:*),Bash(gh pr comment ${{ steps.pr.outputs.pr_number }}:*),Bash(gh pr edit ${{ steps.pr.outputs.pr_number }} --add-label ${{ env.STOP_LABEL }}),Bash(gh api repos/${{ github.repository }}/commits/${{ steps.pr.outputs.head_sha }}/check-runs:*),Bash(gh api repos/${{ github.repository }}/check-runs/*),Bash(gh run list:*),Bash(gh run view:*)"
+            --allowedTools "Bash(git status),Bash(git log --oneline -n 50),Bash(git diff),Bash(git diff --stat)"
+            --allowedTools "Read,Edit(./**),Grep,Glob,mcp__github_file_ops__commit_files,mcp__github_file_ops__delete_files"
+            --disallowedTools "Edit(.git/**),Edit(**/.git),Edit(**/.git/**),Bash(git *--output*),Bash(gh pr comment *--body-file*),Bash(gh pr comment * -F*),Edit(~/.gitconfig),Edit(~/.config/**),Edit(~/.claude/**),Edit(~/.claude.json),Edit(/${{ runner.temp }}/**),Read(//proc/**),Bash(cd *),Bash(pushd *),Bash(git -C *),Bash(git -c *),Bash(git --git-dir*),Bash(git --work-tree*),Bash(git --exec-path*),Bash(git -*),Bash(gh pr * --repo*),Bash(gh pr * -R*),Bash(gh run * --repo*),Bash(gh run * -R*),Bash(node),Bash(node *),Bash(python),Bash(python *),Bash(python3),Bash(python3 *),Bash(bash),Bash(bash *),Bash(sh),Bash(sh *),Bash(zsh),Bash(zsh *),Bash(perl),Bash(perl *),Bash(ruby),Bash(ruby *),Bash(npx),Bash(npx *),Bash(npm),Bash(npm *),Bash(pnpm),Bash(pnpm *),Bash(yarn),Bash(yarn *),Bash(bun),Bash(bun *),Bash(deno),Bash(deno *),Bash(make),Bash(make *),Bash(go),Bash(go *),Bash(cargo),Bash(cargo *),Bash(curl),Bash(curl *),Bash(wget),Bash(wget *),Bash(env),Bash(env *),Bash(xargs),Bash(xargs *),Bash(python*),Bash(exec *),Bash(eval *),Bash(source *),Bash(. *),Bash(command *),Bash(/*),Bash(./*),Bash(awk *),Bash(sed *),Bash(php *)"
 
       # Hard gate: see the note on the fix-review-feedback job's step of the
       # same name. Reverts policy-violating pushes, comments, and applies the
@@ -1047,11 +1373,22 @@ jobs:
           DENIED_PATHS: ${{ inputs.denied_paths }}
         run: |
           set -euo pipefail
-          # The Claude action step swaps the checkout's git credentials for
-          # its own app token and revokes it when the step ends, so plain git
-          # network calls (ls-remote/fetch) 401 afterwards. Re-point origin at
-          # the workflow token before any network call below.
-          git remote set-url origin "https://x-access-token:${GH_TOKEN}@github.com/${{ github.repository }}.git"
+          # The checkout credential, encoded for the per-command header, is masked in logs.
+          GIT_BASIC=$(printf 'x-access-token:%s' "$GH_TOKEN" | base64 | tr -d '\n')
+          echo "::add-mask::${GIT_BASIC}"
+          # Authenticate one git command with the workflow token, passed through the
+          # environment for that command only. Nothing is written to the repository's
+          # git config, so no later step inherits the credential.
+          git_auth() {
+            GIT_CONFIG_COUNT=1 \
+              GIT_CONFIG_KEY_0="http.${GITHUB_SERVER_URL}/.extraheader" \
+              GIT_CONFIG_VALUE_0="AUTHORIZATION: basic ${GIT_BASIC}" \
+              git "$@"
+          }
+          # The agent step points origin at its own short-lived credential and
+          # revokes it when the step ends. Reset origin to a credential-free URL;
+          # the network calls below authenticate per command.
+          git remote set-url origin "${GITHUB_SERVER_URL}/${{ github.repository }}.git"
           # Label + comment + fail the step. `commented=true` tells the
           # notify step this failure already produced its own PR comment.
           fail_closed() {
@@ -1090,12 +1427,12 @@ jobs:
               fail_closed "Claude autofix could not verify the pushed changes against \`denied_paths\` ($1), and the pushed range could not be safely auto-reverted (it contains commits not attributable to the bot). A human must review the branch. Remove the \`$STOP_LABEL\` label to re-enable the bot. Run log: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}"
             fi
           }
-          AFTER_SHA=$(git ls-remote origin "refs/heads/$HEAD_REF" | cut -f1)
+          AFTER_SHA=$(git_auth ls-remote origin "refs/heads/$HEAD_REF" | cut -f1)
           if [ "$AFTER_SHA" = "$BEFORE_SHA" ]; then
             echo "Branch unchanged; nothing to enforce."
             exit 0
           fi
-          git fetch origin "$HEAD_REF"
+          git_auth fetch --no-recurse-submodules origin "$HEAD_REF"
 
           # Rebuild the pattern file from the trusted workflow input and verify
           # the matcher script still hashes to what the pre-run validation
@@ -1108,7 +1445,7 @@ jobs:
           # could have overwritten in site-packages; reinstall it clean.
           # (In-job tamper-proofing is best-effort — hosted runners grant
           # the job passwordless sudo.)
-          python3 -m pip install --quiet --force-reinstall --no-cache-dir pathspec==1.1.1 \
+          python3 -P -m pip install --quiet --force-reinstall --no-cache-dir pathspec==1.1.1 \
             || unverifiable "the matcher dependency could not be reinstalled"
 
           # Union the paths touched by EVERY commit in the range — an
@@ -1122,7 +1459,7 @@ jobs:
             git diff --name-only --no-renames -z "$c^" "$c" >> "$RUNNER_TEMP/changed_paths.zlist"
           done
           set +e
-          VIOLATIONS=$(python3 "$RUNNER_TEMP/pathpolicy.py" check "$RUNNER_TEMP/denied_paths.txt" \
+          VIOLATIONS=$(python3 -P "$RUNNER_TEMP/pathpolicy.py" check "$RUNNER_TEMP/denied_paths.txt" \
             < "$RUNNER_TEMP/changed_paths.zlist")
           RC=$?
           set -e
