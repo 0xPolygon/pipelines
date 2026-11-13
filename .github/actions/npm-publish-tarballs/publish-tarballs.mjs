@@ -172,10 +172,22 @@ export function verifyTarballIdentity({ path, entry, run = defaultRun }) {
 
 /**
  * Throws unless `gh attestation verify` accepts the tarball: an attestation
- * from `repository`, signed by the `signerWorkflow` workflow. A missing `gh`
- * fails the same way.
+ * from `repository`, for the commit `sourceDigest` on `sourceRef`, signed by
+ * the `signerWorkflow` workflow at exactly `signerDigest`. Binding all of
+ * these ties the tarball to this release: an attestation made for another
+ * commit or ref, or by another version of the shared workflow, is rejected.
+ * A missing `gh` fails the same way.
  */
-export function verifyAttestation({ path, entry, repository, signerWorkflow, run = defaultRun }) {
+export function verifyAttestation({
+  path,
+  entry,
+  repository,
+  signerWorkflow,
+  signerDigest,
+  sourceDigest,
+  sourceRef,
+  run = defaultRun
+}) {
   const result = run('gh', [
     'attestation',
     'verify',
@@ -183,7 +195,13 @@ export function verifyAttestation({ path, entry, repository, signerWorkflow, run
     '--repo',
     repository,
     '--signer-workflow',
-    signerWorkflow
+    signerWorkflow,
+    '--signer-digest',
+    signerDigest,
+    '--source-digest',
+    sourceDigest,
+    '--source-ref',
+    sourceRef
   ]);
   if (result.status !== 0) {
     throw new Error(
@@ -218,6 +236,9 @@ export function publishAll({
   directory,
   repository,
   signerWorkflow,
+  signerDigest,
+  sourceDigest,
+  sourceRef,
   run = defaultRun,
   log = console.log
 }) {
@@ -227,7 +248,16 @@ export function publishAll({
   const paths = manifest.map((entry) => verifyEntry({ directory, entry }));
   manifest.forEach((entry, index) => {
     verifyTarballIdentity({ path: paths[index], entry, run });
-    verifyAttestation({ path: paths[index], entry, repository, signerWorkflow, run });
+    verifyAttestation({
+      path: paths[index],
+      entry,
+      repository,
+      signerWorkflow,
+      signerDigest,
+      sourceDigest,
+      sourceRef,
+      run
+    });
   });
 
   const published = [];
@@ -273,13 +303,27 @@ export function main({ env = process.env, run = defaultRun, log = console.log } 
   }
   const repository = env.GITHUB_REPOSITORY;
   const signerWorkflow = env.SIGNER_WORKFLOW;
-  if (!repository || !signerWorkflow) {
-    log('::error::GITHUB_REPOSITORY and SIGNER_WORKFLOW must be set');
+  const signerDigest = env.SIGNER_DIGEST;
+  const sourceDigest = env.SOURCE_DIGEST;
+  const sourceRef = env.SOURCE_REF;
+  if (!repository || !signerWorkflow || !signerDigest || !sourceDigest || !sourceRef) {
+    log(
+      '::error::GITHUB_REPOSITORY, SIGNER_WORKFLOW, SIGNER_DIGEST, SOURCE_DIGEST and SOURCE_REF must be set'
+    );
     return 1;
   }
   let result;
   try {
-    result = publishAll({ directory, repository, signerWorkflow, run, log });
+    result = publishAll({
+      directory,
+      repository,
+      signerWorkflow,
+      signerDigest,
+      sourceDigest,
+      sourceRef,
+      run,
+      log
+    });
   } catch (err) {
     log(`::error::${err.message}`);
     return 1;
