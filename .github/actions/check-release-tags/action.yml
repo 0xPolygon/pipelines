@@ -1,8 +1,9 @@
 name: Check release tags
 description: >
   Confirms that every package listed in `<directory>/manifest.json` has a git
-  tag on the remote repository and a GitHub Release for that tag, read through
-  the GitHub REST API. A tag is accepted as `<name>@<version>`, or as
+  tag on the remote repository, and a GitHub Release for that tag when
+  changelogs are enabled and the package has a CHANGELOG.md in the checked-out
+  repository, read through the GitHub REST API. A tag is accepted as `<name>@<version>`, or as
   `v<version>` when the manifest has one entry and it is the repository's root
   package. Fails with one error listing what is missing. Safe to re-run: it
   only reads.

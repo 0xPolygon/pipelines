@@ -9,7 +9,10 @@ description: >
   credential and publishes nothing. It removes the `.pipelines` checkout of
   this repository from the workspace before packing and fails when a tarball
   contains it. A package that sets `publishConfig.registry` to anything other
-  than the public npm registry fails the step.
+  than the public npm registry (including a scoped `<scope>:registry`) fails
+  the step. The root package is packed only for a single-package repository
+  or when the workspace globs list the root (`.`), as changesets does. Each
+  manifest entry carries the package `directory` relative to the repository root.
 
 inputs:
   out-dir:

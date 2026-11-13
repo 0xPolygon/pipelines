@@ -14,7 +14,7 @@
 import { execFile } from 'node:child_process';
 import { createHash } from 'node:crypto';
 import { appendFileSync, existsSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs';
-import { basename, join, resolve } from 'node:path';
+import { basename, join, relative, resolve } from 'node:path';
 import { pathToFileURL } from 'node:url';
 import { promisify } from 'node:util';
 
@@ -24,15 +24,42 @@ const readJson = (path) => JSON.parse(readFileSync(path, 'utf8'));
 
 const readJsonIfExists = (path) => (existsSync(path) ? readJson(path) : undefined);
 
-// True when the repository declares workspace member globs (a `packages:` key
-// in pnpm-workspace.yaml, or `workspaces` in package.json). Such a repository
-// publishes its members only, never its root, even when no member matches.
-export function declaresWorkspaceMembers(root) {
+// Workspace member globs the repository declares: the `packages:` list of
+// pnpm-workspace.yaml (block or flow list), or `workspaces` in package.json
+// (array, or `{ packages }`). Returns undefined when none are declared. Such a
+// repository publishes its members only, never its root, even when no member
+// matches, unless a glob names the root itself (see below).
+export function workspaceGlobs(root) {
   const yamlPath = join(root, 'pnpm-workspace.yaml');
-  if (existsSync(yamlPath) && /^packages\s*:/m.test(readFileSync(yamlPath, 'utf8'))) return true;
-  const rootJson = readJsonIfExists(join(root, 'package.json'));
-  return rootJson?.workspaces !== undefined;
+  if (existsSync(yamlPath)) {
+    const text = readFileSync(yamlPath, 'utf8');
+    if (/^packages\s*:/m.test(text)) {
+      const globs = [];
+      const flow = /^packages\s*:\s*\[([^\]]*)\]/m.exec(text);
+      if (flow) globs.push(...flow[1].split(','));
+      else {
+        const block = /^packages\s*:[^\n]*\n((?:[ \t]+-[^\n]*\n?|[ \t]*(?:#[^\n]*)?\n)*)/m.exec(
+          text
+        );
+        for (const line of (block?.[1] ?? '').split('\n')) {
+          const item = /^\s*-\s*(.*?)\s*(?:#.*)?$/.exec(line);
+          if (item) globs.push(item[1]);
+        }
+      }
+      return globs.map((glob) => glob.trim().replace(/^['"]|['"]$/g, ''));
+    }
+  }
+  const workspaces = readJsonIfExists(join(root, 'package.json'))?.workspaces;
+  if (workspaces === undefined) return undefined;
+  const list = Array.isArray(workspaces) ? workspaces : (workspaces?.packages ?? []);
+  return list.filter((glob) => typeof glob === 'string');
 }
+
+// @manypkg/get-packages 1.1.3 expands the member globs with globby, so a glob
+// that matches the root directory (`.` or `./`) makes the root a member, and
+// changesets then publishes it (verified by running that globby call with
+// `['.']` against a directory holding a package.json: it returns `['.']`).
+const namesRoot = (glob) => /^\.\/*$/.test(glob);
 
 // Lists workspace projects with pnpm, which reads pnpm-workspace.yaml itself,
 // needs no install and makes no assumption about the layout. pnpm lists the
@@ -47,8 +74,10 @@ export function declaresWorkspaceMembers(root) {
 export async function discoverPackages({ root, listProjects = listProjectsWithPnpm }) {
   const projects = await listProjects(root);
   const rootDir = resolve(root);
+  const globs = workspaceGlobs(rootDir);
+  const rootIsMember = globs?.some(namesRoot) ?? false;
   const kept =
-    projects.length > 1 || (projects.length === 1 && declaresWorkspaceMembers(rootDir))
+    !rootIsMember && (projects.length > 1 || (projects.length === 1 && globs !== undefined))
       ? projects.filter((project) => resolve(project.path) !== rootDir)
       : projects;
   return kept.map((project) => {
@@ -158,31 +187,46 @@ export const NPM_REGISTRY = 'https://registry.npmjs.org/';
 
 const normaliseRegistry = (url) => String(url).trim().replace(/\/+$/, '').toLowerCase();
 
-// `npm publish <tarball>` applies the tarball's own `publishConfig.registry`
-// unless a CLI flag overrides it, and this workflow publishes to npmjs.org
-// only. A package that names another registry fails here, in the job that
-// holds no credential, rather than publishing somewhere unexpected.
+/**
+ * The `publishConfig` keys that point somewhere other than the public npm
+ * registry: `registry`, and any scoped `<scope>:registry` (npm copies those
+ * into its options and prefers the scope's registry over `--registry`).
+ */
+export function foreignRegistryKeys(publishConfig) {
+  if (publishConfig === null || typeof publishConfig !== 'object') return [];
+  return Object.entries(publishConfig)
+    .filter(
+      ([key, value]) =>
+        (key === 'registry' || key.endsWith(':registry')) &&
+        normaliseRegistry(value) !== normaliseRegistry(NPM_REGISTRY)
+    )
+    .map(([key]) => key);
+}
+
+// `npm publish <tarball>` applies the tarball's own `publishConfig` registry
+// settings unless a CLI flag overrides them, and this workflow publishes to
+// npmjs.org only. A package that names another registry fails here, in the job
+// that holds no credential, rather than publishing somewhere unexpected. The
+// publish job repeats the check on the tarball's own package.json.
 export function assertNpmRegistry({ selected }) {
   const foreign = selected
-    .filter((pkg) => {
-      const registry = pkg.packageJson.publishConfig?.registry;
-      return (
-        registry !== undefined && normaliseRegistry(registry) !== normaliseRegistry(NPM_REGISTRY)
-      );
-    })
-    .map((pkg) => pkg.name);
+    .map((pkg) => ({ name: pkg.name, keys: foreignRegistryKeys(pkg.packageJson.publishConfig) }))
+    .filter(({ keys }) => keys.length > 0)
+    .map(({ name, keys }) => `${name} (${keys.join(', ')})`);
   if (foreign.length > 0) {
     throw new Error(
-      `Packages set publishConfig.registry to a registry other than ${NPM_REGISTRY}: ` +
-        `${foreign.join(', ')}. This workflow publishes to the public npm registry only; ` +
-        'remove publishConfig.registry from each package.json.'
+      `Packages set a publishConfig registry other than ${NPM_REGISTRY}: ` +
+        `${foreign.join('; ')}. This workflow publishes to the public npm registry only; ` +
+        'remove publishConfig.registry and any publishConfig "<scope>:registry" from each package.json.'
     );
   }
 }
 
 // One manifest entry per tarball.
-export function buildManifestEntry({ pkg, file, sha256, access }) {
-  return { name: pkg.name, version: pkg.version, file, sha256, access, tag: pkg.tag };
+// `directory` is the package directory relative to the repository root; the
+// finalize job reads it to find the package's CHANGELOG.md.
+export function buildManifestEntry({ pkg, file, sha256, access, directory }) {
+  return { name: pkg.name, version: pkg.version, file, sha256, access, tag: pkg.tag, directory };
 }
 
 // Registry lookup through `npm info`, the same call changesets makes
@@ -253,6 +297,7 @@ export async function packSelected({
   selected,
   outDir,
   configAccess,
+  root = process.cwd(),
   run = runCommand,
   listEntries = listTarballEntries
 }) {
@@ -290,7 +335,8 @@ export async function packSelected({
         pkg,
         file,
         sha256: sha256OfFile(filePath),
-        access: resolveAccess({ packageJson: pkg.packageJson, configAccess })
+        access: resolveAccess({ packageJson: pkg.packageJson, configAccess }),
+        directory: relative(resolve(root), resolve(pkg.dir)) || '.'
       })
     );
   }
@@ -319,7 +365,7 @@ export async function main({
   assertNpmRegistry({ selected });
 
   mkdirSync(outDir, { recursive: true });
-  const manifest = await packSelected({ selected, outDir, configAccess, run, listEntries });
+  const manifest = await packSelected({ selected, outDir, configAccess, root, run, listEntries });
   writeFileSync(join(outDir, 'manifest.json'), `${JSON.stringify(manifest, null, 2)}\n`);
 
   for (const entry of manifest) {
@@ -330,7 +376,7 @@ export async function main({
   if (env.GITHUB_OUTPUT) {
     appendFileSync(
       env.GITHUB_OUTPUT,
-      `has_tarballs=${manifest.length > 0}\ncount=${manifest.length}\n`
+      `has_tarballs=${manifest.length > 0 ? 'true' : 'false'}\ncount=${manifest.length}\n`
     );
   }
   return manifest;

@@ -181,7 +181,7 @@ const expectedIf = {
   build: "inputs.snapshot_tag == '' && needs.version.outputs.has_changesets == 'false'",
   publish: "inputs.snapshot_tag == '' && needs.build.outputs.has_tarballs == 'true'",
   finalize:
-    "always() && inputs.snapshot_tag == '' && needs.version.outputs.has_changesets == 'false' && needs.build.result == 'success' && (needs.publish.result == 'success' || (needs.publish.result == 'skipped' && needs.build.outputs.has_tarballs != 'true'))",
+    "always() && inputs.snapshot_tag == '' && needs.version.outputs.has_changesets == 'false' && needs.build.result == 'success' && (needs.publish.result == 'success' || (needs.publish.result == 'skipped' && needs.build.outputs.has_tarballs == 'false'))",
   snapshot: "inputs.snapshot_tag != ''"
 };
 for (const [name, want] of Object.entries(expectedIf)) {

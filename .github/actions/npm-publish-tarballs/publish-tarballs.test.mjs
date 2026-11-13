@@ -32,13 +32,13 @@ function writeManifest(entries) {
   writeFileSync(join(dir, 'manifest.json'), JSON.stringify(entries));
 }
 
-function entry(name, overrides = {}) {
+function entry(name, overrides = {}, innerExtra = {}) {
   const file = `${name}-1.0.0.tgz`;
   return {
     name,
     version: '1.0.0',
     file,
-    sha256: writeTarball(file, { name, version: overrides.version ?? '1.0.0' }),
+    sha256: writeTarball(file, { name, version: overrides.version ?? '1.0.0', ...innerExtra }),
     access: 'public',
     tag: 'latest',
     ...overrides
@@ -134,6 +134,24 @@ describe('publishAll', () => {
     const { run, calls } = fakeRun();
     assert.throws(() => publishAll({ directory: dir, run, log: quiet }), /is missing/);
     assert.equal(publishCalls(calls).length, 0);
+  });
+
+  it('refuses a tarball whose package.json sets another registry, publishing nothing', () => {
+    for (const publishConfig of [
+      { registry: 'https://other.test/' },
+      { '@scope:registry': 'https://other.test/' }
+    ]) {
+      writeManifest([entry('a'), entry('b', {}, { publishConfig })]);
+      const { run, calls } = fakeRun();
+      assert.throws(() => publishAll({ directory: dir, run, log: quiet }), /registry other than/);
+      assert.equal(publishCalls(calls).length, 0);
+    }
+  });
+
+  it('accepts a tarball whose publishConfig names npmjs', () => {
+    writeManifest([entry('a', {}, { publishConfig: { registry: 'https://registry.npmjs.org' } })]);
+    const { run } = fakeRun();
+    assert.deepEqual(publishAll({ directory: dir, run, log: quiet }).failures, []);
   });
 
   it('skips a version that is already on the registry', () => {

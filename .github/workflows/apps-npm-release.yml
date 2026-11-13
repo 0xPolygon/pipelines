@@ -288,7 +288,7 @@ jobs:
       && needs.build.result == 'success'
       && (needs.publish.result == 'success'
           || (needs.publish.result == 'skipped'
-              && needs.build.outputs.has_tarballs != 'true'))
+              && needs.build.outputs.has_tarballs == 'false'))
     runs-on: ubuntu-latest
     timeout-minutes: 20
     permissions:

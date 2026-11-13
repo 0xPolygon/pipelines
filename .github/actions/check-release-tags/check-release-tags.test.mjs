@@ -1,5 +1,5 @@
 import assert from 'node:assert/strict';
-import { mkdtempSync, rmSync, writeFileSync } from 'node:fs';
+import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { afterEach, beforeEach, describe, it } from 'node:test';
@@ -112,8 +112,9 @@ describe('check-release-tags', () => {
   });
 
   it('fails when a tag exists but its GitHub Release does not', async () => {
+    writeFileSync(join(dir, 'CHANGELOG.md'), '# a\n');
     writeManifest([
-      { name: 'a', version: '1.0.0' },
+      { name: 'a', version: '1.0.0', directory: '.' },
       { name: 'b', version: '2.0.0' }
     ]);
     const { code, logs } = await run(
@@ -124,8 +125,55 @@ describe('check-release-tags', () => {
     assert.doesNotMatch(logs.join('\n'), /b@2\.0\.0 \(/);
   });
 
+  describe('Release requirement follows the changelog', () => {
+    const setup = ({ changelogConfig, withChangelog }) => {
+      mkdirSync(join(dir, 'pkgs', 'a'), { recursive: true });
+      if (withChangelog) writeFileSync(join(dir, 'pkgs', 'a', 'CHANGELOG.md'), '# a\n');
+      if (changelogConfig !== undefined) {
+        mkdirSync(join(dir, '.changeset'), { recursive: true });
+        writeFileSync(
+          join(dir, '.changeset', 'config.json'),
+          JSON.stringify({ changelog: changelogConfig })
+        );
+      }
+      writeManifest([{ name: 'a', version: '1.0.0', directory: 'pkgs/a' }]);
+    };
+
+    it('needs no Release when changelogs are disabled', async () => {
+      setup({ changelogConfig: false, withChangelog: true });
+      const { code } = await run(fakeFetch({ tags: ['a@1.0.0'], releases: [] }).fetchImpl);
+      assert.equal(code, 0);
+    });
+
+    it('needs no Release when the package has no CHANGELOG.md', async () => {
+      setup({ changelogConfig: ['@changesets/cli/changelog'], withChangelog: false });
+      const { code } = await run(fakeFetch({ tags: ['a@1.0.0'], releases: [] }).fetchImpl);
+      assert.equal(code, 0);
+    });
+
+    it('fails when changelogs are enabled, a CHANGELOG.md exists and the Release is missing', async () => {
+      setup({ changelogConfig: ['@changesets/cli/changelog'], withChangelog: true });
+      const { code, logs } = await run(fakeFetch({ tags: ['a@1.0.0'], releases: [] }).fetchImpl);
+      assert.equal(code, 1);
+      assert.match(logs.join('\n'), /a@1\.0\.0 \(GitHub Release\)/);
+    });
+
+    it('treats an absent config as changelogs enabled', async () => {
+      setup({ withChangelog: true });
+      const { code } = await run(fakeFetch({ tags: ['a@1.0.0'], releases: [] }).fetchImpl);
+      assert.equal(code, 1);
+    });
+
+    it('ignores a directory that escapes the workspace', async () => {
+      writeManifest([{ name: 'a', version: '1.0.0', directory: '../..' }]);
+      const { code } = await run(fakeFetch({ tags: ['a@1.0.0'], releases: [] }).fetchImpl);
+      assert.equal(code, 0);
+    });
+  });
+
   it('fails on a release API error other than 404', async () => {
-    writeManifest([{ name: 'a', version: '1.0.0' }]);
+    writeFileSync(join(dir, 'CHANGELOG.md'), '# a\n');
+    writeManifest([{ name: 'a', version: '1.0.0', directory: '.' }]);
     const fetchImpl = async (url) => ({ status: url.includes('/releases/') ? 502 : 200 });
     const { code, logs } = await run(fetchImpl);
     assert.equal(code, 1);

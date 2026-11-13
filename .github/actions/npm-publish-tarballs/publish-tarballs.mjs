@@ -25,6 +25,20 @@ export const MIN_NPM_VERSION = '11.5.1';
 // the `publishConfig.registry` stored inside a tarball.
 export const NPM_REGISTRY = 'https://registry.npmjs.org/';
 
+const normaliseRegistry = (url) => String(url).trim().replace(/\/+$/, '').toLowerCase();
+
+/** `publishConfig` keys (`registry`, `<scope>:registry`) naming a registry other than npmjs. */
+export function foreignRegistryKeys(publishConfig) {
+  if (publishConfig === null || typeof publishConfig !== 'object') return [];
+  return Object.entries(publishConfig)
+    .filter(
+      ([key, value]) =>
+        (key === 'registry' || key.endsWith(':registry')) &&
+        normaliseRegistry(value) !== normaliseRegistry(NPM_REGISTRY)
+    )
+    .map(([key]) => key);
+}
+
 const NAME_PATTERN = /^(@[a-z0-9~][a-z0-9._~-]*\/)?[a-z0-9~][a-z0-9._~-]*$/;
 const VERSION_PATTERN = /^\d+\.\d+\.\d+(-[0-9A-Za-z.-]+)?(\+[0-9A-Za-z.-]+)?$/;
 const TAG_PATTERN = /^[a-z][a-z0-9._-]*$/;
@@ -137,6 +151,16 @@ export function verifyTarballIdentity({ path, entry, run = defaultRun }) {
     throw new Error(
       `${entry.name}@${entry.version}: ${entry.file} holds ${inner.name}@${inner.version}, ` +
         'which does not match the manifest'
+    );
+  }
+  // npm applies the tarball's own publishConfig registry settings (including a
+  // scoped `<scope>:registry`, which beats `--registry`), so this job, which
+  // does not trust the build job's output, checks the tarball itself.
+  const keys = foreignRegistryKeys(inner.publishConfig);
+  if (keys.length > 0) {
+    throw new Error(
+      `${entry.name}@${entry.version}: ${entry.file} sets publishConfig ${keys.join(', ')} to a ` +
+        `registry other than ${NPM_REGISTRY}`
     );
   }
 }

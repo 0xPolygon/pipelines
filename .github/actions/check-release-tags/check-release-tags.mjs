@@ -5,12 +5,14 @@
 // `v<version>` for the root package of a single-package repo. The `v` form is
 // accepted only when the manifest has one entry and that entry is the root
 // package. Each tag must also have a GitHub Release
-// (releases/tags/<tag>). A 404 means missing; any other API failure throws and
+// (releases/tags/<tag>) when changelogs are enabled and the package has a
+// CHANGELOG.md, because changesets/action creates a Release from the
+// changelog section and creates none otherwise. A 404 means missing; any other API failure throws and
 // is never read as "missing". Only reads, so a re-run after the tags and
 // Releases exist succeeds.
 
-import { readFileSync } from 'node:fs';
-import { resolve } from 'node:path';
+import { existsSync, readFileSync } from 'node:fs';
+import { relative, resolve, isAbsolute, sep } from 'node:path';
 import { fileURLToPath } from 'node:url';
 
 export function readManifest(directory) {
@@ -22,6 +24,33 @@ export function readManifest(directory) {
     }
   }
   return manifest;
+}
+
+/** False when `.changeset/config.json` sets `"changelog": false`; true otherwise. */
+export function changelogsEnabled(workspace) {
+  try {
+    const config = JSON.parse(
+      readFileSync(resolve(workspace, '.changeset', 'config.json'), 'utf8')
+    );
+    return config.changelog !== false;
+  } catch {
+    return true;
+  }
+}
+
+/**
+ * True when changesets/action would create a GitHub Release for the package:
+ * changelogs are enabled and CHANGELOG.md exists in the package directory
+ * (`entry.directory`, relative to the workspace, as written by the pack
+ * action). A directory outside the workspace counts as "no changelog".
+ */
+export function expectsRelease({ entry, workspace, enabled }) {
+  if (!enabled || typeof entry.directory !== 'string') return false;
+  const root = resolve(workspace);
+  const dir = resolve(root, entry.directory);
+  const rel = relative(root, dir);
+  if (rel === '..' || rel.startsWith(`..${sep}`) || isAbsolute(rel)) return false;
+  return existsSync(resolve(dir, 'CHANGELOG.md'));
 }
 
 /** True when the manifest is one package and it is the repository's root package. */
@@ -78,7 +107,8 @@ export async function findMissing({
   repository,
   token,
   fetchImpl,
-  singlePackage = false
+  singlePackage = false,
+  requiresRelease = () => true
 }) {
   const missing = [];
   for (const entry of manifest) {
@@ -91,7 +121,10 @@ export async function findMissing({
     }
     if (foundTag === undefined) {
       missing.push(`${entry.name}@${entry.version}`);
-    } else if (!(await releaseExists({ apiUrl, repository, tag: foundTag, token, fetchImpl }))) {
+    } else if (
+      requiresRelease(entry) &&
+      !(await releaseExists({ apiUrl, repository, tag: foundTag, token, fetchImpl }))
+    ) {
       missing.push(`${foundTag} (GitHub Release)`);
     }
   }
@@ -115,11 +148,14 @@ export async function main({ env = process.env, fetchImpl = fetch, log = console
   const apiUrl = env.GITHUB_API_URL || 'https://api.github.com';
   try {
     const manifest = readManifest(directory);
+    const workspace = env.GITHUB_WORKSPACE || process.cwd();
     const singlePackage = isSinglePackageRepo({
       manifest,
-      workspace: env.GITHUB_WORKSPACE || process.cwd()
+      workspace
     });
+    const enabled = changelogsEnabled(workspace);
     const missing = await findMissing({
+      requiresRelease: (entry) => expectsRelease({ entry, workspace, enabled }),
       manifest,
       apiUrl,
       repository,
@@ -135,7 +171,9 @@ export async function main({ env = process.env, fetchImpl = fetch, log = console
       );
       return 1;
     }
-    log(`All ${manifest.length} published package(s) have a release tag and a GitHub Release`);
+    log(
+      `All ${manifest.length} published package(s) have a release tag (and a GitHub Release where a changelog exists)`
+    );
     return 0;
   } catch (err) {
     log(`::error::${err.message}`);

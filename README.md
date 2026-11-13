@@ -186,13 +186,20 @@ skips `publish` and is tagged by `finalize` without any approval.
 - **`@changesets/cli` 2.x.** Version 3.x prints no tag lines the workflow can
   read, so `finalize` fails on every run unless the repository's resolved
   `@changesets/cli` is 2.x, including runs that publish nothing. After a
-  publish, `finalize` also checks that each published package has a git tag
-  and a GitHub Release.
+  publish, `finalize` also checks that each published package has a git tag,
+  and a GitHub Release when changelogs are enabled (`.changeset/config.json`
+  `changelog` is not `false`) and the package has a `CHANGELOG.md`, because
+  changesets creates a Release from the changelog and none without it.
 - **`publishConfig.access`.** Set it to `public` on every public package. A
   public package that resolves to restricted access fails the pack step.
 - **Public npm registry only.** Every registry lookup and publish names
   `https://registry.npmjs.org/` explicitly. A selected package that sets
-  `publishConfig.registry` to any other registry fails the pack step.
+  `publishConfig.registry`, or a scoped `publishConfig."<scope>:registry"`, to
+  any other registry fails the pack step and, checked again on the tarball's
+  own `package.json`, the publish job before anything is published.
+- **Root as a workspace member.** As in changesets, the root package is
+  published only when the repository is a single package, or when
+  `pnpm-workspace.yaml` (or `workspaces`) lists the root itself (`.`).
 - **Node.** The `publish` job uses an exact Node version pinned by the
   workflow, not the repository's `.nvmrc`, and its bundled npm must meet the
   trusted-publishing minimum.

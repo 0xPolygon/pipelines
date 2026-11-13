@@ -168,9 +168,18 @@ describe('manifest and pack', () => {
       pkg: { ...pkg('a', '1.0.0'), tag: 'latest' },
       file: 'a-1.0.0.tgz',
       sha256: 'abc',
-      access: 'public'
+      access: 'public',
+      directory: 'packages/a'
     });
-    assert.deepEqual(Object.keys(entry), ['name', 'version', 'file', 'sha256', 'access', 'tag']);
+    assert.deepEqual(Object.keys(entry), [
+      'name',
+      'version',
+      'file',
+      'sha256',
+      'access',
+      'tag',
+      'directory'
+    ]);
   });
 
   it('runs prepublishOnly then pack per package and hashes the tarball', async () => {
@@ -376,7 +385,7 @@ describe('registry', () => {
         assertNpmRegistry({
           selected: [pkg('a', '1.0.0', { publishConfig: { registry: 'https://example.test/' } })]
         }),
-      /publishConfig\.registry.*a\./
+      /a \(registry\)/
     );
   });
 
@@ -388,6 +397,56 @@ describe('registry', () => {
         pkg('c', '1.0.0')
       ]
     });
+  });
+});
+
+describe('publishConfig registry keys', () => {
+  it('rejects a scoped registry that is not npmjs', () => {
+    assert.throws(
+      () =>
+        assertNpmRegistry({
+          selected: [
+            pkg('a', '1.0.0', { publishConfig: { '@scope:registry': 'https://other.test/' } })
+          ]
+        }),
+      /@scope:registry/
+    );
+  });
+
+  it('accepts a scoped registry that is npmjs', () => {
+    assertNpmRegistry({
+      selected: [
+        pkg('a', '1.0.0', { publishConfig: { '@scope:registry': 'https://registry.npmjs.org' } })
+      ]
+    });
+  });
+});
+
+describe('root listed as a workspace member', () => {
+  const rootWith = (workspaceYaml) => {
+    const root = mkdtempSync(join(tmpdir(), 'pack-rootmember-'));
+    writeFileSync(join(root, 'package.json'), JSON.stringify({ name: 'r', version: '1.0.0' }));
+    writeFileSync(join(root, 'pnpm-workspace.yaml'), workspaceYaml);
+    return root;
+  };
+  const names = async (root) =>
+    (await discoverPackages({ root, listProjects: async () => [{ path: root }] })).map(
+      (p) => p.name
+    );
+
+  // @manypkg/get-packages 1.1.3 (what changesets uses) globs the member list,
+  // and the glob "." matches the root directory, so the root is a package.
+  it("packs the root when packages lists '.'", async () => {
+    assert.deepEqual(await names(rootWith("packages:\n  - '.'\n")), ['r']);
+  });
+
+  it('packs the root for flow-style and ./ forms', async () => {
+    assert.deepEqual(await names(rootWith("packages: ['.']\n")), ['r']);
+    assert.deepEqual(await names(rootWith('packages:\n  - ./\n')), ['r']);
+  });
+
+  it('still excludes the root when it is not named', async () => {
+    assert.deepEqual(await names(rootWith("packages:\n  - 'packages/*'\n")), []);
   });
 });
 
