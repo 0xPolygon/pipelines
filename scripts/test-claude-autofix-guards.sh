@@ -194,6 +194,10 @@ for cmd in node python python3 bash sh zsh perl ruby npx npm pnpm yarn bun deno 
 done
 check "I6 each --disallowedTools line includes Bash(python*)" 0 \
   "$(nc | grep -- '--disallowedTools' | grep -cvF 'Bash(python*)' || true)"
+for pat in 'Bash(exec *)' 'Bash(eval *)' 'Bash(source *)' 'Bash(. *)' 'Bash(command *)' 'Bash(/*)' 'Bash(./*)' 'Bash(awk *)' 'Bash(sed *)' 'Bash(php *)'; do
+  check "I7 each --disallowedTools line includes $pat" 0 \
+    "$(nc | grep -- '--disallowedTools' | grep -cvF "$pat" || true)"
+done
 
 echo "File tool scope"
 check "A1 command list has no bare Edit or Write entry" 0 \
