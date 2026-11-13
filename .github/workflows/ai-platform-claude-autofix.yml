@@ -520,7 +520,7 @@ jobs:
             shown above, in the forms shown (PR number first). The pull request diff
             comes from `gh pr diff <number>`. Pass comment text with `--body`.
             Run commands from the repository root; do not change directory. Keep the literal
-            strings `-F` and `--body-file` out of comment text.
+            strings `-F`, `--body-file`, `-R` and `--repo` out of comment text.
             Do not pass --repo or -R.
             Any other command is denied; do not retry a denied command in another form. You cannot
             install dependencies or run tests, builds, linters or scripts in
@@ -545,7 +545,7 @@ jobs:
             --allowedTools "Bash(gh pr view ${{ github.event.pull_request.number }}:*),Bash(gh pr diff ${{ github.event.pull_request.number }}:*),Bash(gh pr checks ${{ github.event.pull_request.number }}:*),Bash(gh pr comment ${{ github.event.pull_request.number }}:*),Bash(gh pr edit ${{ github.event.pull_request.number }} --add-label ${{ env.STOP_LABEL }}),Bash(gh api repos/${{ github.repository }}/pulls/${{ github.event.pull_request.number }}/comments --paginate),Bash(gh api repos/${{ github.repository }}/pulls/${{ github.event.pull_request.number }}/reviews --paginate)"
             --allowedTools "Bash(git status),Bash(git log --oneline -n 50),Bash(git diff),Bash(git diff --stat)"
             --allowedTools "Read,Edit(./**),Grep,Glob,mcp__github_file_ops__commit_files,mcp__github_file_ops__delete_files"
-            --disallowedTools "Edit(.git/**),Edit(**/.git),Edit(**/.git/**),Bash(git *--output*),Bash(gh pr comment *--body-file*),Bash(gh pr comment * -F*),Edit(~/.gitconfig),Edit(~/.config/**),Edit(~/.claude/**),Edit(~/.claude.json),Edit(/${{ runner.temp }}/**),Read(//proc/**),Bash(cd *),Bash(pushd *),Bash(git -C *),Bash(git -c *),Bash(git --git-dir*),Bash(git --work-tree*),Bash(git --exec-path*),Bash(gh pr * --repo*),Bash(gh pr * -R *),Bash(gh run * --repo*),Bash(gh run * -R *)"
+            --disallowedTools "Edit(.git/**),Edit(**/.git),Edit(**/.git/**),Bash(git *--output*),Bash(gh pr comment *--body-file*),Bash(gh pr comment * -F*),Edit(~/.gitconfig),Edit(~/.config/**),Edit(~/.claude/**),Edit(~/.claude.json),Edit(/${{ runner.temp }}/**),Read(//proc/**),Bash(cd *),Bash(pushd *),Bash(git -C *),Bash(git -c *),Bash(git --git-dir*),Bash(git --work-tree*),Bash(git --exec-path*),Bash(git -*),Bash(gh pr * --repo*),Bash(gh pr * -R*),Bash(gh run * --repo*),Bash(gh run * -R*)"
 
       # Hard gate: prompt compliance is advisory only. Diff what was actually
       # pushed against the path policy; on violation, revert the branch to
@@ -1266,7 +1266,7 @@ jobs:
             shown above, in the forms shown (PR number first). The pull request diff
             comes from `gh pr diff <number>`. Pass comment text with `--body`.
             Run commands from the repository root; do not change directory. Keep the literal
-            strings `-F` and `--body-file` out of comment text.
+            strings `-F`, `--body-file`, `-R` and `--repo` out of comment text.
             Do not pass --repo or -R.
             Any other command is denied; do not retry a denied command in another form. You cannot
             install dependencies or run tests, builds, linters or scripts in
@@ -1291,7 +1291,7 @@ jobs:
             --allowedTools "Bash(gh pr view ${{ steps.pr.outputs.pr_number }}:*),Bash(gh pr diff ${{ steps.pr.outputs.pr_number }}:*),Bash(gh pr checks ${{ steps.pr.outputs.pr_number }}:*),Bash(gh pr comment ${{ steps.pr.outputs.pr_number }}:*),Bash(gh pr edit ${{ steps.pr.outputs.pr_number }} --add-label ${{ env.STOP_LABEL }}),Bash(gh api repos/${{ github.repository }}/commits/${{ steps.pr.outputs.head_sha }}/check-runs:*),Bash(gh api repos/${{ github.repository }}/check-runs/*),Bash(gh run list:*),Bash(gh run view:*)"
             --allowedTools "Bash(git status),Bash(git log --oneline -n 50),Bash(git diff),Bash(git diff --stat)"
             --allowedTools "Read,Edit(./**),Grep,Glob,mcp__github_file_ops__commit_files,mcp__github_file_ops__delete_files"
-            --disallowedTools "Edit(.git/**),Edit(**/.git),Edit(**/.git/**),Bash(git *--output*),Bash(gh pr comment *--body-file*),Bash(gh pr comment * -F*),Edit(~/.gitconfig),Edit(~/.config/**),Edit(~/.claude/**),Edit(~/.claude.json),Edit(/${{ runner.temp }}/**),Read(//proc/**),Bash(cd *),Bash(pushd *),Bash(git -C *),Bash(git -c *),Bash(git --git-dir*),Bash(git --work-tree*),Bash(git --exec-path*),Bash(gh pr * --repo*),Bash(gh pr * -R *),Bash(gh run * --repo*),Bash(gh run * -R *)"
+            --disallowedTools "Edit(.git/**),Edit(**/.git),Edit(**/.git/**),Bash(git *--output*),Bash(gh pr comment *--body-file*),Bash(gh pr comment * -F*),Edit(~/.gitconfig),Edit(~/.config/**),Edit(~/.claude/**),Edit(~/.claude.json),Edit(/${{ runner.temp }}/**),Read(//proc/**),Bash(cd *),Bash(pushd *),Bash(git -C *),Bash(git -c *),Bash(git --git-dir*),Bash(git --work-tree*),Bash(git --exec-path*),Bash(git -*),Bash(gh pr * --repo*),Bash(gh pr * -R*),Bash(gh run * --repo*),Bash(gh run * -R*)"
 
       # Hard gate: see the note on the fix-review-feedback job's step of the
       # same name. Reverts policy-violating pushes, comments, and applies the

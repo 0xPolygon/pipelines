@@ -173,13 +173,13 @@ check "A1 each --disallowedTools line includes Edit(~/.config/**)" 0 \
   "$(nc | grep -- '--disallowedTools' | grep -cvF 'Edit(~/.config/**)' || true)"
 check "A1 each --disallowedTools line includes Edit(.git/**)" 0 \
   "$(nc | grep -- '--disallowedTools' | grep -cvF 'Edit(.git/**)' || true)"
-for pat in 'Bash(gh pr * --repo*)' 'Bash(gh pr * -R *)' 'Bash(gh run * --repo*)' 'Bash(gh run * -R *)'; do
+for pat in 'Bash(gh pr * --repo*)' 'Bash(gh pr * -R*)' 'Bash(gh run * --repo*)' 'Bash(gh run * -R*)'; do
   check "R1 each --disallowedTools line includes $pat" 0 \
     "$(nc | grep -- '--disallowedTools' | grep -cvF "$pat" || true)"
 done
 check "R1 no --allowedTools line carries --repo or -R" 0 \
   "$(nc | grep -- '--allowedTools' | grep -cE -- '--repo| -R ' || true)"
-for pat in 'Bash(cd *)' 'Bash(pushd *)' 'Bash(git -C *)' 'Bash(git -c *)' 'Bash(git --git-dir*)' 'Bash(git --work-tree*)' 'Bash(git --exec-path*)'; do
+for pat in 'Bash(cd *)' 'Bash(pushd *)' 'Bash(git -C *)' 'Bash(git -c *)' 'Bash(git --git-dir*)' 'Bash(git --work-tree*)' 'Bash(git --exec-path*)' 'Bash(git -*)'; do
   check "N1 each --disallowedTools line includes $pat" 0 \
     "$(nc | grep -- '--disallowedTools' | grep -cvF "$pat" || true)"
 done
