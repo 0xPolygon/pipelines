@@ -28,7 +28,8 @@
     "test:slack-pr-merged": "bash scripts/test-slack-pr-merged.sh",
     "test:actions": "node --test \".github/actions/**/*.test.mjs\"",
     "test:publish-environment": "bash scripts/test-check-publish-environment.sh",
-    "test": "pnpm run test:slack-pr-merged && pnpm run test:actions && pnpm run test:publish-environment"
+    "test:npm-release-workflow": "bash scripts/test-npm-release-workflow.sh",
+    "test": "pnpm run test:slack-pr-merged && pnpm run test:actions && pnpm run test:publish-environment && pnpm run test:npm-release-workflow"
   },
   "devDependencies": {
     "@changesets/cli": "^2.30.0",
