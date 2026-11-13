@@ -1,17 +1,18 @@
 name: Check release tags
 description: >
   Confirms that every package listed in `<directory>/manifest.json` has a git
-  tag on the remote repository, read through the GitHub REST API. A tag is
-  accepted as `<name>@<version>` (multi-package repos) or `v<version>`
-  (single-package repos). Fails with one error listing the missing tags.
-  Safe to re-run: it only reads.
+  tag on the remote repository and a GitHub Release for that tag, read through
+  the GitHub REST API. A tag is accepted as `<name>@<version>`, or as
+  `v<version>` when the manifest has one entry and it is the repository's root
+  package. Fails with one error listing what is missing. Safe to re-run: it
+  only reads.
 
 inputs:
   directory:
     description: Directory holding the manifest.json written by the pack action.
     required: true
   token:
-    description: Token with read access to the repository's git refs.
+    description: Token with read access to the repository's git refs and Releases.
     required: true
 
 runs:

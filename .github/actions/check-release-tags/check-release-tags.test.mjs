@@ -17,12 +17,19 @@ afterEach(() => {
 const writeManifest = (entries) =>
   writeFileSync(join(dir, 'manifest.json'), JSON.stringify(entries));
 
-/** A fetch stub that answers 200 for the given decoded tags, 404 otherwise. */
-function fakeFetch({ tags = [], status } = {}) {
+/**
+ * A fetch stub that answers 200 for the given decoded tags and for the Releases
+ * of `releases` (default: every tag in `tags`), 404 otherwise.
+ */
+function fakeFetch({ tags = [], releases = tags, status } = {}) {
   const urls = [];
   const fetchImpl = async (url) => {
     urls.push(url);
     if (status) return { status };
+    if (url.includes('/releases/tags/')) {
+      const tag = decodeURIComponent(url.split('/releases/tags/')[1]);
+      return { status: releases.includes(tag) ? 200 : 404 };
+    }
     const encoded = url.split('/git/ref/tags/')[1];
     return { status: tags.includes(decodeURIComponent(encoded)) ? 200 : 404 };
   };
@@ -31,7 +38,12 @@ function fakeFetch({ tags = [], status } = {}) {
 
 function run(fetchImpl) {
   const logs = [];
-  const env = { TARBALL_DIRECTORY: dir, GITHUB_REPOSITORY: 'o/r', GITHUB_TOKEN: 't' };
+  const env = {
+    TARBALL_DIRECTORY: dir,
+    GITHUB_REPOSITORY: 'o/r',
+    GITHUB_TOKEN: 't',
+    GITHUB_WORKSPACE: dir
+  };
   return main({ env, fetchImpl, log: (m) => logs.push(m) }).then((code) => ({ code, logs }));
 }
 
@@ -45,7 +57,8 @@ describe('check-release-tags', () => {
     assert.equal(code, 0);
   });
 
-  it('accepts the single-package v<version> form', async () => {
+  it('accepts the single-package v<version> form for the root package', async () => {
+    writeFileSync(join(dir, 'package.json'), JSON.stringify({ name: 'solo' }));
     writeManifest([{ name: 'solo', version: '3.1.0' }]);
     const { code } = await run(fakeFetch({ tags: ['v3.1.0'] }).fetchImpl);
     assert.equal(code, 0);
@@ -79,5 +92,43 @@ describe('check-release-tags', () => {
     const { code } = await run(fetchImpl);
     assert.equal(code, 0);
     assert.equal(urls[0], 'https://api.github.com/repos/o/r/git/ref/tags/%40scope%2Fpkg%401.0.0');
+  });
+
+  it('does not accept v<version> for a one-entry manifest that is not the root package', async () => {
+    writeFileSync(join(dir, 'package.json'), JSON.stringify({ name: 'monorepo-root' }));
+    writeManifest([{ name: 'pkg', version: '1.2.3' }]);
+    const { code } = await run(fakeFetch({ tags: ['v1.2.3'] }).fetchImpl);
+    assert.equal(code, 1);
+  });
+
+  it('does not accept v<version> when the manifest has several entries', async () => {
+    writeFileSync(join(dir, 'package.json'), JSON.stringify({ name: 'a' }));
+    writeManifest([
+      { name: 'a', version: '1.0.0' },
+      { name: 'b', version: '1.0.0' }
+    ]);
+    const { code } = await run(fakeFetch({ tags: ['v1.0.0', 'b@1.0.0'] }).fetchImpl);
+    assert.equal(code, 1);
+  });
+
+  it('fails when a tag exists but its GitHub Release does not', async () => {
+    writeManifest([
+      { name: 'a', version: '1.0.0' },
+      { name: 'b', version: '2.0.0' }
+    ]);
+    const { code, logs } = await run(
+      fakeFetch({ tags: ['a@1.0.0', 'b@2.0.0'], releases: ['b@2.0.0'] }).fetchImpl
+    );
+    assert.equal(code, 1);
+    assert.match(logs.join('\n'), /a@1\.0\.0 \(GitHub Release\)/);
+    assert.doesNotMatch(logs.join('\n'), /b@2\.0\.0 \(/);
+  });
+
+  it('fails on a release API error other than 404', async () => {
+    writeManifest([{ name: 'a', version: '1.0.0' }]);
+    const fetchImpl = async (url) => ({ status: url.includes('/releases/') ? 502 : 200 });
+    const { code, logs } = await run(fetchImpl);
+    assert.equal(code, 1);
+    assert.match(logs.join('\n'), /release lookup.*HTTP 502/);
   });
 });

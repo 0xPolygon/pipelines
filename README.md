@@ -57,8 +57,9 @@ system state automatically.
 | `actions/docker-test` | Resolve service from tag, build image, start container, run tests, stop | No — pure shell |
 | `actions/npm-pack` | Pack every public workspace package whose version is not on npm into tarballs and write `manifest.json`; holds no publish credential | No — dependency-free Node script |
 | `actions/npm-publish-tarballs` | Publish the tarballs listed in `manifest.json` after checking each file's SHA-256 and the npm client version; needs no checkout or install | No — dependency-free Node script |
+| `actions/check-changesets-cli` | Fail unless the repository's resolved `@changesets/cli` is 2.x | No — dependency-free Node script |
 | `actions/release-guard` | Fail unless the run is a push to the repository's default branch | No — dependency-free Node script |
-| `actions/check-release-tags` | Confirm every package in `manifest.json` has a git tag on the remote, read through the GitHub REST API | No — dependency-free Node script |
+| `actions/check-release-tags` | Confirm every package in `manifest.json` has a git tag and a GitHub Release, read through the GitHub REST API | No — dependency-free Node script |
 | `actions/slack-notify` | Post Slack Block Kit message from `pr.json` | Yes — ncc bundle |
 | `actions/upsert-changeset-comment` | Post or remove changeset nag comment on a PR | Yes — ncc bundle |
 
@@ -183,28 +184,42 @@ on the old job name needs updating). A repository with only private packages
 skips `publish` and is tagged by `finalize` without any approval.
 
 - **`@changesets/cli` 2.x.** Version 3.x prints no tag lines the workflow can
-  read, so `finalize` fails when a published package gets no tag.
+  read, so `finalize` fails on every run unless the repository's resolved
+  `@changesets/cli` is 2.x, including runs that publish nothing. After a
+  publish, `finalize` also checks that each published package has a git tag
+  and a GitHub Release.
 - **`publishConfig.access`.** Set it to `public` on every public package. A
   public package that resolves to restricted access fails the pack step.
-- **Public npm registry only.** Publishing goes to npmjs.org; a per-package
-  `publishConfig.registry` is not used.
+- **Public npm registry only.** Every registry lookup and publish names
+  `https://registry.npmjs.org/` explicitly. A selected package that sets
+  `publishConfig.registry` to any other registry fails the pack step.
 - **Node.** The `publish` job uses an exact Node version pinned by the
   workflow, not the repository's `.nvmrc`, and its bundled npm must meet the
   trusted-publishing minimum.
 - **Lifecycle scripts.** `build` runs `prepublishOnly` (if present) and
   `pnpm pack`, which runs `prepack` and `prepare`. A package's `publish` and
-  `postpublish` scripts do not run.
+  `postpublish` scripts do not run. The publish step runs with
+  `--ignore-scripts`. Packing happens with nothing in the workspace but the
+  repository: the workflow's own checkout is removed first, and the pack step
+  fails if a tarball contains a `.pipelines/` path.
 - **`npm-publish` environment.** Create it in the repository with required
   reviewers, "prevent self-review" on, administrator bypass off, and
-  deployment branches limited to the default branch. GitHub creates a missing
-  environment with no protection, so verify it with
+  deployment branches limited to the default branch. The workflow does not
+  create or configure the environment; verify it with
   `scripts/check-publish-environment.sh <owner>/<repo>`.
 - **Trust config.** Each package's npm trusted-publisher configuration names
   the repository's release trigger workflow file and the environment
   `npm-publish`. Verify the environment with the script **before** recreating
-  a package's trust config with the environment pin.
+  a package's trust config with the environment pin. Once a package's trust
+  config names the environment, the snapshot path (which runs without an
+  environment) fails for that package until the snapshot path changes.
 - **Two people per release.** With self-review prevented, the person whose
-  merge started the run cannot approve the publish.
+  merge started the run cannot approve the publish. If another push lands
+  while a release waits for approval, a second approval request can appear
+  for the same versions; the second run finds them already published and
+  skips them.
+- **Artifact retention.** The tarballs are kept for 7 days. If approval or a
+  re-run of `finalize` comes later, re-run all jobs to pack them again.
 - **Trigger permissions.** Copy `apps-npm-release-trigger.yml`; its top-level
   `permissions` must cover every scope the called jobs request.
 

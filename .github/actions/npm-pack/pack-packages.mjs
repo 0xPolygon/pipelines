@@ -24,10 +24,21 @@ const readJson = (path) => JSON.parse(readFileSync(path, 'utf8'));
 
 const readJsonIfExists = (path) => (existsSync(path) ? readJson(path) : undefined);
 
+// True when the repository declares workspace member globs (a `packages:` key
+// in pnpm-workspace.yaml, or `workspaces` in package.json). Such a repository
+// publishes its members only, never its root, even when no member matches.
+export function declaresWorkspaceMembers(root) {
+  const yamlPath = join(root, 'pnpm-workspace.yaml');
+  if (existsSync(yamlPath) && /^packages\s*:/m.test(readFileSync(yamlPath, 'utf8'))) return true;
+  const rootJson = readJsonIfExists(join(root, 'package.json'));
+  return rootJson?.workspaces !== undefined;
+}
+
 // Lists workspace projects with pnpm, which reads pnpm-workspace.yaml itself,
 // needs no install and makes no assumption about the layout. pnpm lists the
 // workspace root among the projects. As in changesets, the root of a
-// multi-package workspace is never a publish candidate: only the member
+// multi-package workspace is never a publish candidate, and a workspace whose
+// globs match no member publishes nothing: only the member
 // packages are (@manypkg/get-packages 1.1.3, `dist/get-packages.cjs.dev.js`
 // lines 237-241 return the root separately from `packages`), while a
 // repository with a single package publishes that package (same file, lines
@@ -37,7 +48,7 @@ export async function discoverPackages({ root, listProjects = listProjectsWithPn
   const projects = await listProjects(root);
   const rootDir = resolve(root);
   const kept =
-    projects.length > 1
+    projects.length > 1 || (projects.length === 1 && declaresWorkspaceMembers(rootDir))
       ? projects.filter((project) => resolve(project.path) !== rootDir)
       : projects;
   return kept.map((project) => {
@@ -143,6 +154,32 @@ export function assertPublicAccess({ selected, configAccess }) {
   }
 }
 
+export const NPM_REGISTRY = 'https://registry.npmjs.org/';
+
+const normaliseRegistry = (url) => String(url).trim().replace(/\/+$/, '').toLowerCase();
+
+// `npm publish <tarball>` applies the tarball's own `publishConfig.registry`
+// unless a CLI flag overrides it, and this workflow publishes to npmjs.org
+// only. A package that names another registry fails here, in the job that
+// holds no credential, rather than publishing somewhere unexpected.
+export function assertNpmRegistry({ selected }) {
+  const foreign = selected
+    .filter((pkg) => {
+      const registry = pkg.packageJson.publishConfig?.registry;
+      return (
+        registry !== undefined && normaliseRegistry(registry) !== normaliseRegistry(NPM_REGISTRY)
+      );
+    })
+    .map((pkg) => pkg.name);
+  if (foreign.length > 0) {
+    throw new Error(
+      `Packages set publishConfig.registry to a registry other than ${NPM_REGISTRY}: ` +
+        `${foreign.join(', ')}. This workflow publishes to the public npm registry only; ` +
+        'remove publishConfig.registry from each package.json.'
+    );
+  }
+}
+
 // One manifest entry per tarball.
 export function buildManifestEntry({ pkg, file, sha256, access }) {
   return { name: pkg.name, version: pkg.version, file, sha256, access, tag: pkg.tag };
@@ -156,7 +193,7 @@ export async function lookupVersionsWithNpm(name) {
   let stdout;
   let failure;
   try {
-    ({ stdout } = await execFileAsync('npm', ['info', name, '--json'], {
+    ({ stdout } = await execFileAsync('npm', ['info', name, '--json', '--registry', NPM_REGISTRY], {
       encoding: 'utf8',
       maxBuffer: 64 * 1024 * 1024
     }));
@@ -186,12 +223,41 @@ async function runCommand({ command, args, cwd }) {
   return stdout;
 }
 
+// Paths inside a tarball, listed with the system `tar`.
+async function listTarballEntries(path) {
+  const { stdout } = await execFileAsync('tar', ['-tzf', path], {
+    encoding: 'utf8',
+    maxBuffer: 256 * 1024 * 1024
+  });
+  return stdout.split('\n').filter(Boolean);
+}
+
+// A packed tarball must hold the package only. A `.pipelines` directory
+// inside a package comes from a checkout of this workflow's repository left in
+// the workspace, and an npm version cannot be replaced once published.
+export function assertNoCheckoutContent({ entries, packageName, file }) {
+  const stray = entries.filter((entry) => /^(\.\/)?package\/\.pipelines(\/|$)/.test(entry));
+  if (stray.length > 0) {
+    throw new Error(
+      `${file} (${packageName}) contains ${stray.length} file(s) under package/.pipelines/, ` +
+        'a checkout of the workflow repository. Nothing may be added to the workspace before packing.'
+    );
+  }
+}
+
 const sha256OfFile = (path) => createHash('sha256').update(readFileSync(path)).digest('hex');
 
 // Packs each selected package into `outDir` and returns the manifest.
 // `prepublishOnly` runs first because `pnpm pack` does not run it.
-export async function packSelected({ selected, outDir, configAccess, run = runCommand }) {
+export async function packSelected({
+  selected,
+  outDir,
+  configAccess,
+  run = runCommand,
+  listEntries = listTarballEntries
+}) {
   const manifest = [];
+  const files = new Set();
   for (const pkg of selected) {
     await run({ command: 'pnpm', args: ['run', '--if-present', 'prepublishOnly'], cwd: pkg.dir });
     const stdout = await run({
@@ -208,6 +274,17 @@ export async function packSelected({ selected, outDir, configAccess, run = runCo
     if (!file.endsWith('.tgz') || !existsSync(filePath)) {
       throw new Error(`pnpm pack for ${pkg.name} did not produce a tarball in ${outDir}`);
     }
+    // Two packages can share a file name (`@a/b` and `a-b` at one version);
+    // the second `pnpm pack` would have overwritten the first tarball.
+    if (files.has(file)) {
+      throw new Error(`Two selected packages produce the same tarball name ${file}`);
+    }
+    files.add(file);
+    assertNoCheckoutContent({
+      entries: await listEntries(filePath),
+      packageName: pkg.name,
+      file
+    });
     manifest.push(
       buildManifestEntry({
         pkg,
@@ -225,7 +302,8 @@ export async function main({
   root = process.cwd(),
   lookupVersions = lookupVersionsWithNpm,
   listProjects,
-  run
+  run,
+  listEntries
 } = {}) {
   const outDirInput = env.PACK_OUT_DIR;
   if (!outDirInput) throw new Error('PACK_OUT_DIR is required');
@@ -238,9 +316,10 @@ export async function main({
 
   const selected = await selectUnpublished({ packages, lookupVersions, preState, override });
   assertPublicAccess({ selected, configAccess });
+  assertNpmRegistry({ selected });
 
   mkdirSync(outDir, { recursive: true });
-  const manifest = await packSelected({ selected, outDir, configAccess, run });
+  const manifest = await packSelected({ selected, outDir, configAccess, run, listEntries });
   writeFileSync(join(outDir, 'manifest.json'), `${JSON.stringify(manifest, null, 2)}\n`);
 
   for (const entry of manifest) {

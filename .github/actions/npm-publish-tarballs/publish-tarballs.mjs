@@ -1,7 +1,8 @@
 // Publishes the tarballs listed in <directory>/manifest.json.
 //
 // manifest.json is an array of { name, version, file, sha256, access, tag }.
-// Every entry is verified (file inside the directory, SHA-256 matches) and the
+// Every entry is verified (fields well-formed, file inside the directory,
+// SHA-256 matches, the tarball's own name and version match the entry) and the
 // npm client version is checked before the first publish, so a bad manifest
 // publishes nothing. A version already on the registry is skipped. A package
 // whose publish or registry lookup fails is recorded and the rest continue;
@@ -19,6 +20,14 @@ import { fileURLToPath } from 'node:url';
 
 // OIDC trusted publishing needs npm 11.5.1 or later.
 export const MIN_NPM_VERSION = '11.5.1';
+
+// Every registry call names the public registry explicitly: a CLI flag beats
+// the `publishConfig.registry` stored inside a tarball.
+export const NPM_REGISTRY = 'https://registry.npmjs.org/';
+
+const NAME_PATTERN = /^(@[a-z0-9~][a-z0-9._~-]*\/)?[a-z0-9~][a-z0-9._~-]*$/;
+const VERSION_PATTERN = /^\d+\.\d+\.\d+(-[0-9A-Za-z.-]+)?(\+[0-9A-Za-z.-]+)?$/;
+const TAG_PATTERN = /^[a-z][a-z0-9._-]*$/;
 
 const ENTRY_FIELDS = ['name', 'version', 'file', 'sha256', 'access', 'tag'];
 
@@ -68,6 +77,21 @@ export function readManifest(directory) {
         throw new Error(`manifest entry is missing "${field}": ${JSON.stringify(entry)}`);
       }
     }
+    // These values reach the npm command line, so each must have the shape
+    // of what it names; this also keeps a value from reading as an option.
+    const problems = [
+      entry.access !== 'public' && 'access must be "public"',
+      !TAG_PATTERN.test(entry.tag) && 'tag must match ^[a-z][a-z0-9._-]*$',
+      !(NAME_PATTERN.test(entry.name) && entry.name.length <= 214) &&
+        'name is not a valid npm package name',
+      !VERSION_PATTERN.test(entry.version) && 'version is not a semver version',
+      !/^[0-9a-f]{64}$/.test(entry.sha256) && 'sha256 must be 64 hex characters'
+    ].filter(Boolean);
+    if (problems.length > 0) {
+      throw new Error(
+        `manifest entry ${JSON.stringify(entry.name)} is invalid: ${problems.join('; ')}`
+      );
+    }
   }
   return manifest;
 }
@@ -95,14 +119,46 @@ export function verifyEntry({ directory, entry, read = readFileSync }) {
   return path;
 }
 
+/** Reads `package/package.json` out of a tarball with the system `tar`. */
+export function readTarballManifest({ path, run = defaultRun }) {
+  const result = run('tar', ['-xzOf', path, 'package/package.json']);
+  if (result.status !== 0) throw new Error('could not read package/package.json from the tarball');
+  try {
+    return JSON.parse(result.stdout);
+  } catch {
+    throw new Error('package/package.json in the tarball is not valid JSON');
+  }
+}
+
+/** Throws unless the tarball's own name and version equal the manifest entry's. */
+export function verifyTarballIdentity({ path, entry, run = defaultRun }) {
+  const inner = readTarballManifest({ path, run });
+  if (inner.name !== entry.name || inner.version !== entry.version) {
+    throw new Error(
+      `${entry.name}@${entry.version}: ${entry.file} holds ${inner.name}@${inner.version}, ` +
+        'which does not match the manifest'
+    );
+  }
+}
+
 /**
  * True when name@version is on the registry, false when the registry answers
  * 404. Any other lookup failure throws, so it is never read as "not published".
  */
 export function isPublished({ name, version, run = defaultRun }) {
-  const result = run('npm', ['view', `${name}@${version}`, 'version', '--json']);
+  const result = run('npm', [
+    'view',
+    `${name}@${version}`,
+    'version',
+    '--json',
+    '--registry',
+    NPM_REGISTRY
+  ]);
   if (result.status === 0) return result.stdout.trim() !== '';
-  if (/\bE404\b|\b404\b/.test(`${result.stderr}\n${result.stdout}`)) return false;
+  // npm reports a missing package as the error code E404, in its text output
+  // and as `error.code` in --json output; a bare "404" in a version string or
+  // URL is not that.
+  if (/\bE404\b/.test(`${result.stderr}\n${result.stdout}`)) return false;
   throw new Error(`registry lookup failed with exit code ${result.status}`);
 }
 
@@ -112,6 +168,7 @@ export function publishAll({ directory, run = defaultRun, log = console.log }) {
   const manifest = readManifest(directory);
 
   const paths = manifest.map((entry) => verifyEntry({ directory, entry }));
+  manifest.forEach((entry, index) => verifyTarballIdentity({ path: paths[index], entry, run }));
 
   const published = [];
   const skipped = [];
@@ -130,7 +187,10 @@ export function publishAll({ directory, run = defaultRun, log = console.log }) {
         '--access',
         entry.access,
         '--tag',
-        entry.tag
+        entry.tag,
+        '--registry',
+        NPM_REGISTRY,
+        '--ignore-scripts'
       ]);
       if (result.status !== 0) {
         throw new Error(`npm publish exited with code ${result.status}\n${result.stderr.trim()}`);

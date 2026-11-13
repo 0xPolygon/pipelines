@@ -222,7 +222,7 @@ jobs:
           name: npm-tarballs
           path: ${{ runner.temp }}/npm-tarballs
           if-no-files-found: error
-          retention-days: 1
+          retention-days: 7
 
   publish:
     # Runs only when build packed at least one tarball. Checks out and
@@ -236,10 +236,11 @@ jobs:
     # The environment's reviewers approve the publish. A repository that
     # publishes public packages must configure `npm-publish` with required
     # reviewers, self-review prevented, no administrator bypass, and
-    # deployment limited to the default branch. A job that names a missing
-    # environment makes GitHub create one with no protection, and the publish
-    # then runs without approval. The name is fixed (npm trust configs pin
-    # it). A release with nothing public skips this job and asks no approval.
+    # deployment limited to the default branch. The workflow does not create
+    # or configure the environment; verify it with
+    # scripts/check-publish-environment.sh. The name is fixed (npm trust
+    # configs pin it). A release with nothing public skips this job and asks
+    # no approval.
     environment: npm-publish
     permissions:
       id-token: write # npm OIDC trusted publishing
@@ -285,7 +286,9 @@ jobs:
       always() && inputs.snapshot_tag == ''
       && needs.version.outputs.has_changesets == 'false'
       && needs.build.result == 'success'
-      && (needs.publish.result == 'success' || needs.publish.result == 'skipped')
+      && (needs.publish.result == 'success'
+          || (needs.publish.result == 'skipped'
+              && needs.build.outputs.has_tarballs != 'true'))
     runs-on: ubuntu-latest
     timeout-minutes: 20
     permissions:
@@ -319,6 +322,22 @@ jobs:
 
       - run: pnpm install --frozen-lockfile --ignore-scripts
 
+      # Tags and Releases are created from the `New tag:` lines that
+      # `changeset tag` prints in @changesets/cli 2.x, so finalize fails on any
+      # other major, whether or not anything was published in this run.
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+        with:
+          repository: ${{ job.workflow_repository }}
+          ref: ${{ job.workflow_sha }}
+          path: .pipelines
+          sparse-checkout: .github/actions/check-changesets-cli
+          persist-credentials: false
+
+      - uses: ./.pipelines/.github/actions/check-changesets-cli
+
+      - name: Remove the pipelines checkout
+        run: rm -rf .pipelines
+
       # Minted after checkout and install, for changesets/action only, and
       # limited to tags and Releases.
       - uses: actions/create-github-app-token@bcd2ba49218906704ab6c1aa796996da409d3eb1 # v3.2.0
@@ -343,7 +362,7 @@ jobs:
           GITHUB_TOKEN: ${{ steps.app-token.outputs.token }}
 
       # Verifies the end state rather than the action's outputs: every
-      # package that was published has a git tag on the remote. Fails when a
+      # package that was published has a git tag and a GitHub Release. Fails when a
       # repo's @changesets/cli prints tags in a format changesets/action
       # cannot read (it reads `New tag:` lines), and passes on a re-run after
       # the tags already exist.

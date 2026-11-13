@@ -1,4 +1,5 @@
 import assert from 'node:assert/strict';
+import { execFileSync } from 'node:child_process';
 import { createHash } from 'node:crypto';
 import { mkdirSync, mkdtempSync, readFileSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
@@ -6,6 +7,8 @@ import { join } from 'node:path';
 import { describe, it } from 'node:test';
 
 import {
+  assertNoCheckoutContent,
+  assertNpmRegistry,
   assertPublicAccess,
   buildManifestEntry,
   discoverPackages,
@@ -178,6 +181,7 @@ describe('manifest and pack', () => {
       selected: [{ ...pkg('a', '1.0.0', { publishConfig: { access: 'public' } }), tag: 'latest' }],
       outDir: out,
       configAccess: undefined,
+      listEntries: async () => ['package/package.json'],
       run: async ({ command, args, cwd }) => {
         calls.push([command, ...args, cwd]);
         return args[0] === 'pack' ? `${out}/a-1.0.0.tgz\n` : '';
@@ -228,6 +232,7 @@ describe('workspace fixture', () => {
       env: { PACK_OUT_DIR: out, GITHUB_OUTPUT: ghOutput },
       listProjects: async () => [{ path: join(root, 'packages', 'a') }],
       lookupVersions: async () => null,
+      listEntries: async () => ['package/package.json'],
       run: async ({ args }) => {
         if (args[0] !== 'pack') return '';
         writeFileSync(join(out, 'a-1.2.3.tgz'), 'x');
@@ -292,5 +297,121 @@ describe('root project handling', () => {
     await assert.rejects(discoverPackages({ root, listProjects }), /m0.*no "name" or no "version"/);
     const ws2 = makeWs({ name: 'r', version: '1.0.0' }, [{ name: 'x' }]);
     await assert.rejects(discoverPackages(ws2), /no "name" or no "version"/);
+  });
+});
+
+// Builds a real gzipped tarball whose entries are the given files, laid out
+// under `package/` like `pnpm pack` output.
+function buildTarball(files) {
+  const base = mkdtempSync(join(tmpdir(), 'pack-tar-'));
+  const src = join(base, 'src');
+  for (const [path, content] of Object.entries(files)) {
+    mkdirSync(join(src, 'package', path, '..'), { recursive: true });
+    writeFileSync(join(src, 'package', path), content);
+  }
+  const tgz = join(base, 'a-1.0.0.tgz');
+  execFileSync('tar', ['-czf', tgz, '-C', src, 'package']);
+  return { base, tgz };
+}
+
+describe('workspace checkout guard', () => {
+  const packWith = async (files) => {
+    const { base, tgz } = buildTarball(files);
+    const out = join(base, 'out');
+    mkdirSync(out);
+    writeFileSync(join(out, 'a-1.0.0.tgz'), readFileSync(tgz));
+    return packSelected({
+      selected: [{ ...pkg('a', '1.0.0', { publishConfig: { access: 'public' } }), tag: 'latest' }],
+      outDir: out,
+      run: async ({ args }) => (args[0] === 'pack' ? 'a-1.0.0.tgz\n' : '')
+    });
+  };
+
+  it('packs a real tarball that holds only the package', async () => {
+    const manifest = await packWith({ 'package.json': '{}', 'dist/index.js': 'x' });
+    assert.equal(manifest[0]?.file, 'a-1.0.0.tgz');
+  });
+
+  it('fails when the tarball contains a .pipelines directory', async () => {
+    await assert.rejects(
+      packWith({ 'package.json': '{}', '.pipelines/.github/actions/x/action.yml': 'x' }),
+      /under package\/\.pipelines\//
+    );
+  });
+
+  it('matches only the .pipelines directory, not lookalike names', () => {
+    assertNoCheckoutContent({
+      entries: ['package/.pipelines-notes.md', 'package/src/.pipelines/x'],
+      packageName: 'a',
+      file: 'a.tgz'
+    });
+    assert.throws(() =>
+      assertNoCheckoutContent({ entries: ['package/.pipelines'], packageName: 'a', file: 'a.tgz' })
+    );
+  });
+
+  it('fails when two packages produce the same tarball name', async () => {
+    const out = mkdtempSync(join(tmpdir(), 'pack-dup-'));
+    writeFileSync(join(out, 'a-b-1.0.0.tgz'), 'x');
+    await assert.rejects(
+      packSelected({
+        selected: [
+          { ...pkg('@a/b', '1.0.0'), tag: 'latest' },
+          { ...pkg('a-b', '1.0.0'), tag: 'latest' }
+        ],
+        outDir: out,
+        configAccess: 'public',
+        listEntries: async () => [],
+        run: async ({ args }) => (args[0] === 'pack' ? 'a-b-1.0.0.tgz\n' : '')
+      }),
+      /same tarball name a-b-1\.0\.0\.tgz/
+    );
+  });
+});
+
+describe('registry', () => {
+  it('rejects a package that sets another publishConfig.registry', () => {
+    assert.throws(
+      () =>
+        assertNpmRegistry({
+          selected: [pkg('a', '1.0.0', { publishConfig: { registry: 'https://example.test/' } })]
+        }),
+      /publishConfig\.registry.*a\./
+    );
+  });
+
+  it('accepts the public registry, with or without a trailing slash, and no setting', () => {
+    assertNpmRegistry({
+      selected: [
+        pkg('a', '1.0.0', { publishConfig: { registry: 'https://registry.npmjs.org' } }),
+        pkg('b', '1.0.0', { publishConfig: { registry: 'https://registry.npmjs.org/' } }),
+        pkg('c', '1.0.0')
+      ]
+    });
+  });
+});
+
+describe('workspace with no matching members', () => {
+  const rootWith = (workspaceYaml) => {
+    const root = mkdtempSync(join(tmpdir(), 'pack-empty-'));
+    writeFileSync(join(root, 'package.json'), JSON.stringify({ name: 'r', version: '1.0.0' }));
+    if (workspaceYaml !== undefined)
+      writeFileSync(join(root, 'pnpm-workspace.yaml'), workspaceYaml);
+    return root;
+  };
+
+  it('packs nothing when pnpm-workspace.yaml has globs and only the root is listed', async () => {
+    const root = rootWith("packages:\n  - 'packages/*'\n");
+    const found = await discoverPackages({ root, listProjects: async () => [{ path: root }] });
+    assert.deepEqual(found, []);
+  });
+
+  it('keeps the root when pnpm-workspace.yaml only carries settings', async () => {
+    const root = rootWith('minimumReleaseAge: 1440\n');
+    const found = await discoverPackages({ root, listProjects: async () => [{ path: root }] });
+    assert.deepEqual(
+      found.map((p) => p.name),
+      ['r']
+    );
   });
 });

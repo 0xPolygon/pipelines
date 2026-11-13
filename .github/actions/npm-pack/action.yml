@@ -6,7 +6,10 @@ description: >
   `prepublishOnly` (if present) and `pnpm pack`. Packages that resolve to
   restricted access fail the step. Expects the caller to have checked out the
   repo, set up pnpm and Node, and installed dependencies. Holds no publish
-  credential and publishes nothing.
+  credential and publishes nothing. It removes the `.pipelines` checkout of
+  this repository from the workspace before packing and fails when a tarball
+  contains it. A package that sets `publishConfig.registry` to anything other
+  than the public npm registry fails the step.
 
 inputs:
   out-dir:
@@ -37,4 +40,11 @@ runs:
         ACTION_PATH: ${{ github.action_path }}
         PACK_OUT_DIR: ${{ inputs.out-dir }}
         PACK_DIST_TAG: ${{ inputs.dist-tag }}
-      run: node "$ACTION_PATH/pack-packages.mjs"
+      run: |
+        # The script is copied out and the workflow checkout removed first:
+        # `pnpm pack` includes every file of a package whose directory is the
+        # workspace root, so nothing but the repository itself may be there.
+        script_dir="$(mktemp -d "$RUNNER_TEMP/npm-pack.XXXXXX")"
+        cp "$ACTION_PATH/pack-packages.mjs" "$script_dir/"
+        rm -rf "$GITHUB_WORKSPACE/.pipelines"
+        node "$script_dir/pack-packages.mjs"
