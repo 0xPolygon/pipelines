@@ -231,11 +231,19 @@ skips `publish` and is tagged by `finalize` without any approval.
   `permissions` must cover every scope the called jobs request, including
   `attestations: write` for the `attest` job.
 - **Build provenance.** `attest` records a provenance attestation for each
-  tarball and `publish` verifies each one with `gh attestation verify`
-  (`--repo` set to the calling repository, `--signer-workflow` set to
-  `0xPolygon/pipelines/.github/workflows/apps-npm-release.yml`) before it
-  publishes anything. Attestations need a repository plan that supports them
-  (public repositories, or private repositories on GitHub Enterprise Cloud).
+  tarball and `publish` verifies each one with `gh attestation verify` before
+  it publishes anything, binding the calling repository (`--repo`), the
+  released commit (`--source-digest`) and ref (`--source-ref`), and the signer:
+  the shared workflow's repository and path (`--signer-workflow`, derived from
+  `job.workflow_repository`) at the exact commit that is running
+  (`--signer-digest`, `job.workflow_sha`). The attestation proves the tarball
+  passed through this workflow's attest job from the calling repository at this
+  commit; it is no evidence about how the tarball was built. `gh` is the
+  runner-provided CLI; if it is missing, nothing is published. A failed or
+  skipped `attest` with tarballs present cannot reach `finalize`, so no tags or
+  Releases are created for unpublished packages. Attestations need a repository
+  plan that supports them (public repositories, or private repositories on
+  GitHub Enterprise Cloud).
 
 ### `actions/docker-test`
 

@@ -3,8 +3,11 @@ description: >
   Publishes the tarballs listed in `<directory>/manifest.json` with the npm
   client on the runner's PATH. Before any publish it checks that every
   tarball exists inside the directory, matches its recorded SHA-256 and has a
-  build provenance attestation from this repository signed by the signer
-  workflow, and that the npm client is new enough for OIDC trusted publishing. A version
+  build provenance attestation from this repository, for the commit and ref
+  being released, signed by the signer workflow at the given digest, and that
+  the npm client is new enough for OIDC trusted publishing. Needs the `gh` CLI
+  on the runner (provided by GitHub-hosted images); without it, nothing is
+  published. A version
   already on the registry is skipped. A failed package does not stop the
   others; the step exits non-zero and lists the failures. Needs no checkout
   and no install. npm authenticates with the runner's OIDC identity; the
@@ -17,9 +20,14 @@ inputs:
   signer-workflow:
     description: >
       Workflow that must have signed each tarball's attestation, as
-      `<owner>/<repo>/<path>`. Defaults to the shared release workflow.
-    required: false
-    default: 0xPolygon/pipelines/.github/workflows/apps-npm-release.yml
+      `<owner>/<repo>/<path>`. The caller derives it from the running
+      workflow's own repository rather than relying on a literal.
+    required: true
+  signer-digest:
+    description: >
+      Commit SHA of the signer workflow that must have signed each
+      attestation (the running workflow's `job.workflow_sha`).
+    required: true
 
 runs:
   using: composite
@@ -32,6 +40,9 @@ runs:
         ACTION_PATH: ${{ github.action_path }}
         TARBALL_DIRECTORY: ${{ inputs.directory }}
         SIGNER_WORKFLOW: ${{ inputs.signer-workflow }}
+        SIGNER_DIGEST: ${{ inputs.signer-digest }}
+        SOURCE_DIGEST: ${{ github.sha }}
+        SOURCE_REF: ${{ github.ref }}
         GITHUB_REPOSITORY: ${{ github.repository }}
         # Read by `gh attestation verify` only; the script keeps it from npm.
         GH_TOKEN: ${{ github.token }}

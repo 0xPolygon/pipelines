@@ -81,7 +81,10 @@ function fakeRun({
 
 const ctx = {
   repository: '0xPolygon/example',
-  signerWorkflow: '0xPolygon/pipelines/.github/workflows/apps-npm-release.yml'
+  signerWorkflow: '0xPolygon/pipelines/.github/workflows/apps-npm-release.yml',
+  signerDigest: '1111111111111111111111111111111111111111',
+  sourceDigest: '2222222222222222222222222222222222222222',
+  sourceRef: 'refs/heads/main'
 };
 const ghCalls = (calls) => calls.filter((c) => c[0] === 'gh');
 const publishCalls = (calls) => calls.filter((c) => c[1] === 'publish');
@@ -267,7 +270,13 @@ describe('publishAll', () => {
   });
 });
 
-const mainEnv = { GITHUB_REPOSITORY: ctx.repository, SIGNER_WORKFLOW: ctx.signerWorkflow };
+const mainEnv = {
+  GITHUB_REPOSITORY: ctx.repository,
+  SIGNER_WORKFLOW: ctx.signerWorkflow,
+  SIGNER_DIGEST: ctx.signerDigest,
+  SOURCE_DIGEST: ctx.sourceDigest,
+  SOURCE_REF: ctx.sourceRef
+};
 
 describe('attestation', () => {
   it('verifies every entry before the first publish, with repo and signer workflow', () => {
@@ -286,8 +295,31 @@ describe('attestation', () => {
       '--repo',
       ctx.repository,
       '--signer-workflow',
-      ctx.signerWorkflow
+      ctx.signerWorkflow,
+      '--signer-digest',
+      ctx.signerDigest,
+      '--source-digest',
+      ctx.sourceDigest,
+      '--source-ref',
+      ctx.sourceRef
     ]);
+  });
+
+  it('binds a branch-ref caller to the ref and signer digest it was given', () => {
+    writeManifest([entry('a')]);
+    const { run, calls } = fakeRun();
+    publishAll({
+      ...ctx,
+      sourceRef: 'refs/heads/feature-x',
+      signerDigest: 'abc123',
+      directory: dir,
+      run,
+      log: quiet
+    });
+    const argv = ghCalls(calls)[0];
+    assert.equal(argv[argv.indexOf('--source-ref') + 1], 'refs/heads/feature-x');
+    assert.equal(argv[argv.indexOf('--signer-digest') + 1], 'abc123');
+    assert.equal(publishCalls(calls).length, 1);
   });
 
   it('publishes nothing when one verification fails', () => {
@@ -315,11 +347,15 @@ describe('attestation', () => {
     assert.equal(publishCalls(calls).length, 0);
   });
 
-  it('exits non-zero from main when the repository or signer is unset', () => {
+  it('exits non-zero from main when any binding input is unset', () => {
     writeManifest([entry('a')]);
-    const { run, calls } = fakeRun();
-    assert.equal(main({ env: { TARBALL_DIRECTORY: dir }, run, log: quiet }), 1);
-    assert.equal(calls.length, 0);
+    for (const missing of Object.keys(mainEnv)) {
+      const env = { ...mainEnv, TARBALL_DIRECTORY: dir };
+      delete env[missing];
+      const { run, calls } = fakeRun();
+      assert.equal(main({ env, run, log: quiet }), 1, `${missing} unset`);
+      assert.equal(calls.length, 0);
+    }
   });
 
   it('passes GH_TOKEN to gh only, never to npm', () => {

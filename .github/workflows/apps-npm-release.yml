@@ -230,8 +230,8 @@ jobs:
 
   attest:
     # Runs only when build packed at least one tarball. Records a build
-    # provenance attestation for each tarball so publish can verify what it
-    # publishes is what this workflow built. Checks out and installs no
+    # provenance attestation for each tarball so publish can verify the bytes
+    # it publishes passed through this job. Checks out and installs no
     # repository code; the only checkout is this workflow's own release guard.
     needs: [version, build]
     if: inputs.snapshot_tag == '' && needs.build.outputs.has_tarballs == 'true'
@@ -314,19 +314,25 @@ jobs:
       - uses: ./.pipelines/.github/actions/npm-publish-tarballs
         with:
           directory: ${{ runner.temp }}/npm-tarballs
+          signer-workflow: ${{ job.workflow_repository }}/.github/workflows/apps-npm-release.yml
+          signer-digest: ${{ job.workflow_sha }}
 
   finalize:
     # Creates the git tag and GitHub Release for each taggable package. Runs
     # after publish succeeds, or after build when there was nothing public to
-    # publish (publish is then skipped, not failed).
-    needs: [version, build, publish]
+    # publish. "Skipped" publish is only acceptable without tarballs: with
+    # tarballs, a failed or skipped attest or publish must not reach tagging.
+    needs: [version, build, attest, publish]
     if: >-
       always() && inputs.snapshot_tag == ''
       && needs.version.outputs.has_changesets == 'false'
       && needs.build.result == 'success'
-      && (needs.publish.result == 'success'
-          || (needs.publish.result == 'skipped'
-              && needs.build.outputs.has_tarballs == 'false'))
+      && ((needs.build.outputs.has_tarballs == 'true'
+           && needs.attest.result == 'success'
+           && needs.publish.result == 'success')
+          || (needs.build.outputs.has_tarballs == 'false'
+              && needs.attest.result == 'skipped'
+              && needs.publish.result == 'skipped'))
     runs-on: ubuntu-latest
     timeout-minutes: 20
     permissions:
