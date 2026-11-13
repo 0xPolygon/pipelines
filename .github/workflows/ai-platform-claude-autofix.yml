@@ -91,6 +91,8 @@
 # the caller as the CLAUDE_API_KEY secret.
 #
 # Self-hosted runners need Python 3.11 or newer.
+# The jobs install bubblewrap and socat from the runner's package mirrors;
+# runners without sudo and apt fail closed.
 
 name: Claude PR Autofix
 
@@ -248,6 +250,36 @@ jobs:
       - name: Install path matcher dependency
         if: steps.authz.outputs.proceed == 'true' && inputs.denied_paths != ''
         run: python3 -P -m pip install --quiet pathspec==1.1.1
+
+      # Commands the agent starts run in an isolated environment without the
+      # job's credentials. The packages it needs are installed here, as the
+      # agent action itself does (anthropics/claude-code-action action.yml,
+      # same pinned SHA). Without them the job stops.
+      - name: Install agent command isolation
+        if: steps.authz.outputs.proceed == 'true'
+        run: |
+          if ! command -v apt-get >/dev/null || ! command -v sudo >/dev/null; then
+            echo "::error::apt-get and sudo are required to install the agent's command isolation"
+            exit 1
+          fi
+          installed=0
+          for i in 1 2 3; do
+            if sudo apt-get update -qq && sudo apt-get install -y --no-install-recommends bubblewrap socat; then
+              installed=1
+              break
+            fi
+            echo "apt-get attempt $i failed, retrying..."
+            sleep 5
+          done
+          if [ "$installed" != 1 ]; then
+            echo "::error::could not install the agent's command isolation packages"
+            exit 1
+          fi
+          # Ubuntu 24.04+ restricts unprivileged user namespaces via AppArmor.
+          # The sysctl does not exist on older kernels.
+          if [ -f /proc/sys/kernel/apparmor_restrict_unprivileged_userns ]; then
+            sudo sysctl -w kernel.apparmor_restrict_unprivileged_userns=0
+          fi
 
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
         if: steps.authz.outputs.proceed == 'true'
@@ -545,7 +577,7 @@ jobs:
             --allowedTools "Bash(gh pr view ${{ github.event.pull_request.number }}:*),Bash(gh pr diff ${{ github.event.pull_request.number }}:*),Bash(gh pr checks ${{ github.event.pull_request.number }}:*),Bash(gh pr comment ${{ github.event.pull_request.number }}:*),Bash(gh pr edit ${{ github.event.pull_request.number }} --add-label ${{ env.STOP_LABEL }}),Bash(gh api repos/${{ github.repository }}/pulls/${{ github.event.pull_request.number }}/comments --paginate),Bash(gh api repos/${{ github.repository }}/pulls/${{ github.event.pull_request.number }}/reviews --paginate)"
             --allowedTools "Bash(git status),Bash(git log --oneline -n 50),Bash(git diff),Bash(git diff --stat)"
             --allowedTools "Read,Edit(./**),Grep,Glob,mcp__github_file_ops__commit_files,mcp__github_file_ops__delete_files"
-            --disallowedTools "Edit(.git/**),Edit(**/.git),Edit(**/.git/**),Bash(git *--output*),Bash(gh pr comment *--body-file*),Bash(gh pr comment * -F*),Edit(~/.gitconfig),Edit(~/.config/**),Edit(~/.claude/**),Edit(~/.claude.json),Edit(/${{ runner.temp }}/**),Read(//proc/**),Bash(cd *),Bash(pushd *),Bash(git -C *),Bash(git -c *),Bash(git --git-dir*),Bash(git --work-tree*),Bash(git --exec-path*),Bash(git -*),Bash(gh pr * --repo*),Bash(gh pr * -R*),Bash(gh run * --repo*),Bash(gh run * -R*)"
+            --disallowedTools "Edit(.git/**),Edit(**/.git),Edit(**/.git/**),Bash(git *--output*),Bash(gh pr comment *--body-file*),Bash(gh pr comment * -F*),Edit(~/.gitconfig),Edit(~/.config/**),Edit(~/.claude/**),Edit(~/.claude.json),Edit(/${{ runner.temp }}/**),Read(//proc/**),Bash(cd *),Bash(pushd *),Bash(git -C *),Bash(git -c *),Bash(git --git-dir*),Bash(git --work-tree*),Bash(git --exec-path*),Bash(git -*),Bash(gh pr * --repo*),Bash(gh pr * -R*),Bash(gh run * --repo*),Bash(gh run * -R*),Bash(node),Bash(node *),Bash(python),Bash(python *),Bash(python3),Bash(python3 *),Bash(bash),Bash(bash *),Bash(sh),Bash(sh *),Bash(zsh),Bash(zsh *),Bash(perl),Bash(perl *),Bash(ruby),Bash(ruby *),Bash(npx),Bash(npx *),Bash(npm),Bash(npm *),Bash(pnpm),Bash(pnpm *),Bash(yarn),Bash(yarn *),Bash(bun),Bash(bun *),Bash(deno),Bash(deno *),Bash(make),Bash(make *),Bash(go),Bash(go *),Bash(cargo),Bash(cargo *),Bash(curl),Bash(curl *),Bash(wget),Bash(wget *),Bash(env),Bash(env *),Bash(xargs),Bash(xargs *),Bash(python*)"
 
       # Hard gate: prompt compliance is advisory only. Diff what was actually
       # pushed against the path policy; on violation, revert the branch to
@@ -978,6 +1010,36 @@ jobs:
         if: steps.pr.outputs.proceed == 'true' && steps.authz.outputs.proceed == 'true' && inputs.denied_paths != ''
         run: python3 -P -m pip install --quiet pathspec==1.1.1
 
+      # Commands the agent starts run in an isolated environment without the
+      # job's credentials. The packages it needs are installed here, as the
+      # agent action itself does (anthropics/claude-code-action action.yml,
+      # same pinned SHA). Without them the job stops.
+      - name: Install agent command isolation
+        if: steps.pr.outputs.proceed == 'true' && steps.authz.outputs.proceed == 'true'
+        run: |
+          if ! command -v apt-get >/dev/null || ! command -v sudo >/dev/null; then
+            echo "::error::apt-get and sudo are required to install the agent's command isolation"
+            exit 1
+          fi
+          installed=0
+          for i in 1 2 3; do
+            if sudo apt-get update -qq && sudo apt-get install -y --no-install-recommends bubblewrap socat; then
+              installed=1
+              break
+            fi
+            echo "apt-get attempt $i failed, retrying..."
+            sleep 5
+          done
+          if [ "$installed" != 1 ]; then
+            echo "::error::could not install the agent's command isolation packages"
+            exit 1
+          fi
+          # Ubuntu 24.04+ restricts unprivileged user namespaces via AppArmor.
+          # The sysctl does not exist on older kernels.
+          if [ -f /proc/sys/kernel/apparmor_restrict_unprivileged_userns ]; then
+            sudo sysctl -w kernel.apparmor_restrict_unprivileged_userns=0
+          fi
+
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
         if: steps.pr.outputs.proceed == 'true' && steps.authz.outputs.proceed == 'true'
         with:
@@ -1291,7 +1353,7 @@ jobs:
             --allowedTools "Bash(gh pr view ${{ steps.pr.outputs.pr_number }}:*),Bash(gh pr diff ${{ steps.pr.outputs.pr_number }}:*),Bash(gh pr checks ${{ steps.pr.outputs.pr_number }}:*),Bash(gh pr comment ${{ steps.pr.outputs.pr_number }}:*),Bash(gh pr edit ${{ steps.pr.outputs.pr_number }} --add-label ${{ env.STOP_LABEL }}),Bash(gh api repos/${{ github.repository }}/commits/${{ steps.pr.outputs.head_sha }}/check-runs:*),Bash(gh api repos/${{ github.repository }}/check-runs/*),Bash(gh run list:*),Bash(gh run view:*)"
             --allowedTools "Bash(git status),Bash(git log --oneline -n 50),Bash(git diff),Bash(git diff --stat)"
             --allowedTools "Read,Edit(./**),Grep,Glob,mcp__github_file_ops__commit_files,mcp__github_file_ops__delete_files"
-            --disallowedTools "Edit(.git/**),Edit(**/.git),Edit(**/.git/**),Bash(git *--output*),Bash(gh pr comment *--body-file*),Bash(gh pr comment * -F*),Edit(~/.gitconfig),Edit(~/.config/**),Edit(~/.claude/**),Edit(~/.claude.json),Edit(/${{ runner.temp }}/**),Read(//proc/**),Bash(cd *),Bash(pushd *),Bash(git -C *),Bash(git -c *),Bash(git --git-dir*),Bash(git --work-tree*),Bash(git --exec-path*),Bash(git -*),Bash(gh pr * --repo*),Bash(gh pr * -R*),Bash(gh run * --repo*),Bash(gh run * -R*)"
+            --disallowedTools "Edit(.git/**),Edit(**/.git),Edit(**/.git/**),Bash(git *--output*),Bash(gh pr comment *--body-file*),Bash(gh pr comment * -F*),Edit(~/.gitconfig),Edit(~/.config/**),Edit(~/.claude/**),Edit(~/.claude.json),Edit(/${{ runner.temp }}/**),Read(//proc/**),Bash(cd *),Bash(pushd *),Bash(git -C *),Bash(git -c *),Bash(git --git-dir*),Bash(git --work-tree*),Bash(git --exec-path*),Bash(git -*),Bash(gh pr * --repo*),Bash(gh pr * -R*),Bash(gh run * --repo*),Bash(gh run * -R*),Bash(node),Bash(node *),Bash(python),Bash(python *),Bash(python3),Bash(python3 *),Bash(bash),Bash(bash *),Bash(sh),Bash(sh *),Bash(zsh),Bash(zsh *),Bash(perl),Bash(perl *),Bash(ruby),Bash(ruby *),Bash(npx),Bash(npx *),Bash(npm),Bash(npm *),Bash(pnpm),Bash(pnpm *),Bash(yarn),Bash(yarn *),Bash(bun),Bash(bun *),Bash(deno),Bash(deno *),Bash(make),Bash(make *),Bash(go),Bash(go *),Bash(cargo),Bash(cargo *),Bash(curl),Bash(curl *),Bash(wget),Bash(wget *),Bash(env),Bash(env *),Bash(xargs),Bash(xargs *),Bash(python*)"
 
       # Hard gate: see the note on the fix-review-feedback job's step of the
       # same name. Reverts policy-violating pushes, comments, and applies the
