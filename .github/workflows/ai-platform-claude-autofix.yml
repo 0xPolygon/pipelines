@@ -187,18 +187,24 @@ jobs:
       id-token: write
       actions: read
     steps:
-      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
-        with:
-          ref: ${{ github.event.pull_request.head.sha }}
-          fetch-depth: 0
-
       # Pinned to the audited version — enforcement semantics depend on exact
       # matcher behavior. Separate step so the install runs without GH_TOKEN
       # in its environment. Skipped when no path policy is configured, so an
       # unrestricted caller gains no new network failure mode.
+      # Install the matcher's pinned dependency at the start of the job.
+      # Helper scripts run with -P (Python's safe-path mode).
       - name: Install path matcher dependency
         if: inputs.denied_paths != ''
-        run: python3 -m pip install --quiet pathspec==1.1.1
+        run: python3 -P -m pip install --quiet pathspec==1.1.1
+
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+        with:
+          ref: ${{ github.event.pull_request.head.sha }}
+          fetch-depth: 0
+          # Later steps authenticate their own git network calls one command
+          # at a time (see git_auth), so the checkout credential is not kept
+          # in the repository's git config.
+          persist-credentials: false
 
       # Parse denied_paths, validate every pattern, and build the prompt
       # snippet. Fails closed: invalid patterns skip the run with a PR
@@ -289,7 +295,7 @@ jobs:
             exit 0
           fi
 
-          if ! python3 "$RUNNER_TEMP/pathpolicy.py" validate "$RUNNER_TEMP/denied_paths.txt"; then
+          if ! python3 -P "$RUNNER_TEMP/pathpolicy.py" validate "$RUNNER_TEMP/denied_paths.txt"; then
             { echo "valid=false"; echo "enforce=false"; echo "prompt_block="; } >> "$GITHUB_OUTPUT"
             gh pr comment "$PR_NUMBER" --repo "${{ github.repository }}" --body \
               "Claude autofix skipped: the \`denied_paths\` configuration in the caller workflow contains an invalid pattern (see the run log). Autofix will not run until the configuration is fixed. ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}"
@@ -330,6 +336,9 @@ jobs:
             ''|*[!0-9]*) echo "::error::max_attempts must be a positive integer (got '$MAX_ATTEMPTS')"; exit 1;;
           esac
           [ "$MAX_ATTEMPTS" -ge 1 ] || { echo "::error::max_attempts must be at least 1"; exit 1; }
+          # The count below reads local refs only; without the base ref it would
+          # report zero attempts.
+          git rev-parse --verify --quiet "refs/remotes/origin/$BASE_REF" > /dev/null || { echo "::error::base branch is not available in the checkout"; exit 1; }
           ATTEMPTS=$(git log --oneline "origin/$BASE_REF..HEAD" | grep -c '\[claude-autofix\]' || true)
           echo "Prior autofix attempts on this PR: $ATTEMPTS (max: $MAX_ATTEMPTS)"
           if [ "$ATTEMPTS" -ge "$MAX_ATTEMPTS" ]; then
@@ -348,10 +357,26 @@ jobs:
         id: before
         if: steps.attempts.outputs.proceed == 'true' && steps.policy.outputs.enforce == 'true'
         env:
+          GH_TOKEN: ${{ github.token }}
           HEAD_REF: ${{ github.event.pull_request.head.ref }}
         run: |
           set -euo pipefail
-          echo "sha=$(git ls-remote origin "refs/heads/$HEAD_REF" | cut -f1)" >> "$GITHUB_OUTPUT"
+          # Authenticate one git command with the workflow token, passed through the
+          # environment for that command only. Nothing is written to the repository's
+          # git config, so no later step inherits the credential.
+          git_auth() {
+            local basic
+            basic=$(printf 'x-access-token:%s' "$GH_TOKEN" | base64 | tr -d '\n')
+            echo "::add-mask::${basic}"
+            GIT_CONFIG_COUNT=1 \
+              GIT_CONFIG_KEY_0="http.${GITHUB_SERVER_URL}/.extraheader" \
+              GIT_CONFIG_VALUE_0="AUTHORIZATION: basic ${basic}" \
+              git "$@"
+          }
+          SHA=$(git_auth ls-remote origin "refs/heads/$HEAD_REF" | cut -f1)
+          # Fail here rather than start the agent without a pre-run snapshot.
+          case "$SHA" in ''|*[!0-9a-f]*) echo "::error::could not read the branch head"; exit 1;; esac
+          echo "sha=$SHA" >> "$GITHUB_OUTPUT"
 
       - name: Fix review feedback
         # The trailing clause makes the gate coupling explicit: when the
@@ -455,11 +480,22 @@ jobs:
           DENIED_PATHS: ${{ inputs.denied_paths }}
         run: |
           set -euo pipefail
-          # The Claude action step swaps the checkout's git credentials for
-          # its own app token and revokes it when the step ends, so plain git
-          # network calls (ls-remote/fetch) 401 afterwards. Re-point origin at
-          # the workflow token before any network call below.
-          git remote set-url origin "https://x-access-token:${GH_TOKEN}@github.com/${{ github.repository }}.git"
+          # Authenticate one git command with the workflow token, passed through the
+          # environment for that command only. Nothing is written to the repository's
+          # git config, so no later step inherits the credential.
+          git_auth() {
+            local basic
+            basic=$(printf 'x-access-token:%s' "$GH_TOKEN" | base64 | tr -d '\n')
+            echo "::add-mask::${basic}"
+            GIT_CONFIG_COUNT=1 \
+              GIT_CONFIG_KEY_0="http.${GITHUB_SERVER_URL}/.extraheader" \
+              GIT_CONFIG_VALUE_0="AUTHORIZATION: basic ${basic}" \
+              git "$@"
+          }
+          # The agent step points origin at its own short-lived credential and
+          # revokes it when the step ends. Reset origin to a credential-free URL;
+          # the network calls below authenticate per command.
+          git remote set-url origin "${GITHUB_SERVER_URL}/${{ github.repository }}.git"
           # Label + comment + fail the step. `commented=true` tells the
           # notify step this failure already produced its own PR comment.
           fail_closed() {
@@ -498,12 +534,12 @@ jobs:
               fail_closed "Claude autofix could not verify the pushed changes against \`denied_paths\` ($1), and the pushed range could not be safely auto-reverted (it contains commits not attributable to the bot). A human must review the branch. Remove the \`$STOP_LABEL\` label to re-enable the bot. Run log: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}"
             fi
           }
-          AFTER_SHA=$(git ls-remote origin "refs/heads/$HEAD_REF" | cut -f1)
+          AFTER_SHA=$(git_auth ls-remote origin "refs/heads/$HEAD_REF" | cut -f1)
           if [ "$AFTER_SHA" = "$BEFORE_SHA" ]; then
             echo "Branch unchanged; nothing to enforce."
             exit 0
           fi
-          git fetch origin "$HEAD_REF"
+          git_auth fetch --no-recurse-submodules origin "$HEAD_REF"
 
           # Rebuild the pattern file from the trusted workflow input and verify
           # the matcher script still hashes to what the pre-run validation
@@ -516,7 +552,7 @@ jobs:
           # could have overwritten in site-packages; reinstall it clean.
           # (In-job tamper-proofing is best-effort — hosted runners grant
           # the job passwordless sudo.)
-          python3 -m pip install --quiet --force-reinstall --no-cache-dir pathspec==1.1.1 \
+          python3 -P -m pip install --quiet --force-reinstall --no-cache-dir pathspec==1.1.1 \
             || unverifiable "the matcher dependency could not be reinstalled"
 
           # Union the paths touched by EVERY commit in the range — an
@@ -530,7 +566,7 @@ jobs:
             git diff --name-only --no-renames -z "$c^" "$c" >> "$RUNNER_TEMP/changed_paths.zlist"
           done
           set +e
-          VIOLATIONS=$(python3 "$RUNNER_TEMP/pathpolicy.py" check "$RUNNER_TEMP/denied_paths.txt" \
+          VIOLATIONS=$(python3 -P "$RUNNER_TEMP/pathpolicy.py" check "$RUNNER_TEMP/denied_paths.txt" \
             < "$RUNNER_TEMP/changed_paths.zlist")
           RC=$?
           set -e
@@ -787,17 +823,23 @@ jobs:
 
           echo "proceed=true" >> "$GITHUB_OUTPUT"
 
+      # Pinned to the audited version; see the note on the fix-review-feedback
+      # job's step of the same name.
+      # Install the matcher's pinned dependency at the start of the job.
+      # Helper scripts run with -P (Python's safe-path mode).
+      - name: Install path matcher dependency
+        if: steps.pr.outputs.proceed == 'true' && inputs.denied_paths != ''
+        run: python3 -P -m pip install --quiet pathspec==1.1.1
+
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
         if: steps.pr.outputs.proceed == 'true'
         with:
           ref: ${{ steps.pr.outputs.head_sha }}
           fetch-depth: 0
-
-      # Pinned to the audited version; see the note on the fix-review-feedback
-      # job's step of the same name.
-      - name: Install path matcher dependency
-        if: steps.pr.outputs.proceed == 'true' && inputs.denied_paths != ''
-        run: python3 -m pip install --quiet pathspec==1.1.1
+          # Later steps authenticate their own git network calls one command
+          # at a time (see git_auth), so the checkout credential is not kept
+          # in the repository's git config.
+          persist-credentials: false
 
       # Parse denied_paths, validate every pattern, and build the prompt
       # snippet. Fails closed: invalid patterns skip the run with a PR
@@ -890,7 +932,7 @@ jobs:
             exit 0
           fi
 
-          if ! python3 "$RUNNER_TEMP/pathpolicy.py" validate "$RUNNER_TEMP/denied_paths.txt"; then
+          if ! python3 -P "$RUNNER_TEMP/pathpolicy.py" validate "$RUNNER_TEMP/denied_paths.txt"; then
             { echo "valid=false"; echo "enforce=false"; echo "prompt_block="; } >> "$GITHUB_OUTPUT"
             gh pr comment "$PR_NUMBER" --repo "${{ github.repository }}" --body \
               "Claude autofix skipped: the \`denied_paths\` configuration in the caller workflow contains an invalid pattern (see the run log). Autofix will not run until the configuration is fixed. ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}"
@@ -930,6 +972,9 @@ jobs:
             ''|*[!0-9]*) echo "::error::max_attempts must be a positive integer (got '$MAX_ATTEMPTS')"; exit 1;;
           esac
           [ "$MAX_ATTEMPTS" -ge 1 ] || { echo "::error::max_attempts must be at least 1"; exit 1; }
+          # The count below reads local refs only; without the base ref it would
+          # report zero attempts.
+          git rev-parse --verify --quiet "refs/remotes/origin/$BASE_REF" > /dev/null || { echo "::error::base branch is not available in the checkout"; exit 1; }
           ATTEMPTS=$(git log --oneline "origin/$BASE_REF..HEAD" | grep -c '\[claude-autofix\]' || true)
           echo "Prior autofix attempts: $ATTEMPTS (max: $MAX_ATTEMPTS)"
           if [ "$ATTEMPTS" -ge "$MAX_ATTEMPTS" ]; then
@@ -948,10 +993,26 @@ jobs:
         id: before
         if: steps.attempts.outputs.proceed == 'true' && steps.policy.outputs.enforce == 'true'
         env:
+          GH_TOKEN: ${{ github.token }}
           HEAD_REF: ${{ steps.pr.outputs.head_ref }}
         run: |
           set -euo pipefail
-          echo "sha=$(git ls-remote origin "refs/heads/$HEAD_REF" | cut -f1)" >> "$GITHUB_OUTPUT"
+          # Authenticate one git command with the workflow token, passed through the
+          # environment for that command only. Nothing is written to the repository's
+          # git config, so no later step inherits the credential.
+          git_auth() {
+            local basic
+            basic=$(printf 'x-access-token:%s' "$GH_TOKEN" | base64 | tr -d '\n')
+            echo "::add-mask::${basic}"
+            GIT_CONFIG_COUNT=1 \
+              GIT_CONFIG_KEY_0="http.${GITHUB_SERVER_URL}/.extraheader" \
+              GIT_CONFIG_VALUE_0="AUTHORIZATION: basic ${basic}" \
+              git "$@"
+          }
+          SHA=$(git_auth ls-remote origin "refs/heads/$HEAD_REF" | cut -f1)
+          # Fail here rather than start the agent without a pre-run snapshot.
+          case "$SHA" in ''|*[!0-9a-f]*) echo "::error::could not read the branch head"; exit 1;; esac
+          echo "sha=$SHA" >> "$GITHUB_OUTPUT"
 
       - name: Fix failing checks
         # The trailing clause makes the gate coupling explicit: when the
@@ -1047,11 +1108,22 @@ jobs:
           DENIED_PATHS: ${{ inputs.denied_paths }}
         run: |
           set -euo pipefail
-          # The Claude action step swaps the checkout's git credentials for
-          # its own app token and revokes it when the step ends, so plain git
-          # network calls (ls-remote/fetch) 401 afterwards. Re-point origin at
-          # the workflow token before any network call below.
-          git remote set-url origin "https://x-access-token:${GH_TOKEN}@github.com/${{ github.repository }}.git"
+          # Authenticate one git command with the workflow token, passed through the
+          # environment for that command only. Nothing is written to the repository's
+          # git config, so no later step inherits the credential.
+          git_auth() {
+            local basic
+            basic=$(printf 'x-access-token:%s' "$GH_TOKEN" | base64 | tr -d '\n')
+            echo "::add-mask::${basic}"
+            GIT_CONFIG_COUNT=1 \
+              GIT_CONFIG_KEY_0="http.${GITHUB_SERVER_URL}/.extraheader" \
+              GIT_CONFIG_VALUE_0="AUTHORIZATION: basic ${basic}" \
+              git "$@"
+          }
+          # The agent step points origin at its own short-lived credential and
+          # revokes it when the step ends. Reset origin to a credential-free URL;
+          # the network calls below authenticate per command.
+          git remote set-url origin "${GITHUB_SERVER_URL}/${{ github.repository }}.git"
           # Label + comment + fail the step. `commented=true` tells the
           # notify step this failure already produced its own PR comment.
           fail_closed() {
@@ -1090,12 +1162,12 @@ jobs:
               fail_closed "Claude autofix could not verify the pushed changes against \`denied_paths\` ($1), and the pushed range could not be safely auto-reverted (it contains commits not attributable to the bot). A human must review the branch. Remove the \`$STOP_LABEL\` label to re-enable the bot. Run log: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}"
             fi
           }
-          AFTER_SHA=$(git ls-remote origin "refs/heads/$HEAD_REF" | cut -f1)
+          AFTER_SHA=$(git_auth ls-remote origin "refs/heads/$HEAD_REF" | cut -f1)
           if [ "$AFTER_SHA" = "$BEFORE_SHA" ]; then
             echo "Branch unchanged; nothing to enforce."
             exit 0
           fi
-          git fetch origin "$HEAD_REF"
+          git_auth fetch --no-recurse-submodules origin "$HEAD_REF"
 
           # Rebuild the pattern file from the trusted workflow input and verify
           # the matcher script still hashes to what the pre-run validation
@@ -1108,7 +1180,7 @@ jobs:
           # could have overwritten in site-packages; reinstall it clean.
           # (In-job tamper-proofing is best-effort — hosted runners grant
           # the job passwordless sudo.)
-          python3 -m pip install --quiet --force-reinstall --no-cache-dir pathspec==1.1.1 \
+          python3 -P -m pip install --quiet --force-reinstall --no-cache-dir pathspec==1.1.1 \
             || unverifiable "the matcher dependency could not be reinstalled"
 
           # Union the paths touched by EVERY commit in the range — an
@@ -1122,7 +1194,7 @@ jobs:
             git diff --name-only --no-renames -z "$c^" "$c" >> "$RUNNER_TEMP/changed_paths.zlist"
           done
           set +e
-          VIOLATIONS=$(python3 "$RUNNER_TEMP/pathpolicy.py" check "$RUNNER_TEMP/denied_paths.txt" \
+          VIOLATIONS=$(python3 -P "$RUNNER_TEMP/pathpolicy.py" check "$RUNNER_TEMP/denied_paths.txt" \
             < "$RUNNER_TEMP/changed_paths.zlist")
           RC=$?
           set -e
