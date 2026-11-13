@@ -387,6 +387,10 @@ jobs:
           steps.policy.outputs.valid == 'true' &&
           (steps.policy.outputs.enforce != 'true' || steps.before.outcome == 'success')
         uses: anthropics/claude-code-action@4845bacbb38b3c4b15d948f035349786f678e068 # v1.0.267
+        env:
+          # Commands the agent starts do not receive the model API credential.
+          # GH_TOKEN is kept, so gh keeps working.
+          CLAUDE_CODE_SUBPROCESS_ENV_SCRUB: '1'
         with:
           anthropic_api_key: ${{ secrets.CLAUDE_API_KEY }}
           # Bot actor gate — see the allowed_bots input. Note that events
@@ -415,8 +419,9 @@ jobs:
             feedback that blocks approval.
 
             ASSESS:
-            1. Read the review feedback: `gh pr view ${{ github.event.pull_request.number }} --comments`
-               and `gh api repos/${{ github.repository }}/pulls/${{ github.event.pull_request.number }}/comments`
+            1. Read the review feedback: `gh pr view ${{ github.event.pull_request.number }} --comments`,
+               `gh api repos/${{ github.repository }}/pulls/${{ github.event.pull_request.number }}/comments --paginate`
+               and `gh api repos/${{ github.repository }}/pulls/${{ github.event.pull_request.number }}/reviews --paginate`
                for requested changes and inline comments.
             2. Check the git log first: if a prior [claude-autofix] commit
                already attempted a fix for an item and it was re-raised, do not
@@ -425,8 +430,9 @@ jobs:
 
             FIX:
             3. Address every actionable requested change. Follow existing code
-               style and CLAUDE.md if present. Never delete, skip, or weaken
-               tests to get green.
+               style, and the repository's CLAUDE.md if present (read it with
+               the Read tool; it is not loaded automatically). Never delete,
+               skip, or weaken tests to get green.
 
             REPORT:
             4. Commit your changes to the current branch with the
@@ -438,8 +444,9 @@ jobs:
                `fix(auth): handle expired session in middleware [claude-autofix]`
                The tag is how the loop-prevention gate counts attempts; omitting
                it breaks the safety mechanism.
-            5. Reply via `gh pr comment` summarizing what you changed. For
-               feedback you intentionally did NOT act on, explain why.
+            5. Reply via `gh pr comment ${{ github.event.pull_request.number }} --body "..."`
+               summarizing what you changed. For feedback you intentionally did
+               NOT act on, explain why.
 
             If there is genuinely nothing actionable, do NOT push an empty or
             cosmetic commit. Just reply with a comment and stop.
@@ -452,11 +459,33 @@ jobs:
             the attempt cap alone would never catch it). A human removes the
             label once they've answered.
 
+            TOOLS:
+            You can read and edit files and run only the gh and git commands
+            shown above, in the forms shown (PR number first). Any other command
+            is denied; do not retry a denied command in another form. You cannot
+            install dependencies or run tests, builds, linters or scripts in
+            this job. Work from the feedback, the logs and the source. If a fix
+            cannot be made with confidence without running something, say so in
+            your comment and apply the label as described.
+
             ${{ steps.policy.outputs.prompt_block }}
+          # The agent gets a fixed set of commands: reading this pull request
+          # and its feedback, commenting, labelling, and read-only git. It has
+          # no general shell, so nothing from the repository is installed,
+          # built or run in this job. Settings, hooks and MCP servers are taken
+          # only from this workflow, not from the repository.
+          # File edits are limited to the repository's working tree, outside
+          # its git metadata; the runner's own tool configuration is not
+          # writable.
           claude_args: |
             --model ${{ inputs.model }}
             --max-turns 60
-            --allowedTools "Bash,Read,Edit,Write,Grep,Glob,mcp__github_file_ops__commit_files,mcp__github_file_ops__delete_files"
+            --setting-sources user
+            --strict-mcp-config
+            --allowedTools "Bash(gh pr view ${{ github.event.pull_request.number }}:*),Bash(gh pr diff ${{ github.event.pull_request.number }}:*),Bash(gh pr checks ${{ github.event.pull_request.number }}:*),Bash(gh pr comment ${{ github.event.pull_request.number }}:*),Bash(gh pr edit ${{ github.event.pull_request.number }} --add-label ${{ env.STOP_LABEL }}:*),Bash(gh api repos/${{ github.repository }}/pulls/${{ github.event.pull_request.number }}/comments:*),Bash(gh api repos/${{ github.repository }}/pulls/${{ github.event.pull_request.number }}/reviews:*)"
+            --allowedTools "Bash(git log:*),Bash(git diff:*),Bash(git show:*),Bash(git status:*)"
+            --allowedTools "Read,Edit(./**),Write(./**),Grep,Glob,mcp__github_file_ops__commit_files,mcp__github_file_ops__delete_files"
+            --disallowedTools "Edit(.git/**),Edit(~/.gitconfig),Edit(~/.config/**),Edit(~/.claude/**),Edit(~/.claude.json),Edit(/${{ runner.temp }}/**),Read(//proc/**)"
 
       # Hard gate: prompt compliance is advisory only. Diff what was actually
       # pushed against the path policy; on violation, revert the branch to
@@ -841,6 +870,25 @@ jobs:
           # in the repository's git config.
           persist-credentials: false
 
+      # The agent reads its instructions and configuration files from the
+      # working tree. Take them from the pull request's base branch, which has
+      # been through review, as the agent action itself does on pull request
+      # events. Paths that do not exist on the base branch are removed.
+      - name: Use agent configuration from the base branch
+        if: steps.pr.outputs.proceed == 'true'
+        env:
+          BASE_REF: ${{ steps.pr.outputs.base_ref }}
+        run: |
+          set -euo pipefail
+          git rev-parse --verify --quiet "refs/remotes/origin/$BASE_REF" > /dev/null \
+            || { echo "::error::base branch is not available in the checkout"; exit 1; }
+          PATHS=(.claude .mcp.json .claude.json .gitmodules .ripgreprc CLAUDE.md CLAUDE.local.md .husky)
+          for p in "${PATHS[@]}"; do
+            rm -rf -- "$p"
+            git checkout "origin/$BASE_REF" -- "$p" 2> /dev/null || true
+          done
+          git reset --quiet -- "${PATHS[@]}" 2> /dev/null || true
+
       # Parse denied_paths, validate every pattern, and build the prompt
       # snippet. Fails closed: invalid patterns skip the run with a PR
       # comment instead of running unrestricted. Same logic as the
@@ -1023,6 +1071,10 @@ jobs:
           steps.policy.outputs.valid == 'true' &&
           (steps.policy.outputs.enforce != 'true' || steps.before.outcome == 'success')
         uses: anthropics/claude-code-action@4845bacbb38b3c4b15d948f035349786f678e068 # v1.0.267
+        env:
+          # Commands the agent starts do not receive the model API credential.
+          # GH_TOKEN is kept, so gh keeps working.
+          CLAUDE_CODE_SUBPROCESS_ENV_SCRUB: '1'
         with:
           anthropic_api_key: ${{ secrets.CLAUDE_API_KEY }}
           # No allowed_bots here: on repository_dispatch the action skips its
@@ -1049,6 +1101,8 @@ jobs:
             ASSESS:
             1. Find the failing check(s):
                `gh api repos/${{ github.repository }}/commits/${{ steps.pr.outputs.head_sha }}/check-runs`
+               and, for a check's annotations,
+               `gh api repos/${{ github.repository }}/check-runs/<id>/annotations`.
                For Actions-based failures, read the real output with
                `gh run list --commit ${{ steps.pr.outputs.head_sha }}` and
                `gh run view <run-id> --log-failed`.
@@ -1071,8 +1125,8 @@ jobs:
                the tag "[claude-autofix]". Example:
                `fix(build): add missing import in payment service [claude-autofix]`
                The tag is required for loop-prevention accounting.
-            5. Post a short `gh pr comment` summarizing what was broken and what
-               you fixed.
+            5. Post a short `gh pr comment ${{ steps.pr.outputs.pr_number }} --body "..."`
+               summarizing what was broken and what you fixed.
 
             Rules:
             - Do not force-push.
@@ -1086,11 +1140,33 @@ jobs:
               cap alone would never catch it). A human removes the label once
               they've intervened.
 
+            TOOLS:
+            You can read and edit files and run only the gh and git commands
+            shown above, in the forms shown (PR number first). Any other command
+            is denied; do not retry a denied command in another form. You cannot
+            install dependencies or run tests, builds, linters or scripts in
+            this job. Work from the feedback, the logs and the source. If a fix
+            cannot be made with confidence without running something, say so in
+            your comment and apply the label as described.
+
             ${{ steps.policy.outputs.prompt_block }}
+          # The agent gets a fixed set of commands: reading this pull request
+          # and its check results, commenting, labelling, and read-only git. It
+          # has no general shell, so nothing from the repository is installed,
+          # built or run in this job. Settings, hooks and MCP servers are taken
+          # only from this workflow, not from the repository.
+          # File edits are limited to the repository's working tree, outside
+          # its git metadata; the runner's own tool configuration is not
+          # writable.
           claude_args: |
             --model ${{ inputs.model }}
             --max-turns 60
-            --allowedTools "Bash,Read,Edit,Write,Grep,Glob,mcp__github_file_ops__commit_files,mcp__github_file_ops__delete_files"
+            --setting-sources user
+            --strict-mcp-config
+            --allowedTools "Bash(gh pr view ${{ steps.pr.outputs.pr_number }}:*),Bash(gh pr diff ${{ steps.pr.outputs.pr_number }}:*),Bash(gh pr checks ${{ steps.pr.outputs.pr_number }}:*),Bash(gh pr comment ${{ steps.pr.outputs.pr_number }}:*),Bash(gh pr edit ${{ steps.pr.outputs.pr_number }} --add-label ${{ env.STOP_LABEL }}:*),Bash(gh api repos/${{ github.repository }}/commits/${{ steps.pr.outputs.head_sha }}/check-runs:*),Bash(gh api repos/${{ github.repository }}/check-runs/*),Bash(gh run list:*),Bash(gh run view:*)"
+            --allowedTools "Bash(git log:*),Bash(git diff:*),Bash(git show:*),Bash(git status:*)"
+            --allowedTools "Read,Edit(./**),Write(./**),Grep,Glob,mcp__github_file_ops__commit_files,mcp__github_file_ops__delete_files"
+            --disallowedTools "Edit(.git/**),Edit(~/.gitconfig),Edit(~/.config/**),Edit(~/.claude/**),Edit(~/.claude.json),Edit(/${{ runner.temp }}/**),Read(//proc/**)"
 
       # Hard gate: see the note on the fix-review-feedback job's step of the
       # same name. Reverts policy-violating pushes, comments, and applies the
