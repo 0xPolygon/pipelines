@@ -77,6 +77,19 @@ jobs:
     outputs:
       has_changesets: ${{ steps.changesets.outputs.hasChangesets }}
     steps:
+      # Fail before anything else runs unless this is a push to the default
+      # branch. The guard comes from this workflow's own commit; the checkout
+      # below clears the workspace, so this copy is gone before changesets runs.
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+        with:
+          repository: ${{ job.workflow_repository }}
+          ref: ${{ job.workflow_sha }}
+          path: .pipelines-guard
+          sparse-checkout: .github/actions/release-guard
+          persist-credentials: false
+
+      - uses: ./.pipelines-guard/.github/actions/release-guard
+
       # Checkout with the default read-only job token and do not persist it
       # to .git/config: nothing after this step pushes over git (changesets
       # github-api mode writes through the API with the app token below).
@@ -114,7 +127,7 @@ jobs:
       # the pipelines checkout must be gone before it runs or it would land in
       # the Version Packages commit.
       - name: Remove the pipelines checkout
-        run: rm -rf .pipelines
+        run: rm -rf .pipelines .pipelines-guard
 
       # Frozen: the lockfile committed at the release-PR merge commit is the
       # one the release must install. `changeset version` leaves
@@ -239,8 +252,12 @@ jobs:
           repository: ${{ job.workflow_repository }}
           ref: ${{ job.workflow_sha }}
           path: .pipelines
-          sparse-checkout: .github/actions/npm-publish-tarballs
+          sparse-checkout: |
+            .github/actions/release-guard
+            .github/actions/npm-publish-tarballs
           persist-credentials: false
+
+      - uses: ./.pipelines/.github/actions/release-guard
 
       - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
         with:
@@ -266,6 +283,19 @@ jobs:
     permissions:
       contents: write # tags and GitHub Releases
     steps:
+      # Fail before anything else runs unless this is a push to the default
+      # branch. The guard comes from this workflow's own commit; the checkout
+      # below clears the workspace, so this copy is gone before changesets runs.
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+        with:
+          repository: ${{ job.workflow_repository }}
+          ref: ${{ job.workflow_sha }}
+          path: .pipelines-guard
+          sparse-checkout: .github/actions/release-guard
+          persist-credentials: false
+
+      - uses: ./.pipelines-guard/.github/actions/release-guard
+
       # Same checkout as the version job: read-only job token, not persisted.
       - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4.3.1
         with:
