@@ -97,7 +97,7 @@ allow_entries() {
 EXPR='\$\{\{ [^}]+ \}\}'
 REPO='\$\{\{ github\.repository \}\}'
 ALLOW_RE="^(Bash\\(gh pr (view|diff|checks|comment) ${EXPR}:\\*\\)"
-ALLOW_RE="${ALLOW_RE}|Bash\\(gh pr edit ${EXPR} --add-label \\\$\\{\\{ env\\.STOP_LABEL \\}\\}( --repo ${REPO})?\\)"
+ALLOW_RE="${ALLOW_RE}|Bash\\(gh pr edit ${EXPR} --add-label \\\$\\{\\{ env\\.STOP_LABEL \\}\\}\\)"
 ALLOW_RE="${ALLOW_RE}|Bash\\(gh api repos/${REPO}/pulls/\\\$\\{\\{ github\\.event\\.pull_request\\.number \\}\\}/(comments|reviews) --paginate\\)"
 ALLOW_RE="${ALLOW_RE}|Bash\\(gh api repos/${REPO}/commits/${EXPR}/check-runs:\\*\\)"
 ALLOW_RE="${ALLOW_RE}|Bash\\(gh api repos/${REPO}/check-runs/\\*\\)"
@@ -173,6 +173,16 @@ check "A1 each --disallowedTools line includes Edit(~/.config/**)" 0 \
   "$(nc | grep -- '--disallowedTools' | grep -cvF 'Edit(~/.config/**)' || true)"
 check "A1 each --disallowedTools line includes Edit(.git/**)" 0 \
   "$(nc | grep -- '--disallowedTools' | grep -cvF 'Edit(.git/**)' || true)"
+for pat in 'Bash(gh pr * --repo*)' 'Bash(gh pr * -R *)' 'Bash(gh run * --repo*)' 'Bash(gh run * -R *)'; do
+  check "R1 each --disallowedTools line includes $pat" 0 \
+    "$(nc | grep -- '--disallowedTools' | grep -cvF "$pat" || true)"
+done
+check "R1 no --allowedTools line carries --repo or -R" 0 \
+  "$(nc | grep -- '--allowedTools' | grep -cE -- '--repo| -R ' || true)"
+for pat in 'Bash(cd *)' 'Bash(pushd *)' 'Bash(git -C *)' 'Bash(git -c *)' 'Bash(git --git-dir*)' 'Bash(git --work-tree*)' 'Bash(git --exec-path*)'; do
+  check "N1 each --disallowedTools line includes $pat" 0 \
+    "$(nc | grep -- '--disallowedTools' | grep -cvF "$pat" || true)"
+done
 for pat in 'Edit(**/.git)' 'Edit(**/.git/**)' 'Bash(git *--output*)' 'Bash(gh pr comment *--body-file*)' 'Bash(gh pr comment * -F*)'; do
   check "B2/M1/m4 each --disallowedTools line includes $pat" 0 \
     "$(nc | grep -- '--disallowedTools' | grep -cvF "$pat" || true)"
