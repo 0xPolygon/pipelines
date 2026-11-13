@@ -2,15 +2,17 @@
 //
 // manifest.json is an array of { name, version, file, sha256, access, tag }.
 // Every entry is verified (fields well-formed, file inside the directory,
-// SHA-256 matches, the tarball's own name and version match the entry) and the
-// npm client version is checked before the first publish, so a bad manifest
-// publishes nothing. A version already on the registry is skipped. A package
+// SHA-256 matches, the tarball's own name and version match the entry, build
+// provenance attestation checked with `gh attestation verify`) and the npm
+// client version is checked before the first publish, so a bad manifest or an
+// unattested tarball publishes nothing. A version already on the registry is
+// skipped. A package
 // whose publish or registry lookup fails is recorded and the rest continue;
 // the run then exits non-zero listing the failures.
 //
-// No token is read or passed on: npm authenticates with the runner's OIDC
-// identity. Logs name packages and versions only and never print the
-// environment.
+// npm authenticates with the runner's OIDC identity and never sees a token.
+// GH_TOKEN, when set, is passed only to the `gh` child process. Logs name
+// packages and versions only and never print the environment.
 
 import { spawnSync } from 'node:child_process';
 import { createHash } from 'node:crypto';
@@ -47,7 +49,10 @@ const ENTRY_FIELDS = ['name', 'version', 'file', 'sha256', 'access', 'tag'];
 
 /** Runs a command and returns { status, stdout, stderr }. */
 export function defaultRun(command, args) {
-  const result = spawnSync(command, args, { encoding: 'utf8' });
+  // GH_TOKEN is for `gh attestation verify` alone; npm must not inherit it.
+  const { GH_TOKEN, ...rest } = process.env;
+  const env = command === 'gh' ? process.env : rest;
+  const result = spawnSync(command, args, { encoding: 'utf8', env });
   return {
     status: result.status ?? 1,
     stdout: result.stdout ?? '',
@@ -166,6 +171,28 @@ export function verifyTarballIdentity({ path, entry, run = defaultRun }) {
 }
 
 /**
+ * Throws unless `gh attestation verify` accepts the tarball: an attestation
+ * from `repository`, signed by the `signerWorkflow` workflow. A missing `gh`
+ * fails the same way.
+ */
+export function verifyAttestation({ path, entry, repository, signerWorkflow, run = defaultRun }) {
+  const result = run('gh', [
+    'attestation',
+    'verify',
+    path,
+    '--repo',
+    repository,
+    '--signer-workflow',
+    signerWorkflow
+  ]);
+  if (result.status !== 0) {
+    throw new Error(
+      `${entry.name}@${entry.version}: attestation verification failed\n${result.stderr.trim()}`
+    );
+  }
+}
+
+/**
  * True when name@version is on the registry, false when the registry answers
  * 404. Any other lookup failure throws, so it is never read as "not published".
  */
@@ -187,12 +214,21 @@ export function isPublished({ name, version, run = defaultRun }) {
 }
 
 /** Verifies and publishes every entry. Returns { published, skipped, failures }. */
-export function publishAll({ directory, run = defaultRun, log = console.log }) {
+export function publishAll({
+  directory,
+  repository,
+  signerWorkflow,
+  run = defaultRun,
+  log = console.log
+}) {
   checkNpmVersion({ run });
   const manifest = readManifest(directory);
 
   const paths = manifest.map((entry) => verifyEntry({ directory, entry }));
-  manifest.forEach((entry, index) => verifyTarballIdentity({ path: paths[index], entry, run }));
+  manifest.forEach((entry, index) => {
+    verifyTarballIdentity({ path: paths[index], entry, run });
+    verifyAttestation({ path: paths[index], entry, repository, signerWorkflow, run });
+  });
 
   const published = [];
   const skipped = [];
@@ -235,9 +271,15 @@ export function main({ env = process.env, run = defaultRun, log = console.log } 
     log('::error::TARBALL_DIRECTORY is not set');
     return 1;
   }
+  const repository = env.GITHUB_REPOSITORY;
+  const signerWorkflow = env.SIGNER_WORKFLOW;
+  if (!repository || !signerWorkflow) {
+    log('::error::GITHUB_REPOSITORY and SIGNER_WORKFLOW must be set');
+    return 1;
+  }
   let result;
   try {
-    result = publishAll({ directory, run, log });
+    result = publishAll({ directory, repository, signerWorkflow, run, log });
   } catch (err) {
     log(`::error::${err.message}`);
     return 1;

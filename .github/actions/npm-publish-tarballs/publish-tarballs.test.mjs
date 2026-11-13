@@ -46,11 +46,24 @@ function entry(name, overrides = {}, innerExtra = {}) {
 }
 
 /** Fake command runner; records every call. `views` and `publishes` override per package. */
-function fakeRun({ npmVersion = '11.6.0', views = {}, publishes = {} } = {}) {
+function fakeRun({
+  npmVersion = '11.6.0',
+  views = {},
+  publishes = {},
+  attestFails = [],
+  ghMissing = false
+} = {}) {
   const calls = [];
   const run = (command, args) => {
     calls.push([command, ...args]);
     if (command === 'tar') return defaultRun(command, args);
+    if (command === 'gh') {
+      if (ghMissing) return { status: 1, stdout: '', stderr: 'spawn gh ENOENT' };
+      const file = args[2];
+      return attestFails.some((name) => file.endsWith(`${name}-1.0.0.tgz`))
+        ? { status: 1, stdout: '', stderr: 'no matching attestation' }
+        : { status: 0, stdout: '', stderr: '' };
+    }
     if (args[0] === '--version') return { status: 0, stdout: `${npmVersion}\n`, stderr: '' };
     if (args[0] === 'view') {
       const spec = args[1];
@@ -66,6 +79,11 @@ function fakeRun({ npmVersion = '11.6.0', views = {}, publishes = {} } = {}) {
   return { run, calls };
 }
 
+const ctx = {
+  repository: '0xPolygon/example',
+  signerWorkflow: '0xPolygon/pipelines/.github/workflows/apps-npm-release.yml'
+};
+const ghCalls = (calls) => calls.filter((c) => c[0] === 'gh');
 const publishCalls = (calls) => calls.filter((c) => c[1] === 'publish');
 const quiet = () => {};
 
@@ -73,7 +91,7 @@ describe('publishAll', () => {
   it('publishes each entry with its access and tag', () => {
     writeManifest([entry('a'), entry('b', { tag: 'next' })]);
     const { run, calls } = fakeRun();
-    const result = publishAll({ directory: dir, run, log: quiet });
+    const result = publishAll({ ...ctx, directory: dir, run, log: quiet });
     assert.deepEqual(result.failures, []);
     assert.deepEqual(publishCalls(calls), [
       [
@@ -111,7 +129,10 @@ describe('publishAll', () => {
     const bad = entry('b', { sha256: sha('something else') });
     writeManifest([good, bad]);
     const { run, calls } = fakeRun();
-    assert.throws(() => publishAll({ directory: dir, run, log: quiet }), /SHA-256.*does not match/);
+    assert.throws(
+      () => publishAll({ ...ctx, directory: dir, run, log: quiet }),
+      /SHA-256.*does not match/
+    );
     assert.equal(publishCalls(calls).length, 0);
   });
 
@@ -123,7 +144,7 @@ describe('publishAll', () => {
     writeFileSync(join(outDir, 'manifest.json'), JSON.stringify([escaping]));
     const { run, calls } = fakeRun();
     assert.throws(
-      () => publishAll({ directory: outDir, run, log: quiet }),
+      () => publishAll({ ...ctx, directory: outDir, run, log: quiet }),
       /escapes the directory/
     );
     assert.equal(publishCalls(calls).length, 0);
@@ -132,7 +153,7 @@ describe('publishAll', () => {
   it('refuses a missing tarball', () => {
     writeManifest([entry('a', { file: 'nope.tgz' })]);
     const { run, calls } = fakeRun();
-    assert.throws(() => publishAll({ directory: dir, run, log: quiet }), /is missing/);
+    assert.throws(() => publishAll({ ...ctx, directory: dir, run, log: quiet }), /is missing/);
     assert.equal(publishCalls(calls).length, 0);
   });
 
@@ -159,7 +180,7 @@ describe('publishAll', () => {
     const { run, calls } = fakeRun({
       views: { 'a@1.0.0': { status: 0, stdout: '"1.0.0"\n', stderr: '' } }
     });
-    const result = publishAll({ directory: dir, run, log: quiet });
+    const result = publishAll({ ...ctx, directory: dir, run, log: quiet });
     assert.deepEqual(result.skipped, ['a@1.0.0']);
     assert.deepEqual(result.published, ['b@1.0.0']);
     assert.equal(publishCalls(calls).length, 1);
@@ -170,7 +191,7 @@ describe('publishAll', () => {
     const { run, calls } = fakeRun({
       views: { 'a@1.0.0': { status: 1, stdout: '', stderr: 'npm error code ECONNRESET' } }
     });
-    const result = publishAll({ directory: dir, run, log: quiet });
+    const result = publishAll({ ...ctx, directory: dir, run, log: quiet });
     assert.deepEqual(result.failures, ['a@1.0.0']);
     assert.deepEqual(result.published, ['b@1.0.0']);
     assert.equal(publishCalls(calls).length, 1);
@@ -179,7 +200,7 @@ describe('publishAll', () => {
   it('continues past a failed publish and reports the failure', () => {
     writeManifest([entry('a'), entry('b')]);
     const { run, calls } = fakeRun({ publishes: { a: { status: 1, stdout: '', stderr: 'boom' } } });
-    const result = publishAll({ directory: dir, run, log: quiet });
+    const result = publishAll({ ...ctx, directory: dir, run, log: quiet });
     assert.deepEqual(result.failures, ['a@1.0.0']);
     assert.deepEqual(result.published, ['b@1.0.0']);
     assert.equal(publishCalls(calls).length, 2);
@@ -238,8 +259,77 @@ describe('publishAll', () => {
   it('fails before any publish when npm is too old', () => {
     writeManifest([entry('a')]);
     const { run, calls } = fakeRun({ npmVersion: '11.5.0' });
-    assert.throws(() => publishAll({ directory: dir, run, log: quiet }), /11\.5\.1 or later/);
+    assert.throws(
+      () => publishAll({ ...ctx, directory: dir, run, log: quiet }),
+      /11\.5\.1 or later/
+    );
     assert.equal(publishCalls(calls).length, 0);
+  });
+});
+
+const mainEnv = { GITHUB_REPOSITORY: ctx.repository, SIGNER_WORKFLOW: ctx.signerWorkflow };
+
+describe('attestation', () => {
+  it('verifies every entry before the first publish, with repo and signer workflow', () => {
+    writeManifest([entry('a'), entry('b')]);
+    const { run, calls } = fakeRun();
+    publishAll({ ...ctx, directory: dir, run, log: quiet });
+    const firstPublish = calls.findIndex((c) => c[1] === 'publish');
+    const verifyIdx = calls.map((c, i) => (c[0] === 'gh' ? i : -1)).filter((i) => i >= 0);
+    assert.equal(verifyIdx.length, 2);
+    assert.ok(verifyIdx.every((i) => i < firstPublish));
+    assert.deepEqual(ghCalls(calls)[0], [
+      'gh',
+      'attestation',
+      'verify',
+      join(dir, 'a-1.0.0.tgz'),
+      '--repo',
+      ctx.repository,
+      '--signer-workflow',
+      ctx.signerWorkflow
+    ]);
+  });
+
+  it('publishes nothing when one verification fails', () => {
+    writeManifest([entry('a'), entry('b')]);
+    const { run, calls } = fakeRun({ attestFails: ['b'] });
+    assert.throws(
+      () => publishAll({ ...ctx, directory: dir, run, log: quiet }),
+      /b@1\.0\.0: attestation verification failed/
+    );
+    assert.equal(publishCalls(calls).length, 0);
+  });
+
+  it('fails when gh is not available', () => {
+    writeManifest([entry('a')]);
+    const { run, calls } = fakeRun({ ghMissing: true });
+    assert.throws(() => publishAll({ ...ctx, directory: dir, run, log: quiet }), /attestation/);
+    assert.equal(publishCalls(calls).length, 0);
+  });
+
+  it('exits non-zero from main on a failed verification', () => {
+    writeManifest([entry('a')]);
+    const { run, calls } = fakeRun({ attestFails: ['a'] });
+    const code = main({ env: { ...mainEnv, TARBALL_DIRECTORY: dir }, run, log: quiet });
+    assert.equal(code, 1);
+    assert.equal(publishCalls(calls).length, 0);
+  });
+
+  it('exits non-zero from main when the repository or signer is unset', () => {
+    writeManifest([entry('a')]);
+    const { run, calls } = fakeRun();
+    assert.equal(main({ env: { TARBALL_DIRECTORY: dir }, run, log: quiet }), 1);
+    assert.equal(calls.length, 0);
+  });
+
+  it('passes GH_TOKEN to gh only, never to npm', () => {
+    const probe = ['-e', 'process.stdout.write(process.env.GH_TOKEN ?? "none")'];
+    process.env.GH_TOKEN = 'tok';
+    try {
+      assert.equal(defaultRun('node', probe).stdout, 'none');
+    } finally {
+      delete process.env.GH_TOKEN;
+    }
   });
 });
 
@@ -248,7 +338,11 @@ describe('main', () => {
     writeManifest([entry('a')]);
     const { run } = fakeRun({ publishes: { a: { status: 1, stdout: '', stderr: 'boom' } } });
     const lines = [];
-    const code = main({ env: { TARBALL_DIRECTORY: dir }, run, log: (l) => lines.push(l) });
+    const code = main({
+      env: { ...mainEnv, TARBALL_DIRECTORY: dir },
+      run,
+      log: (l) => lines.push(l)
+    });
     assert.equal(code, 1);
     assert.match(lines.join('\n'), /Failed to publish: a@1\.0\.0/);
   });
@@ -258,7 +352,7 @@ describe('main', () => {
     const { run } = fakeRun();
     const lines = [];
     const code = main({
-      env: { TARBALL_DIRECTORY: dir, SOME_SECRET: 'hunter2' },
+      env: { ...mainEnv, TARBALL_DIRECTORY: dir, SOME_SECRET: 'hunter2' },
       run,
       log: (l) => lines.push(l)
     });

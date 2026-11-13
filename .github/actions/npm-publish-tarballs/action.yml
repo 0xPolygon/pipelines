@@ -2,17 +2,24 @@ name: Publish npm tarballs
 description: >
   Publishes the tarballs listed in `<directory>/manifest.json` with the npm
   client on the runner's PATH. Before any publish it checks that every
-  tarball exists inside the directory and matches its recorded SHA-256, and
-  that the npm client is new enough for OIDC trusted publishing. A version
+  tarball exists inside the directory, matches its recorded SHA-256 and has a
+  build provenance attestation from this repository signed by the signer
+  workflow, and that the npm client is new enough for OIDC trusted publishing. A version
   already on the registry is skipped. A failed package does not stop the
   others; the step exits non-zero and lists the failures. Needs no checkout
-  and no install, and handles no token: authentication is the runner's OIDC
-  identity.
+  and no install. npm authenticates with the runner's OIDC identity; the
+  workflow token reaches only the attestation check.
 
 inputs:
   directory:
     description: Directory holding the tarballs and their manifest.json.
     required: true
+  signer-workflow:
+    description: >
+      Workflow that must have signed each tarball's attestation, as
+      `<owner>/<repo>/<path>`. Defaults to the shared release workflow.
+    required: false
+    default: 0xPolygon/pipelines/.github/workflows/apps-npm-release.yml
 
 runs:
   using: composite
@@ -24,4 +31,8 @@ runs:
         # expression injection if the path contains special characters.
         ACTION_PATH: ${{ github.action_path }}
         TARBALL_DIRECTORY: ${{ inputs.directory }}
+        SIGNER_WORKFLOW: ${{ inputs.signer-workflow }}
+        GITHUB_REPOSITORY: ${{ github.repository }}
+        # Read by `gh attestation verify` only; the script keeps it from npm.
+        GH_TOKEN: ${{ github.token }}
       run: node "$ACTION_PATH/publish-tarballs.mjs"
