@@ -233,6 +233,14 @@ jobs:
     if: inputs.snapshot_tag == '' && needs.build.outputs.has_tarballs == 'true'
     runs-on: ubuntu-latest
     timeout-minutes: 20
+    # The environment's reviewers approve the publish. A repository that
+    # publishes public packages must configure `npm-publish` with required
+    # reviewers, self-review prevented, no administrator bypass, and
+    # deployment limited to the default branch. A job that names a missing
+    # environment makes GitHub create one with no protection, and the publish
+    # then runs without approval. The name is fixed (npm trust configs pin
+    # it). A release with nothing public skips this job and asks no approval.
+    environment: npm-publish
     permissions:
       id-token: write # npm OIDC trusted publishing
     steps:
