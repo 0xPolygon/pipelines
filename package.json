@@ -26,7 +26,10 @@
     "ci:publish": "pnpm exec changeset publish",
     "test:npm-release": "bash scripts/test-tag-step.sh",
     "test:slack-pr-merged": "bash scripts/test-slack-pr-merged.sh",
-    "test": "pnpm run test:slack-pr-merged"
+    "test:actions": "node --test \".github/actions/**/*.test.mjs\"",
+    "test:publish-environment": "bash scripts/test-check-publish-environment.sh",
+    "test:npm-release-workflow": "bash scripts/test-npm-release-workflow.sh",
+    "test": "pnpm run test:slack-pr-merged && pnpm run test:actions && pnpm run test:publish-environment && pnpm run test:npm-release-workflow"
   },
   "devDependencies": {
     "@changesets/cli": "^2.30.0",
@@ -45,6 +48,7 @@
     "lint-staged": "^16.2.7",
     "markdownlint-cli2": "^0.21.0",
     "prettier": "^3.0.0",
-    "typescript": "^5.0.0"
+    "typescript": "^5.0.0",
+    "yaml": "2.8.2"
   }
 }

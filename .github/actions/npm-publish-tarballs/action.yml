@@ -1,0 +1,27 @@
+name: Publish npm tarballs
+description: >
+  Publishes the tarballs listed in `<directory>/manifest.json` with the npm
+  client on the runner's PATH. Before any publish it checks that every
+  tarball exists inside the directory and matches its recorded SHA-256, and
+  that the npm client is new enough for OIDC trusted publishing. A version
+  already on the registry is skipped. A failed package does not stop the
+  others; the step exits non-zero and lists the failures. Needs no checkout
+  and no install, and handles no token: authentication is the runner's OIDC
+  identity.
+
+inputs:
+  directory:
+    description: Directory holding the tarballs and their manifest.json.
+    required: true
+
+runs:
+  using: composite
+  steps:
+    - name: Publish tarballs
+      shell: bash
+      env:
+        # Assign github.action_path to an env var before shell use to prevent
+        # expression injection if the path contains special characters.
+        ACTION_PATH: ${{ github.action_path }}
+        TARBALL_DIRECTORY: ${{ inputs.directory }}
+      run: node "$ACTION_PATH/publish-tarballs.mjs"

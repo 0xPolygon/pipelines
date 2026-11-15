@@ -1,0 +1,53 @@
+name: Pack unpublished packages
+description: >
+  Packs every public workspace package whose current version is not on the
+  npm registry into tarballs, and writes `manifest.json` beside them (name,
+  version, file, sha256, access, tag). For each package it runs
+  `prepublishOnly` (if present) and `pnpm pack`. Packages that resolve to
+  restricted access fail the step. Expects the caller to have checked out the
+  repo, set up pnpm and Node, and installed dependencies. Holds no publish
+  credential and publishes nothing. It removes the `.pipelines` checkout of
+  this repository from the workspace before packing and fails when a tarball
+  contains it. A package that sets `publishConfig.registry` to anything other
+  than the public npm registry (including a scoped `<scope>:registry`) fails
+  the step. The root package is packed only for a single-package repository
+  or when the workspace globs list the root (`.`), as changesets does. Each
+  manifest entry carries the package `directory` relative to the repository root.
+
+inputs:
+  out-dir:
+    description: Directory the tarballs and manifest.json are written to. Use a path outside the checkout.
+    required: true
+  dist-tag:
+    description: Overrides the dist-tag recorded for every package. Empty uses the tag changesets would choose.
+    required: false
+    default: ''
+
+outputs:
+  has_tarballs:
+    description: "'true' when at least one tarball was packed."
+    value: ${{ steps.pack.outputs.has_tarballs }}
+  count:
+    description: Number of tarballs packed.
+    value: ${{ steps.pack.outputs.count }}
+
+runs:
+  using: composite
+  steps:
+    - name: Pack unpublished public packages
+      id: pack
+      shell: bash
+      env:
+        # Inputs and the action path are assigned to env vars before shell use
+        # to prevent expression injection.
+        ACTION_PATH: ${{ github.action_path }}
+        PACK_OUT_DIR: ${{ inputs.out-dir }}
+        PACK_DIST_TAG: ${{ inputs.dist-tag }}
+      run: |
+        # The script is copied out and the workflow checkout removed first:
+        # `pnpm pack` includes every file of a package whose directory is the
+        # workspace root, so nothing but the repository itself may be there.
+        script_dir="$(mktemp -d "$RUNNER_TEMP/npm-pack.XXXXXX")"
+        cp "$ACTION_PATH/pack-packages.mjs" "$script_dir/"
+        rm -rf "$GITHUB_WORKSPACE/.pipelines"
+        node "$script_dir/pack-packages.mjs"

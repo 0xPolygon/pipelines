@@ -1,0 +1,19 @@
+name: Release guard
+description: >
+  Fails unless the workflow run is a push to the repository's default branch.
+  Put it before any step of a release job that holds or can reach a write or
+  publish credential.
+
+runs:
+  using: composite
+  steps:
+    - name: Assert release context
+      shell: bash
+      env:
+        # Context values are assigned to env vars before shell use to prevent
+        # expression injection.
+        ACTION_PATH: ${{ github.action_path }}
+        EVENT_NAME: ${{ github.event_name }}
+        REF: ${{ github.ref }}
+        DEFAULT_BRANCH: ${{ github.event.repository.default_branch }}
+      run: node "$ACTION_PATH/assert-release-context.mjs"
