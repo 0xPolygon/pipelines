@@ -1,0 +1,7 @@
+name: ship
+description: Publishes the packages.
+runs:
+  using: composite
+  steps:
+    - run: pnpm publish -r
+      shell: bash

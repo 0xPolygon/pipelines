@@ -1,0 +1,9 @@
+name: caller on release
+on:
+  release:
+    types: [published]
+permissions:
+  id-token: write
+jobs:
+  go:
+    uses: ./.github/workflows/publisher.yml

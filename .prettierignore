@@ -11,3 +11,6 @@ pnpm-lock.yaml
 .github/workflows/npm_build_deploy_default.yaml
 .github/workflows/security-build.yml
 Support/
+
+# Release-conformance fixtures include deliberately unusual or broken YAML
+packages/release-conformance/test/fixtures/

@@ -1,0 +1,13 @@
+{
+  "compilerOptions": {
+    "module": "ESNext",
+    "moduleResolution": "Bundler",
+    "target": "ES2022",
+    "strict": true,
+    "esModuleInterop": true,
+    "skipLibCheck": true,
+    "rewriteRelativeImportExtensions": true,
+    "lib": ["ES2022"]
+  },
+  "include": ["src/**/*.ts"]
+}

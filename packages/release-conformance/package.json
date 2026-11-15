@@ -1,0 +1,9 @@
+{
+  "name": "release-conformance",
+  "version": "1.0.0",
+  "private": true,
+  "type": "module",
+  "dependencies": {
+    "yaml": "2.8.2"
+  }
+}

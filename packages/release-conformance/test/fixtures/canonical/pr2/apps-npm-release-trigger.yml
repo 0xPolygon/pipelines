@@ -1,0 +1,47 @@
+name: Release Trigger
+
+on:
+  # Standard release on merge to the default branch. The reusable workflow
+  # runs `version` (changesets release PR), then once that PR merges `build`
+  # (pack tarballs), `publish` (approval-gated npm publish) and `finalize`
+  # (git tags and GitHub Releases). Releases run only from a push to the
+  # default branch.
+  push:
+    branches: [main]
+  # Snapshot publish: bumps versions on the runner only and publishes under
+  # a custom dist-tag via OIDC. Use to ship a *throwaway* prerelease that a
+  # downstream consumer can install ahead of the matching real release.
+  # Must not be a semver-shaped value (`3.9.8`, `v3.9.8`, `3.9.8-beta.1`):
+  # the snapshot path bypasses lockfile commit, git tag, and GitHub Release
+  # creation. The reusable workflow validates and aborts on semver input.
+  workflow_dispatch:
+    inputs:
+      snapshot_tag:
+        description: 'npm dist-tag for snapshot (e.g. canary, pre-3.9.8). Non-semver values only.'
+        required: false
+        default: 'snapshot'
+
+permissions:
+  contents: write
+  pull-requests: write
+  # The called workflow's jobs each narrow these further. `id-token` is used
+  # by `attest` (signing), `publish` and `snapshot` (npm OIDC trusted
+  # publishing); the
+  # `publish` job also needs a protected `npm-publish` environment in this
+  # repository (see the README, "npm release: what a consuming repository
+  # must configure").
+  id-token: write # required for npm OIDC trusted publishing
+  attestations: write # the attest job stores build provenance attestations
+
+jobs:
+  release:
+    uses: ./.github/workflows/apps-npm-release.yml
+    # `snapshot_tag` is empty on the `push` event (no `inputs.snapshot_tag`
+    # to forward), so the reusable workflow runs the standard release job.
+    # On `workflow_dispatch`, `inputs.snapshot_tag` is forwarded and the
+    # reusable workflow runs the snapshot job instead.
+    with:
+      snapshot_tag: ${{ inputs.snapshot_tag || '' }}
+    secrets:
+      CHANGESET_RELEASE_BOT_APP_ID: ${{ secrets.CHANGESET_RELEASE_BOT_APP_ID }}
+      CHANGESET_RELEASE_BOT_APP_PRIVATE_KEY: ${{ secrets.CHANGESET_RELEASE_BOT_APP_PRIVATE_KEY }}

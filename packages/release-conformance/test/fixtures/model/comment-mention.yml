@@ -1,0 +1,15 @@
+name: comments only mention a publish command
+on:
+  push:
+    branches: [main]
+permissions:
+  contents: read
+  id-token: write
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      # npm publish is handled elsewhere
+      - run: |
+          # never run npm publish here
+          echo "building" # npm publish would go here

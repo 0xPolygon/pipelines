@@ -1,0 +1,21 @@
+name: on as a map
+on:
+  push:
+    branches: [main]
+    paths:
+      - 'src/**'
+  pull_request:
+    types: [opened, synchronize]
+  workflow_dispatch:
+    inputs:
+      first_input:
+        required: false
+      second_input:
+        required: false
+  schedule:
+    - cron: '0 3 * * *'
+jobs:
+  noop:
+    runs-on: ubuntu-latest
+    steps:
+      - run: echo hello

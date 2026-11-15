@@ -1,0 +1,7 @@
+name: on as a string
+on: push
+jobs:
+  noop:
+    runs-on: ubuntu-latest
+    steps:
+      - run: echo hello

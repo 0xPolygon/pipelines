@@ -1,0 +1,21 @@
+name: job permissions override top-level
+on: push
+permissions:
+  contents: write
+  id-token: write
+jobs:
+  narrow:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    steps:
+      - run: echo narrow
+  inherits:
+    runs-on: ubuntu-latest
+    steps:
+      - run: echo inherits
+  empty:
+    runs-on: ubuntu-latest
+    permissions: {}
+    steps:
+      - run: echo empty
