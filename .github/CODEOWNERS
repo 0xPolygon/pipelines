@@ -41,6 +41,7 @@
 
 /packages/                                     @0xPolygon/product-applications
 /scripts/                                      @0xPolygon/product-applications
+/scripts/test-slack-pr-merged.sh               @0xPolygon/devops
 /.changeset/                                   @0xPolygon/product-applications
 /.husky/                                       @0xPolygon/product-applications
 /.claude/                                      @0xPolygon/product-applications
