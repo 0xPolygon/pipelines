@@ -23,7 +23,12 @@ import {
 } from './canonical.ts';
 import { createScriptReader } from './package-scripts.ts';
 import { linkedParent, readRegularFile } from './safe-read.ts';
-import { analyzeShell, normalizeShell, stripShellComments } from './shell-commands.ts';
+import {
+  analyzeShell,
+  isPublishWord,
+  normalizeShell,
+  stripShellComments
+} from './shell-commands.ts';
 import {
   MAX_WORKFLOW_BYTES,
   NPM_TOKEN_KEYS,
@@ -54,6 +59,8 @@ const PRINTERS = new Set(['echo', 'printf']);
 const RUNNER_WORD = /^(?:exec|dlx|x|run|changesets?|lerna|npm|@changesets\/cli(?:@\S*)?)$/;
 /** Anything on a line that turns printed text into something that runs, or reads it as a command. */
 const RUNS_PRINTED_TEXT = /\$\(|`|(?:^|[^\w-])(?:eval|xargs)(?![\w-])/;
+/** Output sent somewhere (`>`, `>>`, `>(…)`), but not a descriptor copy such as `2>&1`. */
+const REDIRECTS_OUTPUT = />(?!&)/;
 const SCRIPT_RUNNERS = new Set(['pnpm', 'yarn', 'bun']);
 const LEADING_PUNCTUATION = new Set(['(', '{', '$', '"', "'", '`']);
 const TRAILING_PUNCTUATION = new Set([')', '}', '"', "'", '`']);
@@ -116,31 +123,35 @@ export const textPublishHits = (text: string): TextHits => {
       const tokens = (parts[at] ?? '').split(/\s+/);
       const printer = PRINTERS.has(segmentCommand(tokens));
       const piped = parts[at + 1] === '|';
+      const redirected = printer && REDIRECTS_OUTPUT.test(line);
       for (let index = 0; index < tokens.length; index += 1) {
         const tool = bareWord(tokens[index] ?? '');
         if (!PUBLISH_TOOL.test(tool)) continue;
+        // Flags, the values flags take, and `$VAR` words may all sit before the word that matters; the
+        // run ends at the next tool, so every token is read once.
         let next = index + 1;
-        let afterFlagWithoutValue = false;
-        while ((tokens[next] ?? '').startsWith('-')) {
-          afterFlagWithoutValue = !(tokens[next] ?? '').includes('=');
+        let afterFlag = false;
+        while (next < tokens.length) {
+          const token = tokens[next] ?? '';
+          // `publish` is never a flag's value: a flag the check does not know cannot hide it.
+          if (isPublishWord(bareWord(token))) break;
+          if (token.startsWith('-')) afterFlag = !token.includes('=');
+          else if (token.startsWith('$') || afterFlag) afterFlag = false;
+          else break;
+          if (PUBLISH_TOOL.test(bareWord(token))) break;
           next += 1;
         }
         const word = bareWord(tokens[next] ?? '');
         let hit: 'sure' | 'word' | undefined;
-        if (word === 'publish') hit = 'sure';
-        else if (word !== '') {
+        if (isPublishWord(word)) hit = 'sure';
+        else if (word !== '' && !PUBLISH_TOOL.test(word)) {
           let after = next + 1;
           while ((tokens[after] ?? '').startsWith('-')) after += 1;
-          if (bareWord(tokens[after] ?? '') === 'publish')
-            hit =
-              RUNNER_WORD.test(word) ||
-              afterFlagWithoutValue ||
-              (tokens[next] ?? '').startsWith('$')
-                ? 'sure'
-                : 'word';
+          if (isPublishWord(bareWord(tokens[after] ?? '')))
+            hit = RUNNER_WORD.test(word) ? 'sure' : 'word';
         }
         if (hit === undefined) continue;
-        if (printer && !lineRuns && !piped) hits.printed = true;
+        if (printer && !lineRuns && !piped && !redirected) hits.printed = true;
         else if (hit === 'sure' || printer) hits.confirmed = true;
         else hits.unknownWord.push({ tool, word });
       }

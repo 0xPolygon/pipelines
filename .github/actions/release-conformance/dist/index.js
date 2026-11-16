@@ -9058,6 +9058,12 @@ const stripShellComments = (text) => {
  * across lines in one piece.
  */
 const normalizeShell = (text) => stripShellComments(text.replace(/\\\r?\n/g, ' '));
+/**
+ * True for the word `publish`, alone or with shell syntax glued to it (`publish>out.log`, `publish<<<y`,
+ * `publish\n` inside printed text). A name that merely starts with it (`publishConfig`, `publish-please`,
+ * `publish:docs`) is not. A single anchored test, so the cost is linear in the word.
+ */
+const isPublishWord = (word) => /^publish(?:[^A-Za-z0-9_:-]|$)/.test(word);
 const noFacts = () => ({ publishes: false, runsCode: false, scripts: [] });
 const merge = (into, from) => {
     if (from.publishes)
@@ -9377,7 +9383,7 @@ const classify = ({ words, dirs, depth = 0 }) => {
     if (BINARY_RUNNERS.has(name))
         return classifyExec({ rest, dirs, depth });
     if (name === 'changeset' || name === 'changesets' || CHANGESETS_CLI.test(first)) {
-        return { ...noFacts(), publishes: firstWord(rest) === 'publish' };
+        return { ...noFacts(), publishes: isPublishWord(firstWord(rest) ?? '') };
     }
     if (WRAPPER_VALUE_FLAGS.has(name))
         return inner(wrappedCommand({ name, rest }));
@@ -9472,11 +9478,11 @@ const classifyManager = ({ manager, rest, dirs, depth }) => {
     }
     if (sub === 'foreach' || sub === 'workspaces')
         wide = true;
-    if (sub === 'publish') {
+    if (isPublishWord(sub)) {
         facts.publishes = true;
         return facts;
     }
-    if (WRAPPING_SUBCOMMANDS.has(sub) && words.slice(1).includes('publish')) {
+    if (WRAPPING_SUBCOMMANDS.has(sub) && words.slice(1).some(isPublishWord)) {
         facts.publishes = true;
         return facts;
     }
@@ -9517,7 +9523,7 @@ const classifyManager = ({ manager, rest, dirs, depth }) => {
     const known = BUILTIN_COMMANDS.has(sub) || RUN_SUBCOMMANDS.has(sub) || EXEC_SUBCOMMANDS.has(sub);
     // npm and lerna take no bare script or binary name, so a word before `publish` can only be the
     // value of a flag this parser does not know (`npm --tag beta publish`); `publish` still publishes.
-    if (!known && (manager === 'npm' || manager === 'lerna') && words.includes('publish')) {
+    if (!known && (manager === 'npm' || manager === 'lerna') && words.some(isPublishWord)) {
         facts.publishes = true;
         return facts;
     }
@@ -9888,6 +9894,8 @@ const PRINTERS = new Set(['echo', 'printf']);
 const RUNNER_WORD = /^(?:exec|dlx|x|run|changesets?|lerna|npm|@changesets\/cli(?:@\S*)?)$/;
 /** Anything on a line that turns printed text into something that runs, or reads it as a command. */
 const RUNS_PRINTED_TEXT = /\$\(|`|(?:^|[^\w-])(?:eval|xargs)(?![\w-])/;
+/** Output sent somewhere (`>`, `>>`, `>(…)`), but not a descriptor copy such as `2>&1`. */
+const REDIRECTS_OUTPUT = />(?!&)/;
 const SCRIPT_RUNNERS = new Set(['pnpm', 'yarn', 'bun']);
 const LEADING_PUNCTUATION = new Set(['(', '{', '$', '"', "'", '`']);
 const TRAILING_PUNCTUATION = new Set([')', '}', '"', "'", '`']);
@@ -9941,35 +9949,44 @@ const textPublishHits = (text) => {
             const tokens = (parts[at] ?? '').split(/\s+/);
             const printer = PRINTERS.has(segmentCommand(tokens));
             const piped = parts[at + 1] === '|';
+            const redirected = printer && REDIRECTS_OUTPUT.test(line);
             for (let index = 0; index < tokens.length; index += 1) {
                 const tool = bareWord(tokens[index] ?? '');
                 if (!PUBLISH_TOOL.test(tool))
                     continue;
+                // Flags, the values flags take, and `$VAR` words may all sit before the word that matters; the
+                // run ends at the next tool, so every token is read once.
                 let next = index + 1;
-                let afterFlagWithoutValue = false;
-                while ((tokens[next] ?? '').startsWith('-')) {
-                    afterFlagWithoutValue = !(tokens[next] ?? '').includes('=');
+                let afterFlag = false;
+                while (next < tokens.length) {
+                    const token = tokens[next] ?? '';
+                    // `publish` is never a flag's value: a flag the check does not know cannot hide it.
+                    if (isPublishWord(bareWord(token)))
+                        break;
+                    if (token.startsWith('-'))
+                        afterFlag = !token.includes('=');
+                    else if (token.startsWith('$') || afterFlag)
+                        afterFlag = false;
+                    else
+                        break;
+                    if (PUBLISH_TOOL.test(bareWord(token)))
+                        break;
                     next += 1;
                 }
                 const word = bareWord(tokens[next] ?? '');
                 let hit;
-                if (word === 'publish')
+                if (isPublishWord(word))
                     hit = 'sure';
-                else if (word !== '') {
+                else if (word !== '' && !PUBLISH_TOOL.test(word)) {
                     let after = next + 1;
                     while ((tokens[after] ?? '').startsWith('-'))
                         after += 1;
-                    if (bareWord(tokens[after] ?? '') === 'publish')
-                        hit =
-                            RUNNER_WORD.test(word) ||
-                                afterFlagWithoutValue ||
-                                (tokens[next] ?? '').startsWith('$')
-                                ? 'sure'
-                                : 'word';
+                    if (isPublishWord(bareWord(tokens[after] ?? '')))
+                        hit = RUNNER_WORD.test(word) ? 'sure' : 'word';
                 }
                 if (hit === undefined)
                     continue;
-                if (printer && !lineRuns && !piped)
+                if (printer && !lineRuns && !piped && !redirected)
                     hits.printed = true;
                 else if (hit === 'sure' || printer)
                     hits.confirmed = true;

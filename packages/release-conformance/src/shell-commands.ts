@@ -75,6 +75,13 @@ export interface ShellFacts {
   tooDeep?: boolean;
 }
 
+/**
+ * True for the word `publish`, alone or with shell syntax glued to it (`publish>out.log`, `publish<<<y`,
+ * `publish\n` inside printed text). A name that merely starts with it (`publishConfig`, `publish-please`,
+ * `publish:docs`) is not. A single anchored test, so the cost is linear in the word.
+ */
+export const isPublishWord = (word: string): boolean => /^publish(?:[^A-Za-z0-9_:-]|$)/.test(word);
+
 const noFacts = (): ShellFacts => ({ publishes: false, runsCode: false, scripts: [] });
 
 const merge = (into: ShellFacts, from: ShellFacts): void => {
@@ -406,7 +413,7 @@ const classify = ({
   if (PACKAGE_MANAGERS.has(name)) return classifyManager({ manager: name, rest, dirs, depth });
   if (BINARY_RUNNERS.has(name)) return classifyExec({ rest, dirs, depth });
   if (name === 'changeset' || name === 'changesets' || CHANGESETS_CLI.test(first)) {
-    return { ...noFacts(), publishes: firstWord(rest) === 'publish' };
+    return { ...noFacts(), publishes: isPublishWord(firstWord(rest) ?? '') };
   }
   if (WRAPPER_VALUE_FLAGS.has(name)) return inner(wrappedCommand({ name, rest }));
   if (SHELL_NAMES.has(name)) return inner(shellCommandString(rest));
@@ -519,11 +526,11 @@ const classifyManager = ({
     return facts;
   }
   if (sub === 'foreach' || sub === 'workspaces') wide = true;
-  if (sub === 'publish') {
+  if (isPublishWord(sub)) {
     facts.publishes = true;
     return facts;
   }
-  if (WRAPPING_SUBCOMMANDS.has(sub) && words.slice(1).includes('publish')) {
+  if (WRAPPING_SUBCOMMANDS.has(sub) && words.slice(1).some(isPublishWord)) {
     facts.publishes = true;
     return facts;
   }
@@ -561,7 +568,7 @@ const classifyManager = ({
   const known = BUILTIN_COMMANDS.has(sub) || RUN_SUBCOMMANDS.has(sub) || EXEC_SUBCOMMANDS.has(sub);
   // npm and lerna take no bare script or binary name, so a word before `publish` can only be the
   // value of a flag this parser does not know (`npm --tag beta publish`); `publish` still publishes.
-  if (!known && (manager === 'npm' || manager === 'lerna') && words.includes('publish')) {
+  if (!known && (manager === 'npm' || manager === 'lerna') && words.some(isPublishWord)) {
     facts.publishes = true;
     return facts;
   }
