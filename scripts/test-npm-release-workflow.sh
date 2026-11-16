@@ -239,7 +239,7 @@ const have = pubSteps.map(stepUses);
 check('publish steps are exactly the allowlist, in order', json(have) === json(want), json(have));
 const stepKeys = pubSteps.flatMap((st, i) => Object.keys(st).filter((k) => !['uses', 'with', 'name', 'id'].includes(k)).map((k) => `step${i}.${k}`));
 check('publish steps carry only uses/with/name/id (no run, if, env, shell)', stepKeys.length === 0, stepKeys.join(' '));
-const jobKeys = Object.keys(jobs.publish ?? {}).filter((k) => !['needs', 'if', 'runs-on', 'timeout-minutes', 'environment', 'permissions', 'steps'].includes(k));
+const jobKeys = Object.keys(jobs.publish ?? {}).filter((k) => !['needs', 'if', 'runs-on', 'timeout-minutes', 'environment', 'concurrency', 'permissions', 'steps'].includes(k));
 check('publish job carries only the expected keys', jobKeys.length === 0, jobKeys.join(' '));
 check('publish environment is npm-publish', jobs.publish?.environment === 'npm-publish');
 const dl = pubSteps.findIndex((st) => stepUses(st) === 'actions/download-artifact');
@@ -273,6 +273,23 @@ const fin = jobs.finalize?.steps ?? [];
 const cli = fin.findIndex((st) => stepUses(st)?.endsWith('/check-changesets-cli'));
 const act = fin.findIndex((st) => stepUses(st) === 'changesets/action');
 check('finalize checks @changesets/cli before changesets/action, unconditionally', cli >= 0 && act > cli && !('if' in fin[cli]));
+// Ordered publishes: the lock is on the publish job only.
+const conc = jobs.publish?.concurrency;
+check('publish concurrency: group per repository and ref', conc?.group === 'npm-publish-${{ github.repository }}-${{ github.ref }}', json(conc));
+check('publish concurrency: cancel-in-progress false and queue max', conc?.['cancel-in-progress'] === false && conc?.queue === 'max', json(conc));
+const concElsewhere = ['version', 'build', 'finalize', 'snapshot'].filter((n) => 'concurrency' in (jobs[n] ?? {}));
+check('no concurrency on version, build, finalize or snapshot', concElsewhere.length === 0, concElsewhere.join(' '));
+check('no workflow-level concurrency', !('concurrency' in wf), json(wf.concurrency));
+
+// Latest Release: recorded before changesets/action, corrected after it.
+const isScript = (st, needle) => stepUses(st) === 'actions/github-script' && String(st.with?.script ?? '').includes(needle);
+const rec = fin.findIndex((st) => isScript(st, 'recordLatest'));
+const fix = fin.findIndex((st) => isScript(st, 'correctLatest'));
+check('finalize records Latest before changesets/action', rec >= 0 && rec < act, `record at ${rec}, changesets/action at ${act}`);
+check('finalize corrects Latest once, after changesets/action', fix > act && fin.filter((st) => isScript(st, 'correctLatest')).length === 1, `correct at ${fix}, changesets/action at ${act}`);
+check('finalize passes the recorded Latest to the correction through env, not the script text', !/steps\./.test(String(fin[fix]?.with?.script ?? '')) && /previous-latest\.outputs\.previous-id/.test(fin[fix]?.env?.PREVIOUS_LATEST_ID ?? ''));
+check('finalize permissions stay contents: write only', json(jobs.finalize?.permissions) === json({ contents: 'write' }), json(jobs.finalize?.permissions));
+
 const art = Object.values(jobs.build?.steps ?? []).find((st) => stepUses(st) === 'actions/upload-artifact');
 check('artifact retention is 7 days', art?.with?.['retention-days'] === 7, String(art?.with?.['retention-days']));
 // Version hook: opt-in input, confined to the version job, after the guard,

@@ -103,6 +103,15 @@ describe('resolveDistTag', () => {
       preState: { tag: 'beta' }
     });
     assert.equal(out[0]?.tag, 'latest');
+    assert.equal(out[0]?.preTag, 'beta');
+  });
+
+  it('records no preTag outside pre mode', async () => {
+    const out = await selectUnpublished({
+      packages: [pkg('a', '1.0.0')],
+      lookupVersions: async () => null
+    });
+    assert.equal('preTag' in out[0], false);
   });
 
   it('is the pre tag in pre mode when a regular release exists', async () => {
@@ -182,6 +191,20 @@ describe('manifest and pack', () => {
     ]);
   });
 
+  it('records the pre-mode tag as preTag only when the package has one', () => {
+    const base = { file: 'a.tgz', sha256: 'abc', access: 'public', directory: 'packages/a' };
+    const pre = buildManifestEntry({
+      pkg: { ...pkg('a', '1.0.0-beta.1'), tag: 'latest', preTag: 'beta' },
+      ...base
+    });
+    assert.equal(pre.preTag, 'beta');
+    assert.equal(pre.tag, 'latest');
+    assert.equal(
+      'preTag' in buildManifestEntry({ pkg: { ...pkg('a', '1.0.0'), tag: 'latest' }, ...base }),
+      false
+    );
+  });
+
   it('runs prepublishOnly then pack per package and hashes the tarball', async () => {
     const out = mkdtempSync(join(tmpdir(), 'pack-out-'));
     writeFileSync(join(out, 'a-1.0.0.tgz'), 'tarball-bytes');
@@ -250,6 +273,7 @@ describe('workspace fixture', () => {
     });
     const manifest = JSON.parse(readFileSync(join(out, 'manifest.json'), 'utf8'));
     assert.equal(manifest[0].tag, 'beta');
+    assert.equal(manifest[0].preTag, 'beta');
     assert.match(readFileSync(ghOutput, 'utf8'), /has_tarballs=true\ncount=1/);
   });
 });

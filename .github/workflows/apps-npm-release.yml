@@ -266,6 +266,22 @@ jobs:
     # configs pin it). A release with nothing public skips this job and asks
     # no approval.
     environment: npm-publish
+    # One publish at a time per repository and ref, in the order the runs
+    # started waiting. A run awaiting approval holds the group, so approvals
+    # given out of order still publish one after another, and each publish
+    # reads the registry's current `latest` when its turn comes. `queue: max`
+    # keeps up to 100 waiting publishes in first-in, first-out order; without
+    # it a third run would cancel the pending one and its version would stay
+    # unpublished. cancel-in-progress stays false (`queue: max` is invalid with
+    # true) so a running publish is never cut off. The lock is on this job only:
+    # the version job and releases with nothing public to publish (a
+    # service-only tag release) must not wait behind an approval. finalize
+    # needs no lock because its Latest Release correction reads current state
+    # and gives the same result in any order.
+    concurrency:
+      group: npm-publish-${{ github.repository }}-${{ github.ref }}
+      cancel-in-progress: false
+      queue: max
     permissions:
       id-token: write # npm OIDC trusted publishing
     steps:
@@ -354,10 +370,22 @@ jobs:
           repository: ${{ job.workflow_repository }}
           ref: ${{ job.workflow_sha }}
           path: .pipelines
-          sparse-checkout: .github/actions/check-changesets-cli
+          sparse-checkout: |
+            .github/actions/check-changesets-cli
+            .github/actions/correct-latest-release
           persist-credentials: false
 
       - uses: ./.pipelines/.github/actions/check-changesets-cli
+
+      # GitHub marks each Release it creates as Latest. Record which Release
+      # holds Latest now, before changesets/action creates any, so it can be
+      # put back if an older version's Release takes it.
+      - uses: actions/github-script@ed597411d8f924073f98dfc5c65a23a2325f34cd # v8.0.0
+        id: previous-latest
+        with:
+          script: |
+            const { recordLatest } = require('./.pipelines/.github/actions/correct-latest-release/correct-latest-release.cjs');
+            await recordLatest({ github, context, core });
 
       - name: Remove the pipelines checkout
         run: rm -rf .pipelines
@@ -384,6 +412,37 @@ jobs:
           createGithubReleases: true
         env:
           GITHUB_TOKEN: ${{ steps.app-token.outputs.token }}
+
+      # A Release is never left as Latest unless it is the highest stable
+      # version of its own package: when this run's Releases took Latest from
+      # the recorded holder and the new Latest is older, or a prerelease,
+      # Latest goes back to the recorded Release. Reads current state only,
+      # so it needs no lock and gives the same result in any run order.
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+        with:
+          repository: ${{ job.workflow_repository }}
+          ref: ${{ job.workflow_sha }}
+          path: .pipelines
+          sparse-checkout: .github/actions/correct-latest-release
+          persist-credentials: false
+
+      - uses: actions/github-script@ed597411d8f924073f98dfc5c65a23a2325f34cd # v8.0.0
+        env:
+          PREVIOUS_LATEST_ID: ${{ steps.previous-latest.outputs.previous-id }}
+          PREVIOUS_LATEST_TAG: ${{ steps.previous-latest.outputs.previous-tag }}
+        with:
+          script: |
+            const { correctLatest } = require('./.pipelines/.github/actions/correct-latest-release/correct-latest-release.cjs');
+            await correctLatest({
+              github,
+              context,
+              core,
+              previousId: process.env.PREVIOUS_LATEST_ID,
+              previousTag: process.env.PREVIOUS_LATEST_TAG
+            });
+
+      - name: Remove the pipelines checkout
+        run: rm -rf .pipelines
 
       # Verifies the end state rather than the action's outputs: every
       # package that was published has a git tag and a GitHub Release. Fails when a

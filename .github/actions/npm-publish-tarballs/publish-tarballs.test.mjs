@@ -7,7 +7,12 @@ import { join } from 'node:path';
 import { afterEach, beforeEach, describe, it } from 'node:test';
 
 import {
+  compareSemver,
   defaultRun,
+  fetchLatest,
+  parseSemver,
+  PREVIOUS_TAG,
+  resolvePublishTag,
   isStagedOutput,
   main,
   meetsMinimum,
@@ -86,16 +91,26 @@ const integrityOf = (name) => sha512Integrity(readFileSync(join(dir, `${name}-1.
  * Fake registry + clock: `answers[name]` is a list of responses served in
  * order (the last repeats); `sleeps` records requested waits without waiting.
  */
-function fakeNet(answers = {}) {
+function fakeNet(answers = {}, packageDocs = {}) {
   const urls = [];
+  const docUrls = [];
   const sleeps = [];
   const served = {};
   const fetchFn = async (url, init) => {
-    urls.push({ url, init });
-    const name = decodeURIComponent(url.replace('https://registry.npmjs.org/', '').split('/')[0]);
+    const path = url.replace('https://registry.npmjs.org/', '');
+    const name = decodeURIComponent(path.split('/')[0]);
+    if (!path.includes('/')) {
+      // A package document (dist-tags), asked before each publish; it does
+      // not count as a version-document round.
+      const doc = packageDocs[name] ?? { status: 200, body: '{"dist-tags":{}}' };
+      docUrls.push({ url, init });
+      if (doc.fail) throw doc.fail;
+      return { status: doc.status, json: async () => JSON.parse(doc.body) };
+    }
     const list = answers[name] ?? [{ status: 200, integrity: integrityOf(name) }];
     const index = Math.min(served[name] ?? 0, list.length - 1);
     served[name] = (served[name] ?? 0) + 1;
+    urls.push({ url, init });
     const { status, integrity, fail, body, noIntegrity } = list[index];
     if (fail) throw fail;
     return {
@@ -113,11 +128,11 @@ function fakeNet(answers = {}) {
     sleeps.push(ms);
     clock += ms;
   };
-  return { fetchFn, sleep, now, urls, sleeps };
+  return { fetchFn, sleep, now, urls, docUrls, sleeps };
 }
 /** Default network for tests that do not care: every package visible, matching. */
-const net = () => {
-  const { fetchFn, sleep, now } = fakeNet();
+const net = (answers, packageDocs) => {
+  const { fetchFn, sleep, now } = fakeNet(answers, packageDocs);
   return { fetchFn, sleep, now };
 };
 
@@ -475,7 +490,8 @@ describe('shared read-back deadline', () => {
         return run(command, args);
       },
       fetchFn: (...a) => {
-        order.push('fetch');
+        // The pre-publish package document is not a read-back.
+        if (a[0].replace('https://registry.npmjs.org/', '').includes('/')) order.push('fetch');
         return network.fetchFn(...a);
       },
       sleep: network.sleep,
@@ -682,5 +698,274 @@ describe('meetsMinimum', () => {
     assert.equal(meetsMinimum('11.10.0', '11.5.1'), true);
     assert.equal(meetsMinimum('10.9.9', '11.5.1'), false);
     assert.equal(meetsMinimum('garbage', '11.5.1'), false);
+  });
+});
+
+describe('compareSemver', () => {
+  // The ordering example from the semver 2.0 specification, lowest first.
+  const ordered = [
+    '1.0.0-alpha',
+    '1.0.0-alpha.1',
+    '1.0.0-alpha.beta',
+    '1.0.0-beta',
+    '1.0.0-beta.2',
+    '1.0.0-beta.11',
+    '1.0.0-rc.1',
+    '1.0.0',
+    '2.0.0',
+    '2.1.0',
+    '2.1.1'
+  ];
+  it('orders the semver 2.0 specification example', () => {
+    for (let i = 0; i < ordered.length; i++) {
+      for (let j = 0; j < ordered.length; j++) {
+        assert.equal(
+          Math.sign(compareSemver(ordered[i], ordered[j])),
+          Math.sign(i - j),
+          `${ordered[i]} vs ${ordered[j]}`
+        );
+      }
+    }
+  });
+  it('compares numbers numerically, not as text', () => {
+    assert.ok(compareSemver('1.10.0', '1.9.0') > 0);
+    assert.ok(compareSemver('1.0.0-pre.10', '1.0.0-pre.9') > 0);
+  });
+  it('ignores build metadata', () => {
+    assert.equal(compareSemver('1.0.0+a', '1.0.0+b'), 0);
+  });
+  it('rejects a malformed version', () => {
+    assert.equal(parseSemver('not-a-version'), null);
+    assert.throws(() => compareSemver('1.0', '1.0.0'), /cannot compare/);
+  });
+});
+
+describe('resolvePublishTag', () => {
+  const tag = (version, latest, recordedTag = 'latest') =>
+    resolvePublishTag({ version, recordedTag, latest });
+  it('gives a stable version above latest the latest tag', () => {
+    assert.equal(tag('3.9.1', '3.9.0'), 'latest');
+    assert.equal(tag('4.0.0', '3.9.0'), 'latest');
+  });
+  it('gives an older stable version the previous tag', () => {
+    assert.equal(tag('3.8.2', '3.9.0'), PREVIOUS_TAG);
+    assert.equal(PREVIOUS_TAG, 'previous');
+  });
+  it('gives an equal stable version the previous tag', () => {
+    assert.equal(tag('3.9.0', '3.9.0'), PREVIOUS_TAG);
+  });
+  it('gives a first publish (no latest) the latest tag', () => {
+    assert.equal(tag('1.0.0', null), 'latest');
+    assert.equal(tag('1.0.0', undefined), 'latest');
+  });
+  it('keeps the recorded pre tag for a prerelease, even above the stable latest', () => {
+    assert.equal(tag('4.0.0-pre.3', '3.9.0', 'pre'), 'pre');
+  });
+  const preTag = (version, recordedTag, pre, latest = '3.9.0') =>
+    resolvePublishTag({ version, recordedTag, preTag: pre, latest });
+  it('gives a prerelease recorded for latest the pre-mode tag, with or without a registry latest', () => {
+    assert.equal(preTag('4.0.0-beta.3', 'latest', 'beta'), 'beta');
+    assert.equal(preTag('1.0.0-beta.1', 'latest', 'beta', null), 'beta');
+  });
+  it('never gives a prerelease latest: it fails closed without a non-latest tag', () => {
+    assert.throws(() => preTag('4.0.0-beta.3', 'latest', undefined), /never takes "latest"/);
+    assert.throws(() => preTag('1.0.0-beta.1', 'latest', undefined, null), /never takes "latest"/);
+    assert.throws(() => preTag('4.0.0-beta.3', 'latest', 'latest'), /never takes "latest"/);
+  });
+  it('prefers the recorded tag over preTag for a prerelease', () => {
+    assert.equal(preTag('4.0.0-beta.3', 'next', 'beta'), 'next');
+  });
+  it('respects an explicit override recorded by npm-pack', () => {
+    assert.equal(tag('3.9.1', '3.9.0', 'canary'), 'canary');
+    assert.equal(tag('3.8.0', '3.9.0', 'canary'), 'canary');
+  });
+  it('lets a stable version replace a prerelease latest, even a semver-higher one', () => {
+    assert.equal(tag('3.9.1', '4.0.0-pre.2'), 'latest');
+    assert.equal(tag('4.0.0', '4.0.0-pre.2'), 'latest');
+  });
+  it('gives a prerelease its pre tag when the registry latest is a prerelease', () => {
+    assert.equal(tag('4.0.0-pre.3', '4.0.0-pre.2', 'pre'), 'pre');
+  });
+  it('rejects a malformed version', () => {
+    assert.throws(() => tag('nope', '1.0.0'), /not a semver/);
+  });
+});
+
+describe('fetchLatest', () => {
+  const respond = (status, body) => async () => ({ status, json: async () => JSON.parse(body) });
+  it('reads dist-tags.latest', async () => {
+    assert.equal(
+      await fetchLatest({ name: 'a', fetchFn: respond(200, '{"dist-tags":{"latest":"3.9.0"}}') }),
+      '3.9.0'
+    );
+  });
+  it('treats 404 and a missing latest as no latest', async () => {
+    assert.equal(await fetchLatest({ name: 'a', fetchFn: respond(404, '{}') }), null);
+    assert.equal(
+      await fetchLatest({
+        name: 'a',
+        fetchFn: respond(200, '{"dist-tags":{"next":"1.0.0-next.1"}}')
+      }),
+      null
+    );
+  });
+  it('asks the public registry without credentials', async () => {
+    let seen;
+    await fetchLatest({
+      name: '@scope/a',
+      fetchFn: async (url, init) => {
+        seen = { url, init };
+        return { status: 404, json: async () => ({}) };
+      }
+    });
+    assert.equal(seen.url, 'https://registry.npmjs.org/%40scope%2Fa');
+    assert.deepEqual(Object.keys(seen.init.headers), ['accept']);
+  });
+  it('fails closed on a non-404 error, a network error and a malformed document', async () => {
+    await assert.rejects(fetchLatest({ name: 'a', fetchFn: respond(503, '{}') }), /answered 503/);
+    await assert.rejects(
+      fetchLatest({
+        name: 'a',
+        fetchFn: async () => {
+          throw new Error('boom');
+        }
+      }),
+      /failed: boom/
+    );
+    await assert.rejects(fetchLatest({ name: 'a', fetchFn: respond(200, '{}') }), /no dist-tags/);
+    await assert.rejects(
+      fetchLatest({ name: 'a', fetchFn: respond(200, '{"dist-tags":{"latest":"junk"}}') }),
+      /malformed latest/
+    );
+    await assert.rejects(
+      fetchLatest({
+        name: 'a',
+        fetchFn: async () => ({
+          status: 200,
+          json: async () => {
+            throw new Error('x');
+          }
+        })
+      }),
+      /not valid JSON/
+    );
+  });
+});
+
+describe('dist-tag at publish time', () => {
+  const tagOf = (calls, index = 0) => {
+    const args = publishCalls(calls)[index];
+    return args[args.indexOf('--tag') + 1];
+  };
+  const docs = (latest) => ({ status: 200, body: JSON.stringify({ 'dist-tags': { latest } }) });
+
+  it('publishes a version above the registry latest with --tag latest', async () => {
+    writeManifest([entry('a', { version: '3.9.1' })]);
+    const { run, calls } = fakeRun();
+    const result = await publishAll({
+      directory: dir,
+      ...net({}, { a: docs('3.9.0') }),
+      run,
+      log: quiet
+    });
+    assert.deepEqual(result.failures, []);
+    assert.equal(tagOf(calls), 'latest');
+  });
+
+  it('publishes an older stable version with --tag previous, and the read-back accepts it', async () => {
+    writeManifest([entry('a', { version: '3.8.2' })]);
+    const { run, calls } = fakeRun();
+    const lines = [];
+    const result = await publishAll({
+      directory: dir,
+      ...net({}, { a: docs('3.9.0') }),
+      run,
+      log: (l) => lines.push(l)
+    });
+    assert.equal(tagOf(calls), 'previous');
+    assert.deepEqual(result.failures, []);
+    assert.deepEqual(result.published, ['a@3.8.2']);
+    assert.ok(lines.some((l) => /Published a@3\.8\.2 with tag previous; read back/.test(l)));
+  });
+
+  it('publishes a prerelease recorded for latest under the manifest preTag', async () => {
+    writeManifest([entry('a', { version: '1.0.0-beta.2', tag: 'latest', preTag: 'beta' })]);
+    const { run, calls } = fakeRun();
+    const result = await publishAll({
+      directory: dir,
+      ...net({}, { a: docs('1.0.0-beta.1') }),
+      run,
+      log: quiet
+    });
+    assert.deepEqual(result.failures, []);
+    assert.equal(tagOf(calls), 'beta');
+  });
+
+  it('fails a prerelease recorded for latest with no preTag, publishing nothing', async () => {
+    writeManifest([entry('a', { version: '1.0.0-beta.2', tag: 'latest' })]);
+    const { run, calls } = fakeRun();
+    const result = await publishAll({ directory: dir, ...net(), run, log: quiet });
+    assert.deepEqual(result.failures, ['a@1.0.0-beta.2']);
+    assert.equal(publishCalls(calls).length, 0);
+  });
+
+  it('keeps the recorded pre tag for a prerelease above the stable latest', async () => {
+    writeManifest([entry('a', { version: '4.0.0-pre.3', tag: 'pre' })]);
+    const { run, calls } = fakeRun();
+    await publishAll({ directory: dir, ...net({}, { a: docs('3.9.0') }), run, log: quiet });
+    assert.equal(tagOf(calls), 'pre');
+  });
+
+  it('publishes a first publish (404 package document) with --tag latest', async () => {
+    writeManifest([entry('a')]);
+    const { run, calls } = fakeRun();
+    await publishAll({
+      directory: dir,
+      ...net({}, { a: { status: 404, body: '{}' } }),
+      run,
+      log: quiet
+    });
+    assert.equal(tagOf(calls), 'latest');
+  });
+
+  it('keeps an explicit override recorded by npm-pack', async () => {
+    writeManifest([entry('a', { version: '3.8.2', tag: 'canary' })]);
+    const { run, calls } = fakeRun();
+    await publishAll({ directory: dir, ...net({}, { a: docs('3.9.0') }), run, log: quiet });
+    assert.equal(tagOf(calls), 'canary');
+  });
+
+  it('fails closed on a registry error: that package is not published, the others are', async () => {
+    writeManifest([entry('a'), entry('b')]);
+    const { run, calls } = fakeRun();
+    const result = await publishAll({
+      directory: dir,
+      ...net({}, { a: { status: 503, body: '{}' } }),
+      run,
+      log: quiet
+    });
+    assert.deepEqual(result.failures, ['a@1.0.0']);
+    assert.deepEqual(result.published, ['b@1.0.0']);
+    assert.equal(publishCalls(calls).length, 1);
+  });
+
+  it('fails closed on a malformed package document', async () => {
+    writeManifest([entry('a')]);
+    const { run, calls } = fakeRun();
+    const result = await publishAll({
+      directory: dir,
+      ...net({}, { a: { status: 200, body: '{"name":"a"}' } }),
+      run,
+      log: quiet
+    });
+    assert.deepEqual(result.failures, ['a@1.0.0']);
+    assert.equal(publishCalls(calls).length, 0);
+  });
+
+  it('never adds or removes a dist-tag after publishing', async () => {
+    writeManifest([entry('a', { version: '3.8.2' })]);
+    const { run, calls } = fakeRun();
+    await publishAll({ directory: dir, ...net({}, { a: docs('3.9.0') }), run, log: quiet });
+    assert.ok(calls.every((c) => c[1] !== 'dist-tag'));
   });
 });

@@ -162,7 +162,13 @@ export async function selectUnpublished({ packages, lookupVersions, preState, ov
           ? 'only-pre'
           : 'published';
     }
-    selected.push({ ...pkg, tag: resolveDistTag({ preState, publishedState, override }) });
+    selected.push({
+      ...pkg,
+      tag: resolveDistTag({ preState, publishedState, override }),
+      // Recorded so publish can still give a prerelease the pre tag when
+      // `tag` is `latest` (a package whose versions so far are all prereleases).
+      ...(preState === undefined ? {} : { preTag: preState.tag })
+    });
   }
   return selected;
 }
@@ -226,7 +232,18 @@ export function assertNpmRegistry({ selected }) {
 // `directory` is the package directory relative to the repository root; the
 // finalize job reads it to find the package's CHANGELOG.md.
 export function buildManifestEntry({ pkg, file, sha256, access, directory }) {
-  return { name: pkg.name, version: pkg.version, file, sha256, access, tag: pkg.tag, directory };
+  const entry = {
+    name: pkg.name,
+    version: pkg.version,
+    file,
+    sha256,
+    access,
+    tag: pkg.tag,
+    directory
+  };
+  // `preTag` is the pre-mode tag from .changeset/pre.json; absent outside pre mode.
+  if (pkg.preTag !== undefined) entry.preTag = pkg.preTag;
+  return entry;
 }
 
 // Registry lookup through `npm info`, the same call changesets makes
