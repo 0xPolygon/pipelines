@@ -280,6 +280,37 @@ const skipAssignment = ({ words, index }: { words: string[]; index: number }): n
   return next;
 };
 
+/**
+ * Unquotes words one by one, but reads a quoted `NAME="a b"` value from the raw words first: once the
+ * quotes are stripped the end of the value can no longer be found, and `PATH="$PATH"` would swallow
+ * the rest of the line. Each assignment becomes a single word without quotes.
+ */
+const unquoteWords = (raw: string[]): string[] => {
+  const out: string[] = [];
+  let index = 0;
+  while (index < raw.length) {
+    const token = raw[index] ?? '';
+    if (!ASSIGNMENT.test(token)) {
+      out.push(unquote(token));
+      index += 1;
+      continue;
+    }
+    const next = skipAssignment({ words: raw, index });
+    out.push(
+      raw
+        .slice(index, next)
+        .map((word, at) =>
+          at === 0
+            ? word.slice(0, word.indexOf('=') + 1) + unquote(word.slice(word.indexOf('=') + 1))
+            : unquote(word)
+        )
+        .join(' ')
+    );
+    index = next;
+  }
+  return out;
+};
+
 /** Words of one command with leading shell keywords, variable assignments and wrappers removed. */
 const commandWords = (segment: string): string[] => {
   const raw = segment
@@ -300,7 +331,7 @@ const commandWords = (segment: string): string[] => {
     }
     break;
   }
-  return raw.slice(index).map(unquote);
+  return unquoteWords(raw.slice(index));
 };
 
 const basename = (word: string): string => word.replace(/^.*\//, '');

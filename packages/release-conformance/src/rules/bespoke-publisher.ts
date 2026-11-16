@@ -350,7 +350,7 @@ const unclassifiedNotices = ({
             ruleId: POSSIBLE_PUBLISH_RULE,
             model: params.model,
             line: job.line,
-            message: `Job \`${job.id}\` holds \`id-token: write\` and has a command that looks like a package publish the check cannot confirm; reword it as \`<package manager> publish\` if it publishes, or ask a code owner to waive this finding if it does not.${unresolvedNote(info)}`
+            message: `Job \`${job.id}\` holds \`id-token: write\` and names a package publish in text the check cannot confirm runs one (printed text, or a word between the tool and \`publish\` that may be a script name); a publish written as \`<package manager> publish\` is a publisher without a waiver, so reword it if it publishes, or ask a code owner to waive this finding if it does not.${unresolvedNote(info)}`
           })
         ];
       }

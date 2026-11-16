@@ -48,34 +48,23 @@ const CALLEE_PUBLISH_ACTION = '.github/actions/npm-publish-tarballs';
 
 /** The tools whose `publish` subcommand publishes a package. */
 const PUBLISH_TOOL = /^(?:npm|pnpm|yarn|lerna|bun|changesets?|@changesets\/cli(?:@[^\s]*)?)$/;
-/** Commands that only print their arguments, so a quoted `npm publish` after them is text, not a command. */
+/** Commands that only print their arguments, so a publish named in their text is not a command. */
 const PRINTERS = new Set(['echo', 'printf']);
-/** Commands that run the string they are given, so a quoted publish after them still runs. */
-const STRING_EXECUTORS = new Set([
-  'bash',
-  'sh',
-  'zsh',
-  'dash',
-  'ksh',
-  'eval',
-  'su',
-  'ssh',
-  'watch'
-]);
+/** A word between the tool and `publish` that still means the tool publishes (it names another runner). */
+const RUNNER_WORD = /^(?:exec|dlx|x|run|changesets?|lerna|npm|@changesets\/cli(?:@\S*)?)$/;
+/** Anything on a line that turns printed text into something that runs, or reads it as a command. */
+const RUNS_PRINTED_TEXT = /\$\(|`|(?:^|[^\w-])(?:eval|xargs)(?![\w-])/;
+const SCRIPT_RUNNERS = new Set(['pnpm', 'yarn', 'bun']);
 const LEADING_PUNCTUATION = new Set(['(', '{', '$', '"', "'", '`']);
 const TRAILING_PUNCTUATION = new Set([')', '}', '"', "'", '`']);
 
 /** Trims shell openers and quotes from both ends of a word, by index so the cost is linear in its length. */
-const bareWord = (token: string): { word: string; opensQuote: boolean } => {
+const bareWord = (token: string): string => {
   let start = 0;
   let end = token.length;
-  let opensQuote = false;
-  while (start < end && LEADING_PUNCTUATION.has(token[start] ?? '')) {
-    if (token[start] === '"' || token[start] === "'" || token[start] === '`') opensQuote = true;
-    start += 1;
-  }
+  while (start < end && LEADING_PUNCTUATION.has(token[start] ?? '')) start += 1;
   while (end > start && TRAILING_PUNCTUATION.has(token[end - 1] ?? '')) end -= 1;
-  return { word: token.slice(start, end), opensQuote };
+  return token.slice(start, end);
 };
 
 /** The name of the command a tokenised segment runs, past variable assignments and shell keywords. */
@@ -95,63 +84,81 @@ const segmentCommand = (tokens: string[]): string => {
   ]);
   for (const token of tokens) {
     if (token === '' || skipped.has(token) || /^[A-Za-z_][A-Za-z0-9_]*=/.test(token)) continue;
-    return bareWord(token).word.replace(/^.*\//, '');
+    return bareWord(token).replace(/^.*\//, '');
   }
   return '';
 };
 
-/** Tracks whether a run of words is inside an open quote, one word at a time. */
-const nextQuoteState = ({
-  quote,
-  token
-}: {
-  quote: string | undefined;
-  token: string;
-}): string | undefined => {
-  let state = quote;
-  for (const char of token) {
-    if (state === undefined) {
-      if (char === '"' || char === "'") state = char;
-    } else if (char === state) state = undefined;
-  }
-  return state;
-};
+/** What the text-level test found: publishes it is sure of, and words that might still be one. */
+export interface TextHits {
+  confirmed: boolean;
+  /** A publish named only as printed text. */
+  printed: boolean;
+  /** `<tool> <word> publish` where the word is not known to run the tool: the word may be a script name. */
+  unknownWord: { tool: string; word: string }[];
+}
 
 /**
- * Text-level publish test, the second opinion beside the command parser. `publish` counts only as the
- * word right after `npm`, `pnpm`, `yarn`, `lerna`, `bun`, `changeset(s)` or `@changesets/cli`
- * (flags may sit between), never after another binary name and not inside a quoted argument of a
- * command that only prints (`echo "skipping npm publish"`). It reads each command as a list of words
- * in one pass, so its cost is linear in the text however the text is built.
+ * Text-level publish test, the second opinion beside the command parser. Any tool word (`npm`, `pnpm`,
+ * `yarn`, `lerna`, `bun`, `changeset(s)`, `@changesets/cli`) followed by flags and then `publish`, in
+ * any command, quoted string or heredoc, is a publish: the text cannot say what runs the string, so it
+ * fails closed. One word may sit between the tool and `publish`; it keeps the hit confirmed when it is
+ * another runner or a flag's possible value, and otherwise leaves a hit for the script lookup. Only an
+ * `echo` or `printf` argument that is not piped, substituted, evaluated or passed to `xargs` is text.
+ * It reads each line as a list of words in one pass, so its cost is linear however the text is built.
  */
-const looseRunsPublish = (text: string): boolean =>
-  text.split(/[\n;&|]/).some((segment) => {
-    const tokens = segment.split(/\s+/);
-    const command = segmentCommand(tokens);
-    if (PRINTERS.has(command)) return false;
-    let quote: string | undefined;
-    for (let index = 0; index < tokens.length; index += 1) {
-      const token = tokens[index] ?? '';
-      const { word, opensQuote } = bareWord(token);
-      const before = quote;
-      quote = nextQuoteState({ quote, token });
-      // A word that opens a quote and closes it again (`"npm" publish`) is not inside a string.
-      const quoted = before !== undefined || (opensQuote && quote !== undefined);
-      if (!PUBLISH_TOOL.test(word) || (quoted && !STRING_EXECUTORS.has(command))) continue;
-      let next = index + 1;
-      while ((tokens[next] ?? '').startsWith('-')) next += 1;
-      if (bareWord(tokens[next] ?? '').word === 'publish') return true;
+export const textPublishHits = (text: string): TextHits => {
+  const hits: TextHits = { confirmed: false, printed: false, unknownWord: [] };
+  for (const line of normalizeShell(text).split('\n')) {
+    const lineRuns = RUNS_PRINTED_TEXT.test(line);
+    const parts = line.split(/([;&|])/);
+    for (let at = 0; at < parts.length; at += 2) {
+      const tokens = (parts[at] ?? '').split(/\s+/);
+      const printer = PRINTERS.has(segmentCommand(tokens));
+      const piped = parts[at + 1] === '|';
+      for (let index = 0; index < tokens.length; index += 1) {
+        const tool = bareWord(tokens[index] ?? '');
+        if (!PUBLISH_TOOL.test(tool)) continue;
+        let next = index + 1;
+        let afterFlagWithoutValue = false;
+        while ((tokens[next] ?? '').startsWith('-')) {
+          afterFlagWithoutValue = !(tokens[next] ?? '').includes('=');
+          next += 1;
+        }
+        const word = bareWord(tokens[next] ?? '');
+        let hit: 'sure' | 'word' | undefined;
+        if (word === 'publish') hit = 'sure';
+        else if (word !== '') {
+          let after = next + 1;
+          while ((tokens[after] ?? '').startsWith('-')) after += 1;
+          if (bareWord(tokens[after] ?? '') === 'publish')
+            hit =
+              RUNNER_WORD.test(word) ||
+              afterFlagWithoutValue ||
+              (tokens[next] ?? '').startsWith('$')
+                ? 'sure'
+                : 'word';
+        }
+        if (hit === undefined) continue;
+        if (printer && !lineRuns && !piped) hits.printed = true;
+        else if (hit === 'sure' || printer) hits.confirmed = true;
+        else hits.unknownWord.push({ tool, word });
+      }
     }
-    return false;
-  });
+  }
+  return hits;
+};
 
 /** Arguments of a tag-only command: plain words and flags, with no quoting or shell syntax. */
 const TAG_ARGUMENT = /^[\w./:@-]+$/;
 const PACKAGE_MANAGERS = new Set(['pnpm', 'npm', 'yarn']);
 const NPM_TOKEN_NAME = /npm/i;
 
-/** True when the text-level test alone sees a publish command in the text. */
-export const textSeesPublish = (text: string): boolean => looseRunsPublish(normalizeShell(text));
+/** True when the text-level test sees any publish, sure or not, in the text. */
+export const textSeesPublish = (text: string): boolean => {
+  const hits = textPublishHits(text);
+  return hits.confirmed || hits.printed || hits.unknownWord.length > 0;
+};
 
 export const runsPublishText = (text: string): boolean =>
   analyzeShell({ text }).publishes || textSeesPublish(text);
@@ -307,8 +314,9 @@ interface ScanEnvironment {
 const scanJob = ({ job, env }: { job: JobModel; env: ScanEnvironment }): JobScan => {
   const runs: string[] = [];
   let publishes = false;
-  /** Only the text-level test saw a publish; the command parser did not confirm one. */
-  let textOnlyPublish = false;
+  /** Text that only names a publish (printed, or a word that may be a script): a person confirms it. */
+  let printedPublish = false;
+  let wordPublish = false;
   let tooDeep = false;
   let runsCode = false;
   let idToken = false;
@@ -322,6 +330,39 @@ const scanJob = ({ job, env }: { job: JobModel; env: ScanEnvironment }): JobScan
     Object.entries(job.withValues).some(([key, expression]) => isNpmTokenRef({ key, expression }))
   )
     npmToken = true;
+
+  /**
+   * The text-level test over any string a job hands to something that may run it. A word between
+   * `pnpm`/`yarn`/`bun` and `publish` that names a package script is decided by that script's body,
+   * one level down; any other word leaves a possible publish.
+   */
+  const noteText = ({
+    text,
+    baseDirs,
+    lookup
+  }: {
+    text: string;
+    baseDirs: string[];
+    lookup: boolean;
+  }): void => {
+    const hits = textPublishHits(text);
+    if (hits.confirmed) publishes = true;
+    if (hits.printed) printedPublish = true;
+    for (const { tool, word } of hits.unknownWord) {
+      const found =
+        lookup && SCRIPT_RUNNERS.has(tool)
+          ? env.reader.lookup({ name: word, dirs: baseDirs, wide: true })
+          : undefined;
+      if (found === undefined || !found.defined) {
+        wordPublish = true;
+        continue;
+      }
+      for (const body of found.bodies) {
+        if (analyzeShell({ text: body }).publishes) publishes = true;
+        noteText({ text: body, baseDirs: [], lookup: false });
+      }
+    }
+  };
 
   const readShell = ({
     text,
@@ -339,7 +380,7 @@ const scanJob = ({ job, env }: { job: JobModel; env: ScanEnvironment }): JobScan
       ...(actionPathVars === undefined ? {} : { actionPathVars })
     });
     if (facts.publishes) publishes = true;
-    else if (textSeesPublish(text)) textOnlyPublish = true;
+    noteText({ text, baseDirs, lookup: true });
     if (facts.tooDeep) tooDeep = true;
     if (facts.runsCode) runsCode = true;
     for (const ref of facts.scripts) {
@@ -349,10 +390,15 @@ const scanJob = ({ job, env }: { job: JobModel; env: ScanEnvironment }): JobScan
       for (const body of found.bodies) {
         const inner = analyzeShell({ text: body });
         if (inner.publishes) publishes = true;
-        else if (textSeesPublish(body)) textOnlyPublish = true;
+        noteText({ text: body, baseDirs: [], lookup: false });
         if (inner.tooDeep) tooDeep = true;
       }
     }
+  };
+
+  const readInput = (value: string, baseDirs: string[]): void => {
+    if (analyzeShell({ text: value, baseDirs }).publishes) publishes = true;
+    noteText({ text: value, baseDirs, lookup: true });
   };
 
   for (const step of job.steps) {
@@ -368,6 +414,9 @@ const scanJob = ({ job, env }: { job: JobModel; env: ScanEnvironment }): JobScan
       npmToken = true;
     if (isChangesetsAction(step.uses?.raw) && changesetsPublishesPackages(step.with))
       publishes = true;
+    // A string handed to an action as an input can be a command the action runs (a retry wrapper's `command`).
+    if (step.uses !== undefined)
+      for (const value of Object.values(step.with)) readInput(value, baseDirs);
     if (step.uses?.local) {
       const read = readLocalAction({
         root: env.root,
@@ -399,12 +448,15 @@ const scanJob = ({ job, env }: { job: JobModel; env: ScanEnvironment }): JobScan
           });
         if (isChangesetsAction(inner.uses) && changesetsPublishesPackages(inner.with))
           publishes = true;
+        if (inner.uses !== undefined)
+          for (const value of Object.values(inner.with)) readInput(value, []);
       }
     }
   }
-  // An npm token in the job keeps the token rules whatever sees the publish; with no token, a
-  // publish only the text test sees is a possible publish for a person to confirm, not a classification.
-  const confirmed = publishes || (textOnlyPublish && npmToken);
+  // A publish the text names with an unknown word is, in a job with an npm token, still a publish for
+  // the token rules; without one it is a possible publish for a person to confirm. Printed text
+  // never classifies a job.
+  const confirmed = publishes || (wordPublish && npmToken);
   return {
     jobId: job.id,
     runText: runs.join('\n'),
@@ -412,7 +464,7 @@ const scanJob = ({ job, env }: { job: JobModel; env: ScanEnvironment }): JobScan
     holdsIdToken: idToken,
     holdsNpmToken: npmToken,
     runsPublishCommand: confirmed,
-    possiblePublish: textOnlyPublish && !confirmed && idToken,
+    possiblePublish: (printedPublish || wordPublish) && !confirmed && idToken,
     commandTooDeep: tooDeep,
     runsRepositoryCode: runsCode,
     unreadableActions: unreadable,

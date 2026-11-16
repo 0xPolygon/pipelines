@@ -285,7 +285,7 @@ Rules for bespoke publishers:
 | `publisher/id-token-with-code` | `id-token: write` is not held by a job that runs repository or dependency code |
 | `publisher/token-with-code` | An npm token is not held by a job that runs repository or dependency code |
 | `publisher/unreadable-local-action` | A job that holds a publishing credential does not use a local action the check cannot read: one outside `.github/actions/`, missing, not a composite action, or using a further local action |
-| `publisher/possible-publish` | A job that holds `id-token: write` has no command that looks like a package publish (`npm`, `pnpm`, `yarn`, `lerna`, `bun` or `changeset publish`) that the check cannot confirm as one; the job is not treated as a publisher, so a code-owner-reviewed marker may waive it |
+| `publisher/possible-publish` | A job that holds `id-token: write` names a package publish only in text that may not run one: an `echo` or `printf` argument that is not piped or substituted, or a word between `pnpm`, `yarn` or `bun` and `publish` that no `package.json` script explains (`pnpm wrangler publish`). Any other `<tool> [flags] publish` (`npm`, `pnpm`, `yarn`, `lerna`, `bun`, `changeset`), in a command, a quoted string or an action input, is a publish, not this finding. A code-owner-reviewed marker may waive this one |
 
 Three further results are informational: `publisher/unclassified-id-token`
 and `publisher/unclassified-npm-token` (notices for a job that holds

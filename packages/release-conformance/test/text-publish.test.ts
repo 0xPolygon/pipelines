@@ -8,7 +8,7 @@ import type { CheckResult, Profile } from '../src/types.ts';
 
 import { deriveProfile } from '../src/canonical.ts';
 import { runChecks } from '../src/engine.ts';
-import { runsPublishText, scanRepo, textSeesPublish } from '../src/repo-scan.ts';
+import { runsPublishText, scanRepo, textPublishHits, textSeesPublish } from '../src/repo-scan.ts';
 import { analyzeShell } from '../src/shell-commands.ts';
 import { parseWorkflow } from '../src/workflow-model.ts';
 
@@ -58,21 +58,123 @@ const oidcJob = ({ command, token = false }: { command: string; token?: boolean 
     token ? '    env:\n      NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}\n' : ''
   }    steps:\n      - run: pnpm install --frozen-lockfile\n${yamlRun(command)}`;
 
-void describe('a tool that has its own publish command is not a package publish', () => {
+void describe('text that only names a publish is at most a waivable possible publish', () => {
   for (const command of [
     'pnpm wrangler publish',
     'pnpm vsce publish',
-    'pnpm build --mode publish',
     'echo "skipping npm publish on this branch"',
-    "printf '%s' 'npm publish later'",
-    'git commit -m "npm publish pending"'
+    "printf '%s' 'npm publish later'"
   ]) {
-    void it(`gives no never-waivable finding: ${command}`, () => {
+    void it(`gives only publisher/possible-publish: ${command}`, () => {
       const root = tree({ [WF]: oidcJob({ command }) });
       assert.equal(scanRepo({ root }).files[0]?.class, 'not-in-scope');
-      assert.deepEqual(errorIds(check(root)), []);
+      assert.deepEqual(errorIds(check(root)), ['publisher/possible-publish']);
     });
   }
+
+  void it('`pnpm build --mode publish` follows the build script: not a publish when it does not publish', () => {
+    const root = tree({
+      [WF]: oidcJob({ command: 'pnpm build --mode publish' }),
+      'package.json': '{"scripts":{"build":"tsc -b"}}'
+    });
+    assert.equal(scanRepo({ root }).files[0]?.class, 'not-in-scope');
+    assert.deepEqual(errorIds(check(root)), []);
+  });
+
+  void it('`pnpm build --mode publish` is a publish when the build script publishes', () => {
+    const root = tree({
+      [WF]: oidcJob({ command: 'pnpm build --mode publish' }),
+      'package.json': '{"scripts":{"build":"npm publish --provenance"}}'
+    });
+    assert.equal(scanRepo({ root }).files[0]?.class, 'bespoke-publisher');
+    assert.ok(errorIds(check(root)).includes('publisher/id-token-with-code'));
+  });
+});
+
+void describe('a tightened text hit is a confirmed publish wherever it sits', () => {
+  const forms = [
+    // wrappers the parser does not list
+    'retry 3 npm publish',
+    'retry 3 npm publish --provenance',
+    'eval npm publish',
+    'eval "npm publish --provenance"',
+    'su runner -c "npm publish"',
+    'flock /tmp/lock npm publish',
+    'direnv exec . npm publish',
+    'nix develop -c npm publish',
+    'parallel npm publish ::: *.tgz',
+    'yarn $ARGS npm publish',
+    'sudo -E env PATH="$PATH" npm publish',
+    'sudo env "PATH=$PATH" npm publish',
+    // flags with unknown values, variable flags, strings given to other commands
+    'pnpm --workspace-concurrency 1 -r publish',
+    'pnpm --use-node-version 22 publish',
+    'pnpm $PNPM_FLAGS publish',
+    'docker exec builder sh -c "npm publish"',
+    'script -qc "npm publish" /dev/null',
+    'git commit -m "npm publish pending"',
+    // printed text that runs
+    'echo "npm publish" | sh',
+    'echo "npm publish" | bash -e',
+    'echo $(npm publish)',
+    'echo `npm publish`',
+    'eval echo "npm publish"',
+    'echo "npm publish" | xargs sh -c',
+    'cat <<EOF\nnpm publish\nEOF'
+  ];
+  for (const command of forms) {
+    void it(`confirmed: ${JSON.stringify(command)}`, () => {
+      assert.equal(textSeesPublish(command), true);
+      const root = tree({ [WF]: oidcJob({ command: command.replaceAll('\n', ' ; ') }) });
+      assert.ok(
+        errorIds(check(root)).includes('publisher/id-token-with-code'),
+        errorIds(check(root)).join()
+      );
+      assert.ok(!errorIds(check(root)).includes('publisher/possible-publish'));
+    });
+  }
+
+  void it('a publish in an action input is a publish', () => {
+    const workflow = oidcJob({ command: 'echo ready' }).replace(
+      '    steps:\n',
+      '    steps:\n      - uses: acme/retry@0123456789abcdef0123456789abcdef01234567 # v3\n        with:\n          command: npm publish --provenance\n'
+    );
+    const root = tree({ [WF]: workflow });
+    assert.equal(scanRepo({ root }).files[0]?.class, 'bespoke-publisher');
+    assert.ok(errorIds(check(root)).includes('publisher/id-token-with-code'));
+  });
+
+  void it('a publish in the input of an action inside a local composite action is a publish', () => {
+    const workflow = oidcJob({ command: 'echo ready' }).replace(
+      '    steps:\n',
+      '    steps:\n      - uses: ./.github/actions/ship\n'
+    );
+    const root = tree({
+      [WF]: workflow,
+      '.github/actions/ship/action.yml':
+        'runs:\n  using: composite\n  steps:\n    - uses: acme/retry@v3\n      with:\n        command: pnpm publish\n'
+    });
+    assert.equal(scanRepo({ root }).files[0]?.class, 'bespoke-publisher');
+  });
+
+  void it('the reviewer case cannot be waived: a possible-publish marker removes nothing never-waivable', () => {
+    const marker =
+      '# release-conformance-exception: publisher/possible-publish until 2027-06-01 not a publish\n';
+    const workflow =
+      marker +
+      'on:\n  pull_request_target:\npermissions: {}\njobs:\n  release:\n    runs-on: ubuntu-latest\n    permissions:\n      contents: write\n      id-token: write\n    steps:\n      - uses: actions/setup-node@v6\n        with:\n          cache: npm\n      - run: npm ci && npm run build\n      - run: retry 3 npm publish --provenance\n';
+    const result = check(tree({ [WF]: workflow }));
+    const ids = errorIds(result);
+    assert.ok(ids.includes('publisher/pull-request-target'), ids.join());
+    assert.ok(ids.includes('publisher/id-token-with-code'), ids.join());
+    assert.ok(result.findings.some((f) => f.severity === 'error'));
+  });
+
+  void it('parses `sudo -E env PATH="$PATH" npm publish` with the assignment kept whole', () => {
+    assert.equal(analyzeShell({ text: 'sudo -E env PATH="$PATH" npm publish' }).publishes, true);
+    assert.equal(analyzeShell({ text: 'env A="b c" PATH="$PATH" npm publish' }).publishes, true);
+    assert.equal(analyzeShell({ text: 'env A="b c" echo npm publish' }).publishes, false);
+  });
 });
 
 void describe('the parser itself recognises the known publish forms', () => {
@@ -132,38 +234,45 @@ void describe('the parser itself recognises the known publish forms', () => {
   });
 });
 
-void describe('the text-level test is narrow', () => {
-  void it('counts publish only right after a publishing tool, flags allowed between', () => {
+void describe('the text-level test', () => {
+  void it('sees publish after a tool and flags, in any command or string', () => {
     for (const text of [
       'parallel npm publish ::: a',
       'foo && pnpm --silent publish',
-      '(yarn publish)'
+      '(yarn publish)',
+      'eval "npm publish"'
     ]) {
-      assert.equal(textSeesPublish(text), true, text);
+      assert.equal(textPublishHits(text).confirmed, true, text);
     }
   });
 
-  void it('ignores publish after any other word, and inside a printed string', () => {
+  void it('leaves printed text and unknown words as unconfirmed', () => {
+    assert.deepEqual(textPublishHits('echo "skipping npm publish on this branch"'), {
+      confirmed: false,
+      printed: true,
+      unknownWord: []
+    });
+    assert.deepEqual(textPublishHits('pnpm wrangler publish'), {
+      confirmed: false,
+      printed: false,
+      unknownWord: [{ tool: 'pnpm', word: 'wrangler' }]
+    });
+  });
+
+  void it('does not read publish into other words', () => {
     for (const text of [
       'wrangler publish',
-      'pnpm wrangler publish',
-      'pnpm build --mode publish',
-      'echo "skipping npm publish on this branch"',
       'npm pkg get publishConfig',
       'pnpm run docs:publish',
-      'git commit -m "npm publish pending"'
+      'pnpm test --coverage'
     ]) {
       assert.equal(textSeesPublish(text), false, text);
     }
   });
-
-  void it('still counts a quoted publish given to a command that runs the string', () => {
-    assert.equal(textSeesPublish('eval "npm publish"'), true);
-  });
 });
 
 void describe('a publish only the text test sees', () => {
-  const command = 'parallel npm publish ::: pkg-a pkg-b';
+  const command = 'pnpm wrangler publish';
 
   void it('is one waivable error, and the job is not classified as a publisher', () => {
     const root = tree({ [WF]: oidcJob({ command }) });

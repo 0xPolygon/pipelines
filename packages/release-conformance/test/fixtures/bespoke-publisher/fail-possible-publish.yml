@@ -1,4 +1,4 @@
-name: a publish behind a wrapper the check does not read
+name: a publish through a tool that may be a script name
 on:
   push:
     branches: [main]
@@ -10,4 +10,4 @@ jobs:
       contents: read
       id-token: write
     steps:
-      - run: 'parallel npm publish ::: pkg-a pkg-b'
+      - run: 'pnpm wrangler publish'
