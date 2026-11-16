@@ -49,8 +49,10 @@ replaces each local path with the `0xPolygon/pipelines/...` form.
 
 ### Composite actions
 
-Called via `uses: 0xPolygon/pipelines/.github/actions/<name>@main` as a
-**step** inside a job. Composite actions run in the calling job's
+Called via `uses: 0xPolygon/pipelines/.github/actions/<name>@<40-hex-sha> # <date>` as a
+**step** inside a job, pinned to a full commit SHA that Dependabot's
+`github-actions` updates keep current (monthly, grouped). A fix to a composite
+action reaches consumers at their next bump; an urgent fix is a coordinated bump. Composite actions run in the calling job's
 environment — they inherit the job's `env:` block, runners, and file
 system state automatically.
 
@@ -84,7 +86,7 @@ jobs:
     env:
       MY_RPC: https://rpc.example.com?token=${{ secrets.MY_TOKEN }}
     steps:
-      - uses: 0xPolygon/pipelines/.github/actions/ci@main
+      - uses: 0xPolygon/pipelines/.github/actions/ci@<40-hex-sha> # <date>
 ```
 
 Repositories with no test env var requirements omit the `env:` block entirely.
@@ -148,7 +150,7 @@ jobs:
       # ... other env vars
     steps:
       - id: gate
-        uses: 0xPolygon/pipelines/.github/actions/check-dockerfile@main
+        uses: 0xPolygon/pipelines/.github/actions/check-dockerfile@<40-hex-sha> # <date>
         with:
           tag: ${{ inputs.tag || '' }}
 
@@ -157,7 +159,7 @@ jobs:
 
       - id: docker-test
         if: steps.gate.outputs.has_dockerfile == 'true'
-        uses: 0xPolygon/pipelines/.github/actions/docker-test@main
+        uses: 0xPolygon/pipelines/.github/actions/docker-test@<40-hex-sha> # <date>
         with:
           tag: ${{ inputs.tag || '' }}
           test_vars: FIRESTORE_EMULATOR_HOST # ...
@@ -375,7 +377,7 @@ jobs:
       # ... other outputs
     steps:
       - id: docker-test
-        uses: 0xPolygon/pipelines/.github/actions/docker-test@main
+        uses: 0xPolygon/pipelines/.github/actions/docker-test@<40-hex-sha> # <date>
         with:
           tag: ${{ inputs.tag || '' }}
           # test_vars: MY_RPC   # space-separated env var names to forward to container

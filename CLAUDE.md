@@ -42,7 +42,7 @@ the legacy ECS or GCP-pipeline workflows, see the root `README.md`.
   and contains logic only. Each trigger file (`apps-*-trigger.yml`) is
   the canonical example of how a consuming repo wires the event.
 - **`.github/actions/`** — Custom GitHub Actions consumed via `uses:
-  0xPolygon/pipelines/.github/actions/<name>@main` (or `./.github/actions/<name>`
+  0xPolygon/pipelines/.github/actions/<name>@<40-hex-sha> # <date>` (or `./.github/actions/<name>`
   when called from this repo). Contains only `action.yml` and — for
   compiled actions — the committed `dist/` bundle.
 - **`packages/`** — Source packages (pnpm workspace) that compile into
@@ -147,7 +147,7 @@ steps:
   - name: Start Firestore emulator
     run: docker compose up -d --wait  # or -f path/to/docker-compose.yml
   - id: docker-test
-    uses: 0xPolygon/pipelines/.github/actions/docker-test@main
+    uses: 0xPolygon/pipelines/.github/actions/docker-test@<40-hex-sha> # <date>
     with:
       test_vars: FIRESTORE_EMULATOR_HOST GOOGLE_CLOUD_PROJECT_ID FIRESTORE_DATABASE_ID ...
 ```
@@ -177,8 +177,9 @@ See `pos-airdrop` and `lst-api` for reference implementations.
    whenever `packages/<name>/src/index.ts` changes on `main`.
 
 Actions are used locally within reusable workflows via `uses: ./.github/actions/<name>`
-and externally via `uses: 0xPolygon/pipelines/.github/actions/<name>@main`. There is no
-external versioning or tagging — the action is always consumed at the caller's chosen ref.
+and externally via `uses: 0xPolygon/pipelines/.github/actions/<name>@<40-hex-sha> # <date>`. There is no
+external versioning or tagging — the action is consumed at the commit the caller pins, so a fix
+reaches a consumer at its next Dependabot bump (an urgent fix is a coordinated bump).
 
 ## GitHub script helpers
 

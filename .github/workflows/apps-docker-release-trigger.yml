@@ -1,3 +1,5 @@
+# Consumer form, step-level: 0xPolygon/pipelines/.github/actions/docker-test@<40-hex-sha> # <date> (SHA kept current by Dependabot)
+# Consumer form, job-level: 0xPolygon/pipelines/.github/workflows/<name>.yml@main
 name: Docker release Trigger
 
 on:
