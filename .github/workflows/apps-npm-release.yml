@@ -175,7 +175,7 @@ jobs:
           permission-contents: write
           permission-pull-requests: write
 
-      - uses: changesets/action@a45c4d594aa4e2c509dc14a9f2b3b67ba3780d0d # v1.9.0
+      - uses: changesets/action@ae32849d5ba541f9ae29e40e22a623bc13562f51 # v2.1.2
         id: changesets
         with:
           title: 'changesets: Release / Deploy'
@@ -371,7 +371,7 @@ jobs:
           private-key: ${{ secrets.CHANGESET_RELEASE_BOT_APP_PRIVATE_KEY }}
           permission-contents: write
 
-      - uses: changesets/action@a45c4d594aa4e2c509dc14a9f2b3b67ba3780d0d # v1.9.0
+      - uses: changesets/action@ae32849d5ba541f9ae29e40e22a623bc13562f51 # v2.1.2
         id: changesets
         with:
           title: 'changesets: Release / Deploy'
