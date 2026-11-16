@@ -288,7 +288,11 @@ const fix = fin.findIndex((st) => isScript(st, 'correctLatest'));
 check('finalize records Latest before changesets/action', rec >= 0 && rec < act, `record at ${rec}, changesets/action at ${act}`);
 check('finalize corrects Latest once, after changesets/action', fix > act && fin.filter((st) => isScript(st, 'correctLatest')).length === 1, `correct at ${fix}, changesets/action at ${act}`);
 check('finalize passes the recorded Latest to the correction through env, not the script text', !/steps\./.test(String(fin[fix]?.with?.script ?? '')) && /previous-latest\.outputs\.previous-id/.test(fin[fix]?.env?.PREVIOUS_LATEST_ID ?? ''));
-check('both Latest github-script steps retry transient API errors and are unconditional', fin[rec]?.with?.retries === 3 && fin[fix]?.with?.retries === 3 && !('if' in fin[rec]) && !('if' in fin[fix]), json([fin[rec]?.with?.retries, fin[fix]?.with?.retries]));
+check('both Latest github-script steps retry transient API errors', fin[rec]?.with?.retries === 3 && fin[fix]?.with?.retries === 3, json([fin[rec]?.with?.retries, fin[fix]?.with?.retries]));
+check('the Latest record step is unconditional', !('if' in fin[rec]));
+check('the Latest correction runs only when changesets/action created a Release', fin[fix]?.if === "steps.changesets.outputs.published == 'true'" && fin[act]?.id === 'changesets', json(fin[fix]?.if));
+const tagCheck = fin.findIndex((st) => stepUses(st)?.endsWith('/check-release-tags'));
+check('finalize checks release tags before the Latest correction', tagCheck > act && tagCheck < fix, `check-release-tags at ${tagCheck}, correction at ${fix}`);
 check('finalize permissions stay contents: write only', json(jobs.finalize?.permissions) === json({ contents: 'write' }), json(jobs.finalize?.permissions));
 
 const art = Object.values(jobs.build?.steps ?? []).find((st) => stepUses(st) === 'actions/upload-artifact');

@@ -21,9 +21,13 @@
 //
 // Each publish picks its dist-tag at publish time from the registry's current
 // `latest` (resolvePublishTag), so releases approved out of order never move
-// `latest` backwards: a stable version above `latest` takes `latest`, an older
-// or equal stable takes `previous`, and a prerelease never takes `latest`. A registry answer that cannot be read fails that package
-// closed, before `npm publish`.
+// `latest` backwards in the normal case: a stable version above `latest` takes
+// `latest`, an older or equal stable takes `previous`, and a prerelease never
+// takes `latest`. The registry's package document can lag a fresh publish, so
+// a publish that starts right after another may still read a stale `latest`
+// and choose wrongly; that is a narrow window, not a guarantee. The read is
+// tried three times; a registry answer that still cannot be read fails that
+// package closed, before `npm publish`.
 //
 // No token is read or passed on: npm authenticates with the runner's OIDC
 // identity. Logs name packages and versions only and never print the
@@ -274,6 +278,10 @@ export function compareSemver(a, b) {
 export function resolvePublishTag({ version, recordedTag, preTag, latest }) {
   const parsed = parseSemver(version);
   if (!parsed) throw new Error(`"${version}" is not a semver version`);
+  const latestParsed = latest === null || latest === undefined ? null : parseSemver(latest);
+  if (latest !== null && latest !== undefined && latestParsed === null) {
+    throw new Error(`registry latest "${latest}" is not a semver version`);
+  }
   if (parsed.pre.length > 0) {
     const tag = recordedTag !== 'latest' ? recordedTag : preTag;
     if (tag === undefined || tag === 'latest') {
@@ -287,11 +295,12 @@ export function resolvePublishTag({ version, recordedTag, preTag, latest }) {
   if (recordedTag !== 'latest') return recordedTag;
   // A prerelease should never hold `latest`, so a stable version replaces one
   // even when it is semver-lower.
-  if (latest === null || latest === undefined || parseSemver(latest).pre.length > 0) {
-    return 'latest';
-  }
+  if (latestParsed === null || latestParsed.pre.length > 0) return 'latest';
   return compareSemver(version, latest) > 0 ? 'latest' : PREVIOUS_TAG;
 }
+
+// Waits before the second and third attempt to read a package's `latest`.
+export const FETCH_LATEST_RETRY_DELAYS_MS = [2 * 1000, 4 * 1000];
 
 /** URL of the public registry's package document; scoped names keep `%2F` encoded. */
 export const packageDocumentUrl = (name) => `${NPM_REGISTRY}${encodeURIComponent(name)}`;
@@ -305,16 +314,28 @@ export const packageDocumentUrl = (name) => `${NPM_REGISTRY}${encodeURIComponent
 export async function fetchLatest({
   name,
   fetchFn = fetch,
-  timeoutMs = READ_BACK_REQUEST_TIMEOUT_MS
+  sleep = defaultSleep,
+  timeoutMs = READ_BACK_REQUEST_TIMEOUT_MS,
+  retryDelaysMs = FETCH_LATEST_RETRY_DELAYS_MS
 }) {
+  // A failed read costs a re-run and a second approval, so transient
+  // failures (network error, timeout, 5xx) get a few attempts. Anything
+  // else (404, other statuses, a bad document) is an answer, not retried.
   let response;
-  try {
-    response = await fetchFn(packageDocumentUrl(name), {
-      headers: { accept: 'application/vnd.npm.install-v1+json' },
-      signal: AbortSignal.timeout(timeoutMs)
-    });
-  } catch (err) {
-    throw new Error(`registry lookup of ${name} failed: ${err?.message ?? err}`);
+  for (let attempt = 0; ; attempt++) {
+    let failure;
+    try {
+      response = await fetchFn(packageDocumentUrl(name), {
+        headers: { accept: 'application/vnd.npm.install-v1+json' },
+        signal: AbortSignal.timeout(timeoutMs)
+      });
+      if (response.status < 500) break;
+      failure = `registry lookup of ${name} answered ${response.status}`;
+    } catch (err) {
+      failure = `registry lookup of ${name} failed: ${err?.message ?? err}`;
+    }
+    if (attempt >= retryDelaysMs.length) throw new Error(failure);
+    await sleep(retryDelaysMs[attempt]);
   }
   if (response.status === 404) return null;
   if (response.status !== 200) {
@@ -501,7 +522,7 @@ export async function publishAll({
         version: entry.version,
         recordedTag: entry.tag,
         preTag: entry.preTag,
-        latest: await fetchLatest({ name: entry.name, fetchFn })
+        latest: await fetchLatest({ name: entry.name, fetchFn, sleep })
       });
       const result = run('npm', [
         'publish',

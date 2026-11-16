@@ -17,6 +17,7 @@ import {
   main,
   meetsMinimum,
   publishAll,
+  readManifest,
   READ_BACK_REQUEST_TIMEOUT_MS,
   READ_BACK_WINDOW_MS,
   sha512Integrity,
@@ -788,6 +789,7 @@ describe('resolvePublishTag', () => {
   });
   it('rejects a malformed version', () => {
     assert.throws(() => tag('nope', '1.0.0'), /not a semver/);
+    assert.throws(() => tag('1.0.0', 'junk'), /registry latest "junk" is not a semver/);
   });
 });
 
@@ -852,6 +854,65 @@ describe('fetchLatest', () => {
   });
 });
 
+describe('fetchLatest retries', () => {
+  const ok = { status: 200, json: async () => ({ 'dist-tags': { latest: '3.9.0' } }) };
+  const scripted = (steps) => {
+    const calls = [];
+    const fetchFn = async () => {
+      const step = steps[Math.min(calls.length, steps.length - 1)];
+      calls.push(step);
+      if (step instanceof Error) throw step;
+      return step;
+    };
+    return { fetchFn, calls };
+  };
+  const sleeper = () => {
+    const waits = [];
+    return { waits, sleep: async (ms) => waits.push(ms) };
+  };
+
+  it('retries a 5xx and a network error, then succeeds', async () => {
+    const { fetchFn, calls } = scripted([
+      { status: 503, json: async () => ({}) },
+      new Error('reset'),
+      ok
+    ]);
+    const { waits, sleep } = sleeper();
+    assert.equal(await fetchLatest({ name: 'a', fetchFn, sleep }), '3.9.0');
+    assert.equal(calls.length, 3);
+    assert.deepEqual(waits, [2000, 4000]);
+  });
+
+  it('throws after three failed attempts', async () => {
+    const { fetchFn, calls } = scripted([{ status: 502, json: async () => ({}) }]);
+    const { waits, sleep } = sleeper();
+    await assert.rejects(fetchLatest({ name: 'a', fetchFn, sleep }), /answered 502/);
+    assert.equal(calls.length, 3);
+    assert.equal(waits.length, 2);
+  });
+
+  it('does not retry a 404, which is an answer', async () => {
+    const { fetchFn, calls } = scripted([{ status: 404, json: async () => ({}) }]);
+    const { waits, sleep } = sleeper();
+    assert.equal(await fetchLatest({ name: 'a', fetchFn, sleep }), null);
+    assert.equal(calls.length, 1);
+    assert.deepEqual(waits, []);
+  });
+});
+
+describe('readManifest preTag', () => {
+  it('accepts a well-formed preTag and none', () => {
+    writeManifest([entry('a', { preTag: 'beta' }), entry('b')]);
+    assert.equal(readManifest(dir).length, 2);
+  });
+  it('rejects a preTag that is not a dist-tag name or reads as an option', () => {
+    for (const preTag of ['--registry=evil', 'Beta', '', 7, null]) {
+      writeManifest([entry('a', { preTag })]);
+      assert.throws(() => readManifest(dir), /preTag must match/, JSON.stringify(preTag));
+    }
+  });
+});
+
 describe('dist-tag at publish time', () => {
   const tagOf = (calls, index = 0) => {
     const args = publishCalls(calls)[index];
@@ -886,6 +947,19 @@ describe('dist-tag at publish time', () => {
     assert.deepEqual(result.failures, []);
     assert.deepEqual(result.published, ['a@3.8.2']);
     assert.ok(lines.some((l) => /Published a@3\.8\.2 with tag previous; read back/.test(l)));
+  });
+
+  it('publishes a stable version over a prerelease latest with --tag latest', async () => {
+    writeManifest([entry('a', { version: '1.0.0' })]);
+    const { run, calls } = fakeRun();
+    const result = await publishAll({
+      directory: dir,
+      ...net({}, { a: docs('2.0.0-rc.1') }),
+      run,
+      log: quiet
+    });
+    assert.deepEqual(result.failures, []);
+    assert.equal(tagOf(calls), 'latest');
   });
 
   it('publishes a prerelease recorded for latest under the manifest preTag', async () => {

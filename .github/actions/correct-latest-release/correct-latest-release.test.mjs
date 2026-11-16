@@ -60,9 +60,35 @@ describe('parseTag and isHighestStable', () => {
     assert.deepEqual(parseTag('1.2.3-rc.1'), { pkg: '', version: '1.2.3-rc.1' });
     assert.equal(parseTag('release-2026'), null);
   });
-  it('orders prereleases below their release', () => {
-    assert.ok(compareSemver('1.0.0-rc.1', '1.0.0') < 0);
+  it('orders the semver 2.0 specification example', () => {
+    const ordered = [
+      '1.0.0-alpha',
+      '1.0.0-alpha.1',
+      '1.0.0-alpha.beta',
+      '1.0.0-beta',
+      '1.0.0-beta.2',
+      '1.0.0-beta.11',
+      '1.0.0-rc.1',
+      '1.0.0',
+      '2.0.0',
+      '2.1.0',
+      '2.1.1'
+    ];
+    for (let i = 0; i < ordered.length; i++) {
+      for (let j = 0; j < ordered.length; j++) {
+        assert.equal(
+          Math.sign(compareSemver(ordered[i], ordered[j])),
+          Math.sign(i - j),
+          `${ordered[i]} vs ${ordered[j]}`
+        );
+      }
+    }
+  });
+  it('compares numbers numerically, ignores build metadata, accepts a v prefix and whitespace', () => {
+    assert.ok(compareSemver('1.10.0', '1.9.0') > 0);
     assert.ok(compareSemver('1.0.0-pre.10', '1.0.0-pre.9') > 0);
+    assert.equal(compareSemver('1.0.0+a', '1.0.0+b'), 0);
+    assert.equal(compareSemver(' v1.2.3 ', '1.2.3'), 0);
   });
   it('judges highest per package', () => {
     const allTags = ['a@2.0.0', 'a@1.9.0', 'b@1.0.0', 'b@1.0.1', 'a@3.0.0-pre.1'];
@@ -182,6 +208,18 @@ describe('correctLatest', () => {
     assert.deepEqual(updates, [{ owner: 'o', repo: 'r', release_id: 3, make_latest: 'false' }]);
   });
 
+  it('leaves a Latest whose tag is not a version tag untouched', async () => {
+    for (const tag of ['release-2026', 'v1.2', 'sdk-v1.2.3x']) {
+      const { result, updates } = await run({
+        latest: { id: 9, tag },
+        tags: ['a@2.0.0', tag],
+        previous: { id: 7, tag: 'a@2.0.0' }
+      });
+      assert.equal(result, 'unchanged', tag);
+      assert.deepEqual(updates, [], tag);
+    }
+  });
+
   it('does nothing when the repository has no Latest Release', async () => {
     const { result, updates } = await run({ latest: null, tags: [], previous: null });
     assert.equal(result, 'unchanged');
@@ -258,5 +296,16 @@ describe('correctLatest', () => {
       correctLatest({ github, context, core: fakeCore().core, previousId: '', previousTag: '' }),
       /boom/
     );
+  });
+
+  it('treats a missing recorded Latest as none', async () => {
+    const { github, updates } = fakeGithub({
+      latest: { id: 2, tag: 'a@1.9.1' },
+      tags: ['a@2.0.0', 'a@1.9.1'],
+      releaseIds: { 'a@2.0.0': 50 }
+    });
+    const result = await correctLatest({ github, context, core: fakeCore().core });
+    assert.equal(result, 'promoted');
+    assert.equal(updates[0].release_id, 50);
   });
 });

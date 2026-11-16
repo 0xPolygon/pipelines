@@ -16,10 +16,10 @@
 
 'use strict';
 
-const SEMVER = /^(\d+)\.(\d+)\.(\d+)(?:-([0-9A-Za-z.-]+))?(?:\+[0-9A-Za-z.-]+)?$/;
+const SEMVER = /^v?(\d+)\.(\d+)\.(\d+)(?:-([0-9A-Za-z.-]+))?(?:\+[0-9A-Za-z.-]+)?$/;
 
 function parseSemver(text) {
-  const match = SEMVER.exec(String(text));
+  const match = SEMVER.exec(String(text).trim());
   if (!match) return null;
   return {
     core: [match[1], match[2], match[3]].map(Number),
@@ -136,10 +136,18 @@ function stableTagsDescending({ pkg, allTags }) {
  *   3. nothing: make_latest 'false' on the wrong one, when no stable Release exists.
  * Returns what it did: 'unchanged' | 'kept' | 'restored' | 'promoted' | 'cleared'.
  */
-async function correctLatest({ github, context, core, previousId, previousTag }) {
+async function correctLatest({ github, context, core, previousId = '', previousTag = '' }) {
   const { owner, repo } = context.repo;
   const current = await getLatestRelease({ github, owner, repo });
   if (current === null) return 'unchanged';
+
+  // A Latest whose tag is not a version tag was not made by a release this
+  // workflow could judge (e.g. set by hand); leave it alone.
+  const parsed = parseTag(current.tag);
+  if (parsed === null) {
+    core.info(`${current.tag} is not a version tag; leaving Latest unchanged`);
+    return 'unchanged';
+  }
 
   const tags = (
     await github.paginate(github.rest.repos.listTags, { owner, repo, per_page: 100 })
@@ -171,9 +179,7 @@ async function correctLatest({ github, context, core, previousId, previousTag })
   }
 
   // The recorded holder is gone, stale or absent: choose from current tags.
-  const parsed = parseTag(current.tag);
-  const candidates =
-    parsed === null ? [] : stableTagsDescending({ pkg: parsed.pkg, allTags: tags });
+  const candidates = stableTagsDescending({ pkg: parsed.pkg, allTags: tags });
   for (const tag of candidates) {
     if (tag === current.tag) {
       core.info(`${current.tag} is the best stable Release its package has; keeping it as Latest`);
