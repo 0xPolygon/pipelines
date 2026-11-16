@@ -21,7 +21,8 @@ export const WAIVABLE_RULE_IDS: readonly string[] = [
   'publisher/events',
   // Waivable for now: a publishing workflow_dispatch may still be waived with a dated marker.
   'publisher/publishing-dispatch',
-  'publisher/unreadable-local-action'
+  'publisher/unreadable-local-action',
+  'publisher/possible-publish'
 ];
 
 /**

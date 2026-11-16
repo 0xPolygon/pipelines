@@ -146,6 +146,10 @@ const CASES: Record<string, Case> = {
       { path: 'hardening/cache-action-case.yml' }
     ]
   },
+  'publisher/possible-publish': {
+    passing: [{ path: 'bespoke-publisher/pass-possible-publish.yml' }],
+    failing: [{ path: 'bespoke-publisher/fail-possible-publish.yml' }]
+  },
   'publisher/publishing-dispatch': {
     passing: [{ path: 'bespoke-publisher/pass-release.yml' }],
     failing: [{ path: 'bespoke-publisher/fail-dispatch.yml' }]

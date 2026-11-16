@@ -8670,7 +8670,8 @@ const WAIVABLE_RULE_IDS = [
     'publisher/events',
     // Waivable for now: a publishing workflow_dispatch may still be waived with a dated marker.
     'publisher/publishing-dispatch',
-    'publisher/unreadable-local-action'
+    'publisher/unreadable-local-action',
+    'publisher/possible-publish'
 ];
 /**
  * Rules that protect the publishing credential itself: untrusted triggers, inherited secrets, and
@@ -8832,6 +8833,27 @@ const applyExceptions = ({ findings, files, today }) => {
 
 ;// CONCATENATED MODULE: ./packages/release-conformance/src/safe-read.ts
 
+
+/**
+ * The first directory on the way to `relative` (a path under `root`) that is a link, or
+ * undefined. `O_NOFOLLOW` covers only the last path component, so a linked parent such as
+ * `.github` or `.github/actions` is checked here, one component at a time, before anything is read.
+ */
+const linkedParent = ({ root, relative }) => {
+    const parts = relative.split('/').filter((part) => part !== '' && part !== '.');
+    let walked = '';
+    for (const part of parts) {
+        walked = walked === '' ? part : `${walked}/${part}`;
+        try {
+            if ((0,external_node_fs_namespaceObject.lstatSync)((0,external_node_path_namespaceObject.join)(root, walked)).isSymbolicLink())
+                return walked;
+        }
+        catch {
+            return undefined;
+        }
+    }
+    return undefined;
+};
 /**
  * Reads a file through one descriptor: the type and size checks are made on the
  * descriptor that is then read, so the path cannot be swapped between the check
@@ -9042,6 +9064,8 @@ const merge = (into, from) => {
         into.publishes = true;
     if (from.runsCode)
         into.runsCode = true;
+    if (from.tooDeep)
+        into.tooDeep = true;
     into.scripts.push(...from.scripts);
 };
 const PACKAGE_MANAGERS = new Set(['npm', 'pnpm', 'yarn', 'bun', 'lerna']);
@@ -9134,27 +9158,113 @@ const SHELL_KEYWORDS = new Set([
     '!',
     '{',
     '(',
-    'time',
-    'env',
-    'sudo',
-    'command',
-    'nohup',
     'corepack'
 ]);
+/**
+ * Commands that run the command that follows them. Their own flags (and the values some flags
+ * take) are skipped to reach it, so `timeout 300 npm publish` and `xargs -n1 npm publish` read as
+ * the publish they run.
+ */
+const WRAPPER_VALUE_FLAGS = new Map([
+    [
+        'xargs',
+        new Set([
+            '-a',
+            '-d',
+            '-E',
+            '-e',
+            '-I',
+            '-i',
+            '-L',
+            '-l',
+            '-n',
+            '-P',
+            '-s',
+            '--arg-file',
+            '--delimiter',
+            '--max-args',
+            '--max-procs',
+            '--max-lines',
+            '--max-chars'
+        ])
+    ],
+    ['timeout', new Set(['-s', '--signal', '-k', '--kill-after'])],
+    [
+        'sudo',
+        new Set(['-u', '-g', '-h', '-p', '-C', '-D', '-r', '-t', '-U', '-R', '--user', '--group'])
+    ],
+    ['doas', new Set(['-u', '-C'])],
+    ['env', new Set(['-u', '-C', '--unset', '--chdir'])],
+    ['nice', new Set(['-n', '--adjustment'])],
+    ['ionice', new Set(['-c', '-n', '-p', '-P', '-u'])],
+    ['exec', new Set(['-a'])],
+    ['nohup', new Set()],
+    ['time', new Set(['-f', '-o', '--format', '--output'])],
+    ['command', new Set()],
+    ['setsid', new Set()],
+    ['stdbuf', new Set(['-i', '-o', '-e'])]
+]);
+const SHELL_NAMES = new Set(['bash', 'sh', 'zsh', 'dash', 'ksh']);
+const DURATION = /^\d+(?:\.\d+)?[smhd]?$/;
+/** Nesting deeper than this is not a real command line; the parser stops following it and fails closed. */
+const MAX_DEPTH = 8;
 const ASSIGNMENT = /^[A-Za-z_][A-Za-z0-9_]*=/;
 const DIR_FLAGS = new Set(['--dir', '-C', '--prefix', '--cwd']);
 const WIDE_FLAGS = new Set(['-r', '--recursive', '--workspaces', '-ws', '--filter', '-F']);
+/** Value flags of the publish commands, so `npm --tag beta publish` still reads `publish` as the subcommand. */
+const PUBLISH_VALUE_FLAGS = new Set([
+    '--tag',
+    '--registry',
+    '--otp',
+    '--access',
+    '--userconfig',
+    '--globalconfig',
+    '--cache',
+    '--loglevel',
+    '--publish-branch',
+    '--scope',
+    '--dist-tag',
+    '--npm-tag',
+    '--git-remote',
+    '--reporter',
+    '--config'
+]);
 /** Flags that take a separate value, so the value is not the subcommand. */
 const flagTakesValue = ({ manager, flag }) => {
     if (DIR_FLAGS.has(flag) || flag === '--filter' || flag === '-F')
         return true;
     if (flag === '--workspace')
         return true;
-    if (flag === '-w')
-        return manager === 'npm';
+    if (PUBLISH_VALUE_FLAGS.has(flag))
+        return true;
+    if (flag === '-w' || flag === '-m')
+        return manager === (flag === '-w' ? 'npm' : 'lerna');
     return flag === '--package' || flag === '-p';
 };
-const unquote = (token) => token.replace(/^["'`]+|["'`]+$/g, '');
+const QUOTES = new Set(['"', "'", '`']);
+/** Strips quote characters from both ends of a word, by index so the cost is linear in its length. */
+const unquote = (token) => {
+    let start = 0;
+    let end = token.length;
+    while (start < end && QUOTES.has(token[start] ?? ''))
+        start += 1;
+    while (end > start && QUOTES.has(token[end - 1] ?? ''))
+        end -= 1;
+    return token.slice(start, end);
+};
+/** Index of the word after a `NAME=value` word, past the rest of a quoted value that holds spaces. */
+const skipAssignment = ({ words, index }) => {
+    const token = words[index] ?? '';
+    const value = token.slice(token.indexOf('=') + 1);
+    const open = value[0];
+    let next = index + 1;
+    if ((open === '"' || open === "'") && !(value.length > 1 && value.endsWith(open))) {
+        while (next < words.length && !(words[next] ?? '').endsWith(open))
+            next += 1;
+        next += 1;
+    }
+    return next;
+};
 /** Words of one command with leading shell keywords, variable assignments and wrappers removed. */
 const commandWords = (segment) => {
     const raw = segment
@@ -9170,15 +9280,7 @@ const commandWords = (segment) => {
             continue;
         }
         if (ASSIGNMENT.test(token)) {
-            // A quoted value may hold spaces: skip to the word that closes the quote.
-            const value = token.slice(token.indexOf('=') + 1);
-            const open = value[0];
-            index += 1;
-            if ((open === '"' || open === "'") && !(value.length > 1 && value.endsWith(open))) {
-                while (index < raw.length && !(raw[index] ?? '').endsWith(open))
-                    index += 1;
-                index += 1;
-            }
+            index = skipAssignment({ words: raw, index });
             continue;
         }
         break;
@@ -9186,16 +9288,77 @@ const commandWords = (segment) => {
     return raw.slice(index).map(unquote);
 };
 const basename = (word) => word.replace(/^.*\//, '');
-const classify = ({ words, dirs }) => {
+const tooDeepFacts = () => ({
+    publishes: true,
+    runsCode: true,
+    scripts: [],
+    tooDeep: true
+});
+/** The command a wrapper runs: its own flags (and their values), assignments and a leading duration skipped. */
+const wrappedCommand = ({ name, rest }) => {
+    const valueFlags = WRAPPER_VALUE_FLAGS.get(name) ?? new Set();
+    let index = 0;
+    let sawDuration = false;
+    while (index < rest.length) {
+        const token = rest[index] ?? '';
+        if (token === '--') {
+            index += 1;
+            break;
+        }
+        if (token.startsWith('-') && token.length > 1) {
+            index += valueFlags.has(token) ? 2 : 1;
+            continue;
+        }
+        if (name === 'env' && ASSIGNMENT.test(token)) {
+            index = skipAssignment({ words: rest, index });
+            continue;
+        }
+        if (name === 'timeout' && !sawDuration && DURATION.test(token)) {
+            sawDuration = true;
+            index += 1;
+            continue;
+        }
+        break;
+    }
+    return rest.slice(index);
+};
+/** `bash -c "<command>"`: the words after the `-c` flag are the command it runs. */
+const shellCommandString = (rest) => {
+    for (let index = 0; index < rest.length; index += 1) {
+        const token = rest[index] ?? '';
+        if (!token.startsWith('-') && !token.startsWith('+'))
+            return [];
+        if (/^-[A-Za-z]*c[A-Za-z]*$/.test(token))
+            return rest.slice(index + 1);
+        if (token === '-o' || token === '+o')
+            index += 1;
+    }
+    return [];
+};
+/** `find ... -exec <command> {} \;` runs the command that follows the `-exec` family flag. */
+const findExecCommand = (rest) => {
+    const at = rest.findIndex((token) => ['-exec', '-execdir', '-ok', '-okdir'].includes(token));
+    return at < 0 ? [] : rest.slice(at + 1);
+};
+const classify = ({ words, dirs, depth = 0 }) => {
+    if (depth > MAX_DEPTH)
+        return tooDeepFacts();
     const [first = '', ...rest] = words;
     const name = basename(first);
+    const inner = (next) => next.length === 0 ? noFacts() : classify({ words: next, dirs, depth: depth + 1 });
     if (PACKAGE_MANAGERS.has(name))
-        return classifyManager({ manager: name, rest, dirs });
+        return classifyManager({ manager: name, rest, dirs, depth });
     if (BINARY_RUNNERS.has(name))
-        return classifyExec({ rest, dirs });
+        return classifyExec({ rest, dirs, depth });
     if (name === 'changeset' || name === 'changesets' || CHANGESETS_CLI.test(first)) {
         return { ...noFacts(), publishes: firstWord(rest) === 'publish' };
     }
+    if (WRAPPER_VALUE_FLAGS.has(name))
+        return inner(wrappedCommand({ name, rest }));
+    if (SHELL_NAMES.has(name))
+        return inner(shellCommandString(rest));
+    if (name === 'find')
+        return inner(findExecCommand(rest));
     if (name === 'node') {
         return { ...noFacts(), runsCode: !runsOwnActionScript(rest) && !onlyReportsVersion(rest) };
     }
@@ -9223,7 +9386,7 @@ const INSTALL_SUBCOMMANDS = new Set(['install', 'i', 'ci', 'add', 'install-test'
 const TEST_SUBCOMMANDS = new Set(['test', 't', 'install-test', 'it']);
 const firstWord = (tokens) => tokens.find((t) => !t.startsWith('-'));
 /** `<runner> [flags] <command ...>`: runs another command, which is repository code unless it only publishes. */
-const classifyExec = ({ rest, dirs }) => {
+const classifyExec = ({ rest, dirs, depth }) => {
     let index = 0;
     while (index < rest.length) {
         const token = rest[index] ?? '';
@@ -9238,10 +9401,15 @@ const classifyExec = ({ rest, dirs }) => {
     const inner = rest.slice(index);
     if (inner.length === 0)
         return { ...noFacts(), runsCode: true };
-    const facts = classify({ words: inner, dirs });
-    return { publishes: facts.publishes, runsCode: !facts.publishes, scripts: facts.scripts };
+    const facts = classify({ words: inner, dirs, depth: depth + 1 });
+    return {
+        publishes: facts.publishes,
+        runsCode: !facts.publishes || facts.tooDeep === true,
+        scripts: facts.scripts,
+        ...(facts.tooDeep ? { tooDeep: true } : {})
+    };
 };
-const classifyManager = ({ manager, rest, dirs }) => {
+const classifyManager = ({ manager, rest, dirs, depth }) => {
     const facts = noFacts();
     const flagDirs = [];
     let wide = false;
@@ -9300,7 +9468,7 @@ const classifyManager = ({ manager, rest, dirs }) => {
         return facts;
     }
     if (EXEC_SUBCOMMANDS.has(sub)) {
-        return classifyExec({ rest: rest.slice(subIndex + 1), dirs: where });
+        return classifyExec({ rest: rest.slice(subIndex + 1), dirs: where, depth });
     }
     if (sub === 'global')
         return facts;
@@ -9321,17 +9489,23 @@ const classifyManager = ({ manager, rest, dirs }) => {
         return facts;
     }
     const known = BUILTIN_COMMANDS.has(sub) || RUN_SUBCOMMANDS.has(sub) || EXEC_SUBCOMMANDS.has(sub);
-    // A flag with a value before the subcommand (`npm --tag beta publish`) leaves the value in the
-    // subcommand's place, so `publish` among the remaining words still publishes.
-    if (!known && words.includes('publish')) {
+    // npm and lerna take no bare script or binary name, so a word before `publish` can only be the
+    // value of a flag this parser does not know (`npm --tag beta publish`); `publish` still publishes.
+    if (!known && (manager === 'npm' || manager === 'lerna') && words.includes('publish')) {
         facts.publishes = true;
         return facts;
     }
-    // `pnpm <script>` and `yarn <script>` run a package script by name, or a package binary of that name.
+    // `pnpm <script>` and `yarn <script>` run a package script by name, or a package binary of that
+    // name; `pnpm wrangler publish` publishes with wrangler, not with the package manager.
     if ((manager === 'pnpm' || manager === 'yarn') && !BUILTIN_COMMANDS.has(sub)) {
         facts.scripts.push({ name: sub, dirs: where, wide });
-        if (classify({ words, dirs: where }).publishes)
+        const ran = classify({ words, dirs: where, depth: depth + 1 });
+        if (ran.publishes)
             facts.publishes = true;
+        if (ran.tooDeep) {
+            facts.tooDeep = true;
+            facts.runsCode = true;
+        }
     }
     return facts;
 };
@@ -9680,33 +9854,110 @@ const LOCAL_ACTION_DIR = '.github/actions/';
 const CALLEE_CHECKOUT_PREFIX = '.pipelines/';
 /** The action of the shared release workflow that publishes tarballs with the npm client; its script is not shell. */
 const CALLEE_PUBLISH_ACTION = '.github/actions/npm-publish-tarballs';
-/** Characters that may sit just before a command word: whitespace, quotes and shell openers. */
-const BEFORE_COMMAND = String.raw `(?:^|[\s("'\`{])`;
-const MANAGER_WORD = new RegExp(`${BEFORE_COMMAND}(?:npm|pnpm|yarn|lerna|bun)\\b`);
-const CHANGESET_PUBLISH = new RegExp(`${BEFORE_COMMAND}(?:@changesets/cli(?:@\\S*)?|changesets?)\\s+publish(?![\\w:-])`);
-/** The word `publish` itself, not a script such as `docs:publish` or `publish:docs`. */
-const PUBLISH_WORD = /(?<![\w:./-])publish(?![\w:-])/;
+/** The tools whose `publish` subcommand publishes a package. */
+const PUBLISH_TOOL = /^(?:npm|pnpm|yarn|lerna|bun|changesets?|@changesets\/cli(?:@[^\s]*)?)$/;
+/** Commands that only print their arguments, so a quoted `npm publish` after them is text, not a command. */
+const PRINTERS = new Set(['echo', 'printf']);
+/** Commands that run the string they are given, so a quoted publish after them still runs. */
+const STRING_EXECUTORS = new Set([
+    'bash',
+    'sh',
+    'zsh',
+    'dash',
+    'ksh',
+    'eval',
+    'su',
+    'ssh',
+    'watch'
+]);
+const LEADING_PUNCTUATION = new Set(['(', '{', '$', '"', "'", '`']);
+const TRAILING_PUNCTUATION = new Set([')', '}', '"', "'", '`']);
+/** Trims shell openers and quotes from both ends of a word, by index so the cost is linear in its length. */
+const bareWord = (token) => {
+    let start = 0;
+    let end = token.length;
+    let opensQuote = false;
+    while (start < end && LEADING_PUNCTUATION.has(token[start] ?? '')) {
+        if (token[start] === '"' || token[start] === "'" || token[start] === '`')
+            opensQuote = true;
+        start += 1;
+    }
+    while (end > start && TRAILING_PUNCTUATION.has(token[end - 1] ?? ''))
+        end -= 1;
+    return { word: token.slice(start, end), opensQuote };
+};
+/** The name of the command a tokenised segment runs, past variable assignments and shell keywords. */
+const segmentCommand = (tokens) => {
+    const skipped = new Set([
+        'if',
+        'then',
+        'else',
+        'elif',
+        'do',
+        'while',
+        'until',
+        '!',
+        '{',
+        '(',
+        'time'
+    ]);
+    for (const token of tokens) {
+        if (token === '' || skipped.has(token) || /^[A-Za-z_][A-Za-z0-9_]*=/.test(token))
+            continue;
+        return bareWord(token).word.replace(/^.*\//, '');
+    }
+    return '';
+};
+/** Tracks whether a run of words is inside an open quote, one word at a time. */
+const nextQuoteState = ({ quote, token }) => {
+    let state = quote;
+    for (const char of token) {
+        if (state === undefined) {
+            if (char === '"' || char === "'")
+                state = char;
+        }
+        else if (char === state)
+            state = undefined;
+    }
+    return state;
+};
 /**
- * Loose publish-command test for text the parser may not understand (wrappers
- * such as `xargs` or `bash -c`); errs towards seeing a publish. It works one
- * command at a time and does one pass over each, so its cost is linear in the
- * text however the text is built.
+ * Text-level publish test, the second opinion beside the command parser. `publish` counts only as the
+ * word right after `npm`, `pnpm`, `yarn`, `lerna`, `bun`, `changeset(s)` or `@changesets/cli`
+ * (flags may sit between), never after another binary name and not inside a quoted argument of a
+ * command that only prints (`echo "skipping npm publish"`). It reads each command as a list of words
+ * in one pass, so its cost is linear in the text however the text is built.
  */
-/** Subcommands that run some other tool; the parser reads the tool, so the loose test leaves them alone. */
-const RUNS_OTHER_TOOL = /^\s+(?:exec|dlx|x|run|run-script)(?![\w-])/;
-const looseRunsPublish = (text) => CHANGESET_PUBLISH.test(text) ||
-    text.split(/[\n;&|]/).some((segment) => {
-        const manager = MANAGER_WORD.exec(segment);
-        if (manager === null)
-            return false;
-        const rest = segment.slice(manager.index + manager[0].length);
-        return !RUNS_OTHER_TOOL.test(rest) && PUBLISH_WORD.test(rest);
-    });
+const looseRunsPublish = (text) => text.split(/[\n;&|]/).some((segment) => {
+    const tokens = segment.split(/\s+/);
+    const command = segmentCommand(tokens);
+    if (PRINTERS.has(command))
+        return false;
+    let quote;
+    for (let index = 0; index < tokens.length; index += 1) {
+        const token = tokens[index] ?? '';
+        const { word, opensQuote } = bareWord(token);
+        const before = quote;
+        quote = nextQuoteState({ quote, token });
+        // A word that opens a quote and closes it again (`"npm" publish`) is not inside a string.
+        const quoted = before !== undefined || (opensQuote && quote !== undefined);
+        if (!PUBLISH_TOOL.test(word) || (quoted && !STRING_EXECUTORS.has(command)))
+            continue;
+        let next = index + 1;
+        while ((tokens[next] ?? '').startsWith('-'))
+            next += 1;
+        if (bareWord(tokens[next] ?? '').word === 'publish')
+            return true;
+    }
+    return false;
+});
 /** Arguments of a tag-only command: plain words and flags, with no quoting or shell syntax. */
 const TAG_ARGUMENT = /^[\w./:@-]+$/;
 const repo_scan_PACKAGE_MANAGERS = new Set(['pnpm', 'npm', 'yarn']);
 const NPM_TOKEN_NAME = /npm/i;
-const runsPublishText = (text) => looseRunsPublish(normalizeShell(text));
+/** True when the text-level test alone sees a publish command in the text. */
+const textSeesPublish = (text) => looseRunsPublish(normalizeShell(text));
+const runsPublishText = (text) => shell_commands_analyzeShell({ text }).publishes || textSeesPublish(text);
 /**
  * Tokenised rather than one pattern with nested repetition, so the cost stays
  * linear in the length of a line whatever the workflow text holds.
@@ -9758,6 +10009,9 @@ const readLocalAction = ({ root, path, calleeContext }) => {
         relative = relative.slice(CALLEE_CHECKOUT_PREFIX.length);
     if (!relative.startsWith(LOCAL_ACTION_DIR))
         return { ok: false, reason: 'it is outside `.github/actions/`, which the check reads' };
+    const linked = linkedParent({ root, relative });
+    if (linked !== undefined)
+        return { ok: false, reason: `\`${linked}\` is a link, which the check does not follow` };
     for (const name of ['action.yml', 'action.yaml']) {
         const file = (0,external_node_path_namespaceObject.join)(root, relative, name);
         let text;
@@ -9825,6 +10079,9 @@ const changesetsPublishesPackages = (withInputs) => {
 const scanJob = ({ job, env }) => {
     const runs = [];
     let publishes = false;
+    /** Only the text-level test saw a publish; the command parser did not confirm one. */
+    let textOnlyPublish = false;
+    let tooDeep = false;
     let runsCode = false;
     let idToken = false;
     let npmToken = false;
@@ -9844,8 +10101,12 @@ const scanJob = ({ job, env }) => {
             baseDirs,
             ...(actionPathVars === undefined ? {} : { actionPathVars })
         });
-        if (facts.publishes || runsPublishText(text))
+        if (facts.publishes)
             publishes = true;
+        else if (textSeesPublish(text))
+            textOnlyPublish = true;
+        if (facts.tooDeep)
+            tooDeep = true;
         if (facts.runsCode)
             runsCode = true;
         for (const ref of facts.scripts) {
@@ -9853,9 +10114,15 @@ const scanJob = ({ job, env }) => {
             if (!found.defined && ref.optional !== true)
                 unresolved.add(ref.name);
             // One level only: the script body itself must hold an explicit publish command.
-            for (const body of found.bodies)
-                if (shell_commands_analyzeShell({ text: body }).publishes || runsPublishText(body))
+            for (const body of found.bodies) {
+                const inner = shell_commands_analyzeShell({ text: body });
+                if (inner.publishes)
                     publishes = true;
+                else if (textSeesPublish(body))
+                    textOnlyPublish = true;
+                if (inner.tooDeep)
+                    tooDeep = true;
+            }
         }
     };
     for (const step of job.steps) {
@@ -9904,13 +10171,18 @@ const scanJob = ({ job, env }) => {
             }
         }
     }
+    // An npm token in the job keeps the token rules whatever sees the publish; with no token, a
+    // publish only the text test sees is a possible publish for a person to confirm, not a classification.
+    const confirmed = publishes || (textOnlyPublish && npmToken);
     return {
         jobId: job.id,
         runText: runs.join('\n'),
         holdsPublishCredential: idToken || npmToken,
         holdsIdToken: idToken,
         holdsNpmToken: npmToken,
-        runsPublishCommand: publishes,
+        runsPublishCommand: confirmed,
+        possiblePublish: textOnlyPublish && !confirmed && idToken,
+        commandTooDeep: tooDeep,
         runsRepositoryCode: runsCode,
         unreadableActions: unreadable,
         unresolvedScripts: [...unresolved]
@@ -9926,6 +10198,9 @@ const repo_scan_classify = ({ model, jobs }) => {
     return 'not-in-scope';
 };
 const listWorkflowFiles = (root) => {
+    // The workflow directory itself is only listed when no part of its path is a link.
+    if (linkedParent({ root, relative: WORKFLOW_DIR }) !== undefined)
+        return [];
     const dir = (0,external_node_path_namespaceObject.join)(root, WORKFLOW_DIR);
     if (!(0,external_node_fs_namespaceObject.existsSync)(dir))
         return [];
@@ -9989,6 +10264,14 @@ const localCallee = ({ uses, repository }) => {
 };
 const scanRepo = ({ root, repository = '' }) => {
     const models = new Map();
+    const linked = linkedParent({ root, relative: WORKFLOW_DIR });
+    if (linked !== undefined) {
+        // Reported as an unreadable workflow so the run fails instead of passing over a tree it never read.
+        models.set(WORKFLOW_DIR, unreadableWorkflow({
+            file: WORKFLOW_DIR,
+            reason: `\`${linked}\` is a link and was not followed`
+        }));
+    }
     for (const file of listWorkflowFiles(root)) {
         const model = readWorkflow({ root, file });
         if (model)
@@ -10032,7 +10315,8 @@ const PUBLISHER_WAIVABLE_RULES = (/* unused pure expression or super */ null && 
     'publisher/events',
     // Waivable for now; move it to the never-waivable list if a publishing dispatch is ever disallowed outright.
     'publisher/publishing-dispatch',
-    'publisher/unreadable-local-action'
+    'publisher/unreadable-local-action',
+    'publisher/possible-publish'
 ]));
 /**
  * Rules no marker may waive: the publishing credential in a job that runs
@@ -10045,6 +10329,7 @@ const PUBLISHER_NEVER_WAIVABLE_RULES = (/* unused pure expression or super */ nu
     'publisher/pull-request-target'
 ]));
 const UNCLASSIFIED_ID_TOKEN_RULE = 'publisher/unclassified-id-token';
+const POSSIBLE_PUBLISH_RULE = 'publisher/possible-publish';
 const UNREADABLE_LOCAL_ACTION_RULE = 'publisher/unreadable-local-action';
 const UNCLASSIFIED_NPM_TOKEN_RULE = 'publisher/unclassified-npm-token';
 const finding = ({ ruleId, model, line, message, severity = 'error' }) => ({ ruleId, file: model.file, line, message, severity });
@@ -10086,7 +10371,7 @@ const splitFindings = (params) => {
                 ruleId: idToken ? 'publisher/id-token-with-code' : 'publisher/token-with-code',
                 model,
                 line: job.line,
-                message: `Job \`${job.id}\` holds the publishing credential and must not run a dependency install, build, test or lint command; run those in an earlier job and pass the result as an artifact.`
+                message: `Job \`${job.id}\` holds the publishing credential and must not run a dependency install, build, test or lint command; run those in an earlier job and pass the result as an artifact.${info.commandTooDeep ? ' A command in it nests wrappers more deeply than the check reads, so it is treated as one that runs code.' : ''}`
             }));
         }
         if (job.defaultTokenPermissions) {
@@ -10265,6 +10550,17 @@ const unclassifiedNotices = ({ params, jobs }) => jobs
     if (info !== undefined && info.unreadableActions.length > 0)
         return [];
     const out = [];
+    if (info?.possiblePublish) {
+        // One finding stands for the job: it replaces the notices, and a marker waives it.
+        return [
+            finding({
+                ruleId: POSSIBLE_PUBLISH_RULE,
+                model: params.model,
+                line: job.line,
+                message: `Job \`${job.id}\` holds \`id-token: write\` and has a command that looks like a package publish the check cannot confirm; reword it as \`<package manager> publish\` if it publishes, or ask a code owner to waive this finding if it does not.${unresolvedNote(info)}`
+            })
+        ];
+    }
     if (holdsIdToken(job)) {
         out.push(finding({
             ruleId: UNCLASSIFIED_ID_TOKEN_RULE,

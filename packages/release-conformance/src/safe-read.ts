@@ -1,4 +1,30 @@
-import { closeSync, constants, fstatSync, openSync, readFileSync } from 'node:fs';
+import { closeSync, constants, fstatSync, lstatSync, openSync, readFileSync } from 'node:fs';
+import { join } from 'node:path';
+
+/**
+ * The first directory on the way to `relative` (a path under `root`) that is a link, or
+ * undefined. `O_NOFOLLOW` covers only the last path component, so a linked parent such as
+ * `.github` or `.github/actions` is checked here, one component at a time, before anything is read.
+ */
+export const linkedParent = ({
+  root,
+  relative
+}: {
+  root: string;
+  relative: string;
+}): string | undefined => {
+  const parts = relative.split('/').filter((part) => part !== '' && part !== '.');
+  let walked = '';
+  for (const part of parts) {
+    walked = walked === '' ? part : `${walked}/${part}`;
+    try {
+      if (lstatSync(join(root, walked)).isSymbolicLink()) return walked;
+    } catch {
+      return undefined;
+    }
+  }
+  return undefined;
+};
 
 export type FileRead =
   | { kind: 'text'; text: string }

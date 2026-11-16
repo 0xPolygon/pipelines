@@ -20,7 +20,8 @@ export const PUBLISHER_WAIVABLE_RULES = [
   'publisher/events',
   // Waivable for now; move it to the never-waivable list if a publishing dispatch is ever disallowed outright.
   'publisher/publishing-dispatch',
-  'publisher/unreadable-local-action'
+  'publisher/unreadable-local-action',
+  'publisher/possible-publish'
 ] as const;
 
 /**
@@ -35,6 +36,7 @@ export const PUBLISHER_NEVER_WAIVABLE_RULES = [
 ] as const;
 
 export const UNCLASSIFIED_ID_TOKEN_RULE = 'publisher/unclassified-id-token';
+export const POSSIBLE_PUBLISH_RULE = 'publisher/possible-publish';
 export const UNREADABLE_LOCAL_ACTION_RULE = 'publisher/unreadable-local-action';
 export const UNCLASSIFIED_NPM_TOKEN_RULE = 'publisher/unclassified-npm-token';
 
@@ -100,7 +102,7 @@ const splitFindings = (params: RuleParams): Finding[] => {
           ruleId: idToken ? 'publisher/id-token-with-code' : 'publisher/token-with-code',
           model,
           line: job.line,
-          message: `Job \`${job.id}\` holds the publishing credential and must not run a dependency install, build, test or lint command; run those in an earlier job and pass the result as an artifact.`
+          message: `Job \`${job.id}\` holds the publishing credential and must not run a dependency install, build, test or lint command; run those in an earlier job and pass the result as an artifact.${info.commandTooDeep ? ' A command in it nests wrappers more deeply than the check reads, so it is treated as one that runs code.' : ''}`
         })
       );
     }
@@ -341,6 +343,17 @@ const unclassifiedNotices = ({
       // The unreadable-action error already says why this job cannot be classified.
       if (info !== undefined && info.unreadableActions.length > 0) return [];
       const out: Finding[] = [];
+      if (info?.possiblePublish) {
+        // One finding stands for the job: it replaces the notices, and a marker waives it.
+        return [
+          finding({
+            ruleId: POSSIBLE_PUBLISH_RULE,
+            model: params.model,
+            line: job.line,
+            message: `Job \`${job.id}\` holds \`id-token: write\` and has a command that looks like a package publish the check cannot confirm; reword it as \`<package manager> publish\` if it publishes, or ask a code owner to waive this finding if it does not.${unresolvedNote(info)}`
+          })
+        ];
+      }
       if (holdsIdToken(job)) {
         out.push(
           finding({

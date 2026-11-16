@@ -112,6 +112,10 @@ export interface JobScan {
   /** An npm token reaches the job through a secret, an environment value or an `.npmrc` line. */
   holdsNpmToken: boolean;
   runsPublishCommand: boolean;
+  /** Only the text-level test saw a publish command, the job holds no npm token, and it holds `id-token: write`. */
+  possiblePublish: boolean;
+  /** A command in the job nests wrappers deeper than the parser follows, so it was treated as publishing and running code. */
+  commandTooDeep: boolean;
   /** The job installs dependencies or runs a build, test or lint step or a repository tool. */
   runsRepositoryCode: boolean;
   /** Local actions the job uses that the checker could not read, with the reason. */

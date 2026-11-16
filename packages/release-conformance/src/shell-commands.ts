@@ -71,6 +71,8 @@ export interface ShellFacts {
   /** Installs dependencies or runs a build, test or lint step, or runs a tool from the repository. */
   runsCode: boolean;
   scripts: ScriptRef[];
+  /** A command nests wrappers deeper than the parser follows; it is treated as publishing and running code. */
+  tooDeep?: boolean;
 }
 
 const noFacts = (): ShellFacts => ({ publishes: false, runsCode: false, scripts: [] });
@@ -78,6 +80,7 @@ const noFacts = (): ShellFacts => ({ publishes: false, runsCode: false, scripts:
 const merge = (into: ShellFacts, from: ShellFacts): void => {
   if (from.publishes) into.publishes = true;
   if (from.runsCode) into.runsCode = true;
+  if (from.tooDeep) into.tooDeep = true;
   into.scripts.push(...from.scripts);
 };
 
@@ -171,26 +174,111 @@ const SHELL_KEYWORDS = new Set([
   '!',
   '{',
   '(',
-  'time',
-  'env',
-  'sudo',
-  'command',
-  'nohup',
   'corepack'
 ]);
+/**
+ * Commands that run the command that follows them. Their own flags (and the values some flags
+ * take) are skipped to reach it, so `timeout 300 npm publish` and `xargs -n1 npm publish` read as
+ * the publish they run.
+ */
+const WRAPPER_VALUE_FLAGS: ReadonlyMap<string, ReadonlySet<string>> = new Map([
+  [
+    'xargs',
+    new Set([
+      '-a',
+      '-d',
+      '-E',
+      '-e',
+      '-I',
+      '-i',
+      '-L',
+      '-l',
+      '-n',
+      '-P',
+      '-s',
+      '--arg-file',
+      '--delimiter',
+      '--max-args',
+      '--max-procs',
+      '--max-lines',
+      '--max-chars'
+    ])
+  ],
+  ['timeout', new Set(['-s', '--signal', '-k', '--kill-after'])],
+  [
+    'sudo',
+    new Set(['-u', '-g', '-h', '-p', '-C', '-D', '-r', '-t', '-U', '-R', '--user', '--group'])
+  ],
+  ['doas', new Set(['-u', '-C'])],
+  ['env', new Set(['-u', '-C', '--unset', '--chdir'])],
+  ['nice', new Set(['-n', '--adjustment'])],
+  ['ionice', new Set(['-c', '-n', '-p', '-P', '-u'])],
+  ['exec', new Set(['-a'])],
+  ['nohup', new Set()],
+  ['time', new Set(['-f', '-o', '--format', '--output'])],
+  ['command', new Set()],
+  ['setsid', new Set()],
+  ['stdbuf', new Set(['-i', '-o', '-e'])]
+]);
+const SHELL_NAMES = new Set(['bash', 'sh', 'zsh', 'dash', 'ksh']);
+const DURATION = /^\d+(?:\.\d+)?[smhd]?$/;
+/** Nesting deeper than this is not a real command line; the parser stops following it and fails closed. */
+const MAX_DEPTH = 8;
 const ASSIGNMENT = /^[A-Za-z_][A-Za-z0-9_]*=/;
 const DIR_FLAGS = new Set(['--dir', '-C', '--prefix', '--cwd']);
 const WIDE_FLAGS = new Set(['-r', '--recursive', '--workspaces', '-ws', '--filter', '-F']);
+
+/** Value flags of the publish commands, so `npm --tag beta publish` still reads `publish` as the subcommand. */
+const PUBLISH_VALUE_FLAGS = new Set([
+  '--tag',
+  '--registry',
+  '--otp',
+  '--access',
+  '--userconfig',
+  '--globalconfig',
+  '--cache',
+  '--loglevel',
+  '--publish-branch',
+  '--scope',
+  '--dist-tag',
+  '--npm-tag',
+  '--git-remote',
+  '--reporter',
+  '--config'
+]);
 
 /** Flags that take a separate value, so the value is not the subcommand. */
 const flagTakesValue = ({ manager, flag }: { manager: string; flag: string }): boolean => {
   if (DIR_FLAGS.has(flag) || flag === '--filter' || flag === '-F') return true;
   if (flag === '--workspace') return true;
-  if (flag === '-w') return manager === 'npm';
+  if (PUBLISH_VALUE_FLAGS.has(flag)) return true;
+  if (flag === '-w' || flag === '-m') return manager === (flag === '-w' ? 'npm' : 'lerna');
   return flag === '--package' || flag === '-p';
 };
 
-const unquote = (token: string): string => token.replace(/^["'`]+|["'`]+$/g, '');
+const QUOTES = new Set(['"', "'", '`']);
+
+/** Strips quote characters from both ends of a word, by index so the cost is linear in its length. */
+export const unquote = (token: string): string => {
+  let start = 0;
+  let end = token.length;
+  while (start < end && QUOTES.has(token[start] ?? '')) start += 1;
+  while (end > start && QUOTES.has(token[end - 1] ?? '')) end -= 1;
+  return token.slice(start, end);
+};
+
+/** Index of the word after a `NAME=value` word, past the rest of a quoted value that holds spaces. */
+const skipAssignment = ({ words, index }: { words: string[]; index: number }): number => {
+  const token = words[index] ?? '';
+  const value = token.slice(token.indexOf('=') + 1);
+  const open = value[0];
+  let next = index + 1;
+  if ((open === '"' || open === "'") && !(value.length > 1 && value.endsWith(open))) {
+    while (next < words.length && !(words[next] ?? '').endsWith(open)) next += 1;
+    next += 1;
+  }
+  return next;
+};
 
 /** Words of one command with leading shell keywords, variable assignments and wrappers removed. */
 const commandWords = (segment: string): string[] => {
@@ -207,14 +295,7 @@ const commandWords = (segment: string): string[] => {
       continue;
     }
     if (ASSIGNMENT.test(token)) {
-      // A quoted value may hold spaces: skip to the word that closes the quote.
-      const value = token.slice(token.indexOf('=') + 1);
-      const open = value[0];
-      index += 1;
-      if ((open === '"' || open === "'") && !(value.length > 1 && value.endsWith(open))) {
-        while (index < raw.length && !(raw[index] ?? '').endsWith(open)) index += 1;
-        index += 1;
-      }
+      index = skipAssignment({ words: raw, index });
       continue;
     }
     break;
@@ -224,14 +305,81 @@ const commandWords = (segment: string): string[] => {
 
 const basename = (word: string): string => word.replace(/^.*\//, '');
 
-const classify = ({ words, dirs }: { words: string[]; dirs: string[] }): ShellFacts => {
+const tooDeepFacts = (): ShellFacts => ({
+  publishes: true,
+  runsCode: true,
+  scripts: [],
+  tooDeep: true
+});
+
+/** The command a wrapper runs: its own flags (and their values), assignments and a leading duration skipped. */
+const wrappedCommand = ({ name, rest }: { name: string; rest: string[] }): string[] => {
+  const valueFlags = WRAPPER_VALUE_FLAGS.get(name) ?? new Set<string>();
+  let index = 0;
+  let sawDuration = false;
+  while (index < rest.length) {
+    const token = rest[index] ?? '';
+    if (token === '--') {
+      index += 1;
+      break;
+    }
+    if (token.startsWith('-') && token.length > 1) {
+      index += valueFlags.has(token) ? 2 : 1;
+      continue;
+    }
+    if (name === 'env' && ASSIGNMENT.test(token)) {
+      index = skipAssignment({ words: rest, index });
+      continue;
+    }
+    if (name === 'timeout' && !sawDuration && DURATION.test(token)) {
+      sawDuration = true;
+      index += 1;
+      continue;
+    }
+    break;
+  }
+  return rest.slice(index);
+};
+
+/** `bash -c "<command>"`: the words after the `-c` flag are the command it runs. */
+const shellCommandString = (rest: string[]): string[] => {
+  for (let index = 0; index < rest.length; index += 1) {
+    const token = rest[index] ?? '';
+    if (!token.startsWith('-') && !token.startsWith('+')) return [];
+    if (/^-[A-Za-z]*c[A-Za-z]*$/.test(token)) return rest.slice(index + 1);
+    if (token === '-o' || token === '+o') index += 1;
+  }
+  return [];
+};
+
+/** `find ... -exec <command> {} \;` runs the command that follows the `-exec` family flag. */
+const findExecCommand = (rest: string[]): string[] => {
+  const at = rest.findIndex((token) => ['-exec', '-execdir', '-ok', '-okdir'].includes(token));
+  return at < 0 ? [] : rest.slice(at + 1);
+};
+
+const classify = ({
+  words,
+  dirs,
+  depth = 0
+}: {
+  words: string[];
+  dirs: string[];
+  depth?: number;
+}): ShellFacts => {
+  if (depth > MAX_DEPTH) return tooDeepFacts();
   const [first = '', ...rest] = words;
   const name = basename(first);
-  if (PACKAGE_MANAGERS.has(name)) return classifyManager({ manager: name, rest, dirs });
-  if (BINARY_RUNNERS.has(name)) return classifyExec({ rest, dirs });
+  const inner = (next: string[]): ShellFacts =>
+    next.length === 0 ? noFacts() : classify({ words: next, dirs, depth: depth + 1 });
+  if (PACKAGE_MANAGERS.has(name)) return classifyManager({ manager: name, rest, dirs, depth });
+  if (BINARY_RUNNERS.has(name)) return classifyExec({ rest, dirs, depth });
   if (name === 'changeset' || name === 'changesets' || CHANGESETS_CLI.test(first)) {
     return { ...noFacts(), publishes: firstWord(rest) === 'publish' };
   }
+  if (WRAPPER_VALUE_FLAGS.has(name)) return inner(wrappedCommand({ name, rest }));
+  if (SHELL_NAMES.has(name)) return inner(shellCommandString(rest));
+  if (name === 'find') return inner(findExecCommand(rest));
   if (name === 'node') {
     return { ...noFacts(), runsCode: !runsOwnActionScript(rest) && !onlyReportsVersion(rest) };
   }
@@ -266,7 +414,15 @@ const TEST_SUBCOMMANDS = new Set(['test', 't', 'install-test', 'it']);
 const firstWord = (tokens: string[]): string | undefined => tokens.find((t) => !t.startsWith('-'));
 
 /** `<runner> [flags] <command ...>`: runs another command, which is repository code unless it only publishes. */
-const classifyExec = ({ rest, dirs }: { rest: string[]; dirs: string[] }): ShellFacts => {
+const classifyExec = ({
+  rest,
+  dirs,
+  depth
+}: {
+  rest: string[];
+  dirs: string[];
+  depth: number;
+}): ShellFacts => {
   let index = 0;
   while (index < rest.length) {
     const token = rest[index] ?? '';
@@ -279,18 +435,25 @@ const classifyExec = ({ rest, dirs }: { rest: string[]; dirs: string[] }): Shell
   }
   const inner = rest.slice(index);
   if (inner.length === 0) return { ...noFacts(), runsCode: true };
-  const facts = classify({ words: inner, dirs });
-  return { publishes: facts.publishes, runsCode: !facts.publishes, scripts: facts.scripts };
+  const facts = classify({ words: inner, dirs, depth: depth + 1 });
+  return {
+    publishes: facts.publishes,
+    runsCode: !facts.publishes || facts.tooDeep === true,
+    scripts: facts.scripts,
+    ...(facts.tooDeep ? { tooDeep: true } : {})
+  };
 };
 
 const classifyManager = ({
   manager,
   rest,
-  dirs
+  dirs,
+  depth
 }: {
   manager: string;
   rest: string[];
   dirs: string[];
+  depth: number;
 }): ShellFacts => {
   const facts = noFacts();
   const flagDirs: string[] = [];
@@ -347,7 +510,7 @@ const classifyManager = ({
     return facts;
   }
   if (EXEC_SUBCOMMANDS.has(sub)) {
-    return classifyExec({ rest: rest.slice(subIndex + 1), dirs: where });
+    return classifyExec({ rest: rest.slice(subIndex + 1), dirs: where, depth });
   }
   if (sub === 'global') return facts;
   if (CODE_SUBCOMMANDS.has(sub) || CODE_SCRIPTS.test(sub)) {
@@ -365,16 +528,22 @@ const classifyManager = ({
     return facts;
   }
   const known = BUILTIN_COMMANDS.has(sub) || RUN_SUBCOMMANDS.has(sub) || EXEC_SUBCOMMANDS.has(sub);
-  // A flag with a value before the subcommand (`npm --tag beta publish`) leaves the value in the
-  // subcommand's place, so `publish` among the remaining words still publishes.
-  if (!known && words.includes('publish')) {
+  // npm and lerna take no bare script or binary name, so a word before `publish` can only be the
+  // value of a flag this parser does not know (`npm --tag beta publish`); `publish` still publishes.
+  if (!known && (manager === 'npm' || manager === 'lerna') && words.includes('publish')) {
     facts.publishes = true;
     return facts;
   }
-  // `pnpm <script>` and `yarn <script>` run a package script by name, or a package binary of that name.
+  // `pnpm <script>` and `yarn <script>` run a package script by name, or a package binary of that
+  // name; `pnpm wrangler publish` publishes with wrangler, not with the package manager.
   if ((manager === 'pnpm' || manager === 'yarn') && !BUILTIN_COMMANDS.has(sub)) {
     facts.scripts.push({ name: sub, dirs: where, wide });
-    if (classify({ words, dirs: where }).publishes) facts.publishes = true;
+    const ran = classify({ words, dirs: where, depth: depth + 1 });
+    if (ran.publishes) facts.publishes = true;
+    if (ran.tooDeep) {
+      facts.tooDeep = true;
+      facts.runsCode = true;
+    }
   }
   return facts;
 };

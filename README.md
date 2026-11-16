@@ -277,7 +277,7 @@ Rules for bespoke publishers:
 | Rule | Requirement |
 |------|-------------|
 | `publisher/split` | The publishing credential is granted at job level, only to jobs that install dependencies, build, test or lint nothing and hold no other write scope |
-| `publisher/no-cache` | No job sets a `cache:` input on a setup action or uses `actions/cache`; `actions/setup-node` from v6 (or a ref whose version cannot be told; a commit SHA takes its version from the trailing `# vX.Y.Z` comment) caches npm on its own, so it needs `package-manager-cache: false` |
+| `publisher/no-cache` | No job sets a `cache:` input on a setup action or uses `actions/cache`; `actions/setup-node` from v5 (or a ref whose version cannot be told; a commit SHA takes its version from the trailing `# vX.Y.Z` comment) caches dependencies on its own, so it needs `package-manager-cache: false` |
 | `publisher/environment` | Every publishing job declares a literal `environment:` name |
 | `publisher/events` | Starts only on `push` to the default branch without `tags` or `tags-ignore`, or `release` of type `published`; a reusable publisher with no caller in the repository fails because the events that start it cannot be checked |
 | `publisher/publishing-dispatch` | No `workflow_dispatch` start for a publishing workflow |
@@ -285,6 +285,7 @@ Rules for bespoke publishers:
 | `publisher/id-token-with-code` | `id-token: write` is not held by a job that runs repository or dependency code |
 | `publisher/token-with-code` | An npm token is not held by a job that runs repository or dependency code |
 | `publisher/unreadable-local-action` | A job that holds a publishing credential does not use a local action the check cannot read: one outside `.github/actions/`, missing, not a composite action, or using a further local action |
+| `publisher/possible-publish` | A job that holds `id-token: write` has no command that looks like a package publish (`npm`, `pnpm`, `yarn`, `lerna`, `bun` or `changeset publish`) that the check cannot confirm as one; the job is not treated as a publisher, so a code-owner-reviewed marker may waive it |
 
 Three further results are informational: `publisher/unclassified-id-token`
 and `publisher/unclassified-npm-token` (notices for a job that holds

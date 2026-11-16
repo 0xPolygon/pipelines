@@ -22,7 +22,7 @@ import {
   sameRepository
 } from './canonical.ts';
 import { createScriptReader } from './package-scripts.ts';
-import { readRegularFile } from './safe-read.ts';
+import { linkedParent, readRegularFile } from './safe-read.ts';
 import { analyzeShell, normalizeShell, stripShellComments } from './shell-commands.ts';
 import {
   MAX_WORKFLOW_BYTES,
@@ -46,31 +46,103 @@ const CALLEE_CHECKOUT_PREFIX = '.pipelines/';
 /** The action of the shared release workflow that publishes tarballs with the npm client; its script is not shell. */
 const CALLEE_PUBLISH_ACTION = '.github/actions/npm-publish-tarballs';
 
-/** Characters that may sit just before a command word: whitespace, quotes and shell openers. */
-const BEFORE_COMMAND = String.raw`(?:^|[\s("'\`{])`;
-const MANAGER_WORD = new RegExp(`${BEFORE_COMMAND}(?:npm|pnpm|yarn|lerna|bun)\\b`);
-const CHANGESET_PUBLISH = new RegExp(
-  `${BEFORE_COMMAND}(?:@changesets/cli(?:@\\S*)?|changesets?)\\s+publish(?![\\w:-])`
-);
-/** The word `publish` itself, not a script such as `docs:publish` or `publish:docs`. */
-const PUBLISH_WORD = /(?<![\w:./-])publish(?![\w:-])/;
+/** The tools whose `publish` subcommand publishes a package. */
+const PUBLISH_TOOL = /^(?:npm|pnpm|yarn|lerna|bun|changesets?|@changesets\/cli(?:@[^\s]*)?)$/;
+/** Commands that only print their arguments, so a quoted `npm publish` after them is text, not a command. */
+const PRINTERS = new Set(['echo', 'printf']);
+/** Commands that run the string they are given, so a quoted publish after them still runs. */
+const STRING_EXECUTORS = new Set([
+  'bash',
+  'sh',
+  'zsh',
+  'dash',
+  'ksh',
+  'eval',
+  'su',
+  'ssh',
+  'watch'
+]);
+const LEADING_PUNCTUATION = new Set(['(', '{', '$', '"', "'", '`']);
+const TRAILING_PUNCTUATION = new Set([')', '}', '"', "'", '`']);
+
+/** Trims shell openers and quotes from both ends of a word, by index so the cost is linear in its length. */
+const bareWord = (token: string): { word: string; opensQuote: boolean } => {
+  let start = 0;
+  let end = token.length;
+  let opensQuote = false;
+  while (start < end && LEADING_PUNCTUATION.has(token[start] ?? '')) {
+    if (token[start] === '"' || token[start] === "'" || token[start] === '`') opensQuote = true;
+    start += 1;
+  }
+  while (end > start && TRAILING_PUNCTUATION.has(token[end - 1] ?? '')) end -= 1;
+  return { word: token.slice(start, end), opensQuote };
+};
+
+/** The name of the command a tokenised segment runs, past variable assignments and shell keywords. */
+const segmentCommand = (tokens: string[]): string => {
+  const skipped = new Set([
+    'if',
+    'then',
+    'else',
+    'elif',
+    'do',
+    'while',
+    'until',
+    '!',
+    '{',
+    '(',
+    'time'
+  ]);
+  for (const token of tokens) {
+    if (token === '' || skipped.has(token) || /^[A-Za-z_][A-Za-z0-9_]*=/.test(token)) continue;
+    return bareWord(token).word.replace(/^.*\//, '');
+  }
+  return '';
+};
+
+/** Tracks whether a run of words is inside an open quote, one word at a time. */
+const nextQuoteState = ({
+  quote,
+  token
+}: {
+  quote: string | undefined;
+  token: string;
+}): string | undefined => {
+  let state = quote;
+  for (const char of token) {
+    if (state === undefined) {
+      if (char === '"' || char === "'") state = char;
+    } else if (char === state) state = undefined;
+  }
+  return state;
+};
 
 /**
- * Loose publish-command test for text the parser may not understand (wrappers
- * such as `xargs` or `bash -c`); errs towards seeing a publish. It works one
- * command at a time and does one pass over each, so its cost is linear in the
- * text however the text is built.
+ * Text-level publish test, the second opinion beside the command parser. `publish` counts only as the
+ * word right after `npm`, `pnpm`, `yarn`, `lerna`, `bun`, `changeset(s)` or `@changesets/cli`
+ * (flags may sit between), never after another binary name and not inside a quoted argument of a
+ * command that only prints (`echo "skipping npm publish"`). It reads each command as a list of words
+ * in one pass, so its cost is linear in the text however the text is built.
  */
-/** Subcommands that run some other tool; the parser reads the tool, so the loose test leaves them alone. */
-const RUNS_OTHER_TOOL = /^\s+(?:exec|dlx|x|run|run-script)(?![\w-])/;
-
 const looseRunsPublish = (text: string): boolean =>
-  CHANGESET_PUBLISH.test(text) ||
   text.split(/[\n;&|]/).some((segment) => {
-    const manager = MANAGER_WORD.exec(segment);
-    if (manager === null) return false;
-    const rest = segment.slice(manager.index + manager[0].length);
-    return !RUNS_OTHER_TOOL.test(rest) && PUBLISH_WORD.test(rest);
+    const tokens = segment.split(/\s+/);
+    const command = segmentCommand(tokens);
+    if (PRINTERS.has(command)) return false;
+    let quote: string | undefined;
+    for (let index = 0; index < tokens.length; index += 1) {
+      const token = tokens[index] ?? '';
+      const { word, opensQuote } = bareWord(token);
+      const before = quote;
+      quote = nextQuoteState({ quote, token });
+      // A word that opens a quote and closes it again (`"npm" publish`) is not inside a string.
+      const quoted = before !== undefined || (opensQuote && quote !== undefined);
+      if (!PUBLISH_TOOL.test(word) || (quoted && !STRING_EXECUTORS.has(command))) continue;
+      let next = index + 1;
+      while ((tokens[next] ?? '').startsWith('-')) next += 1;
+      if (bareWord(tokens[next] ?? '').word === 'publish') return true;
+    }
+    return false;
   });
 
 /** Arguments of a tag-only command: plain words and flags, with no quoting or shell syntax. */
@@ -78,7 +150,11 @@ const TAG_ARGUMENT = /^[\w./:@-]+$/;
 const PACKAGE_MANAGERS = new Set(['pnpm', 'npm', 'yarn']);
 const NPM_TOKEN_NAME = /npm/i;
 
-export const runsPublishText = (text: string): boolean => looseRunsPublish(normalizeShell(text));
+/** True when the text-level test alone sees a publish command in the text. */
+export const textSeesPublish = (text: string): boolean => looseRunsPublish(normalizeShell(text));
+
+export const runsPublishText = (text: string): boolean =>
+  analyzeShell({ text }).publishes || textSeesPublish(text);
 
 /**
  * Tokenised rather than one pattern with nested repetition, so the cost stays
@@ -154,6 +230,9 @@ const readLocalAction = ({
     relative = relative.slice(CALLEE_CHECKOUT_PREFIX.length);
   if (!relative.startsWith(LOCAL_ACTION_DIR))
     return { ok: false, reason: 'it is outside `.github/actions/`, which the check reads' };
+  const linked = linkedParent({ root, relative });
+  if (linked !== undefined)
+    return { ok: false, reason: `\`${linked}\` is a link, which the check does not follow` };
   for (const name of ['action.yml', 'action.yaml']) {
     const file = join(root, relative, name);
     let text: string;
@@ -228,6 +307,9 @@ interface ScanEnvironment {
 const scanJob = ({ job, env }: { job: JobModel; env: ScanEnvironment }): JobScan => {
   const runs: string[] = [];
   let publishes = false;
+  /** Only the text-level test saw a publish; the command parser did not confirm one. */
+  let textOnlyPublish = false;
+  let tooDeep = false;
   let runsCode = false;
   let idToken = false;
   let npmToken = false;
@@ -256,14 +338,20 @@ const scanJob = ({ job, env }: { job: JobModel; env: ScanEnvironment }): JobScan
       baseDirs,
       ...(actionPathVars === undefined ? {} : { actionPathVars })
     });
-    if (facts.publishes || runsPublishText(text)) publishes = true;
+    if (facts.publishes) publishes = true;
+    else if (textSeesPublish(text)) textOnlyPublish = true;
+    if (facts.tooDeep) tooDeep = true;
     if (facts.runsCode) runsCode = true;
     for (const ref of facts.scripts) {
       const found = env.reader.lookup(ref);
       if (!found.defined && ref.optional !== true) unresolved.add(ref.name);
       // One level only: the script body itself must hold an explicit publish command.
-      for (const body of found.bodies)
-        if (analyzeShell({ text: body }).publishes || runsPublishText(body)) publishes = true;
+      for (const body of found.bodies) {
+        const inner = analyzeShell({ text: body });
+        if (inner.publishes) publishes = true;
+        else if (textSeesPublish(body)) textOnlyPublish = true;
+        if (inner.tooDeep) tooDeep = true;
+      }
     }
   };
 
@@ -314,13 +402,18 @@ const scanJob = ({ job, env }: { job: JobModel; env: ScanEnvironment }): JobScan
       }
     }
   }
+  // An npm token in the job keeps the token rules whatever sees the publish; with no token, a
+  // publish only the text test sees is a possible publish for a person to confirm, not a classification.
+  const confirmed = publishes || (textOnlyPublish && npmToken);
   return {
     jobId: job.id,
     runText: runs.join('\n'),
     holdsPublishCredential: idToken || npmToken,
     holdsIdToken: idToken,
     holdsNpmToken: npmToken,
-    runsPublishCommand: publishes,
+    runsPublishCommand: confirmed,
+    possiblePublish: textOnlyPublish && !confirmed && idToken,
+    commandTooDeep: tooDeep,
     runsRepositoryCode: runsCode,
     unreadableActions: unreadable,
     unresolvedScripts: [...unresolved]
@@ -337,6 +430,8 @@ const classify = ({ model, jobs }: { model: WorkflowModel; jobs: JobScan[] }): F
 };
 
 const listWorkflowFiles = (root: string): string[] => {
+  // The workflow directory itself is only listed when no part of its path is a link.
+  if (linkedParent({ root, relative: WORKFLOW_DIR }) !== undefined) return [];
   const dir = join(root, WORKFLOW_DIR);
   if (!existsSync(dir)) return [];
   return readdirSync(dir)
@@ -426,6 +521,17 @@ export const scanRepo = ({
   repository?: string;
 }): ScanResult => {
   const models = new Map<string, WorkflowModel>();
+  const linked = linkedParent({ root, relative: WORKFLOW_DIR });
+  if (linked !== undefined) {
+    // Reported as an unreadable workflow so the run fails instead of passing over a tree it never read.
+    models.set(
+      WORKFLOW_DIR,
+      unreadableWorkflow({
+        file: WORKFLOW_DIR,
+        reason: `\`${linked}\` is a link and was not followed`
+      })
+    );
+  }
   for (const file of listWorkflowFiles(root)) {
     const model = readWorkflow({ root, file });
     if (model) models.set(file, model);

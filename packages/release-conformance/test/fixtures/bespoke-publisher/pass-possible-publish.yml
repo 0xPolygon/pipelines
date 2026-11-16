@@ -1,0 +1,12 @@
+name: a message that mentions a publish
+on:
+  push:
+    branches: [main]
+permissions: {}
+jobs:
+  notify:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    steps:
+      - run: echo "skipping npm publish on this branch"
