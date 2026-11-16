@@ -86,5 +86,35 @@ run_case 'empty policy list fails' 1 'FAIL.*not exactly the default' "$GOOD" '[]
 run_case 'protected-branches mode fails' 1 'FAIL deployment limited to protected branches, not the default branch only' \
   "$(env_json false true "$ONE" '{"protected_branches":true,"custom_branch_policies":false}')"
 
+# A passing run reports the two unverifiable conditions and never claims all passed.
+printf '%s' "$GOOD" >"$FIXTURE_DIR/environment.json"
+jq -n --argjson p "$MAIN" '{total_count: ($p | length), branch_policies: $p}' >"$FIXTURE_DIR/policies.json"
+echo '{"default_branch":"main"}' >"$FIXTURE_DIR/repo.json"
+got=0
+out="$(GH_BIN="$WORK/gh" bash "$CHECK" example/repo 2>&1)" || got=$?
+if [ "$got" -eq 0 ] \
+  && grep -Eq '^UNKNOWN required reviewers hold no npm publish rights' <<<"$out" \
+  && grep -Eq "^UNKNOWN only organisation admins can edit the environment's protection rules" <<<"$out" \
+  && [ "$(tail -n1 <<<"$out")" = "checkable conditions passed for example/repo; two need a human check" ] \
+  && ! grep -qi 'all conditions passed' <<<"$out"; then
+  echo "  PASS: passing run prints both UNKNOWN lines and the checkable-conditions line, never 'all conditions passed'"
+  PASS=$((PASS + 1))
+else
+  echo "  FAIL: passing run output (exit $got)"
+  echo "$out" | sed 's/^/    /'
+  FAIL=$((FAIL + 1))
+fi
+# A failing run must not print the success line.
+printf '%s' "$(env_json true true "$ONE" "$POLICY")" >"$FIXTURE_DIR/environment.json"
+got=0
+out="$(GH_BIN="$WORK/gh" bash "$CHECK" example/repo 2>&1)" || got=$?
+if [ "$got" -eq 1 ] && ! grep -q 'checkable conditions passed' <<<"$out"; then
+  echo "  PASS: failing run exits 1 and prints no success line"
+  PASS=$((PASS + 1))
+else
+  echo "  FAIL: failing run exited $got or printed a success line"
+  FAIL=$((FAIL + 1))
+fi
+
 echo "$PASS passed, $FAIL failed"
 [ "$FAIL" -eq 0 ]

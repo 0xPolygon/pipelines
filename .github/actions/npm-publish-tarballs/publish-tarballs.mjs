@@ -1,6 +1,7 @@
 // Publishes the tarballs listed in <directory>/manifest.json.
 //
-// manifest.json is an array of { name, version, file, sha256, access, tag }.
+// manifest.json is an array of { name, version, file, sha256, access, tag },
+// each optionally with `preTag` (the pre-mode tag).
 // Every entry is verified (fields well-formed, file inside the directory,
 // SHA-256 matches, the tarball's own name and version match the entry) and the
 // npm client version is checked before the first publish, so a bad manifest
@@ -17,6 +18,16 @@
 // fails the step, which keeps the release's tag and GitHub Release from being
 // created for a version consumers cannot install. Output showing a staged
 // publish also fails: staged publishing is not supported.
+//
+// Each publish picks its dist-tag at publish time from the registry's current
+// `latest` (resolvePublishTag), so releases approved out of order never move
+// `latest` backwards in the normal case: a stable version above `latest` takes
+// `latest`, an older or equal stable takes `previous`, and a prerelease never
+// takes `latest`. The registry's package document can lag a fresh publish, so
+// a publish that starts right after another may still read a stale `latest`
+// and choose wrongly; that is a narrow window, not a guarantee. The read is
+// tried three times; a registry answer that still cannot be read fails that
+// package closed, before `npm publish`.
 //
 // No token is read or passed on: npm authenticates with the runner's OIDC
 // identity. Logs name packages and versions only and never print the
@@ -130,6 +141,9 @@ export function readManifest(directory) {
     const problems = [
       entry.access !== 'public' && 'access must be "public"',
       !TAG_PATTERN.test(entry.tag) && 'tag must match ^[a-z][a-z0-9._-]*$',
+      entry.preTag !== undefined &&
+        !(typeof entry.preTag === 'string' && TAG_PATTERN.test(entry.preTag)) &&
+        'preTag must match ^[a-z][a-z0-9._-]*$',
       !(NAME_PATTERN.test(entry.name) && entry.name.length <= 214) &&
         'name is not a valid npm package name',
       !VERSION_PATTERN.test(entry.version) && 'version is not a semver version',
@@ -197,6 +211,152 @@ export function verifyTarballIdentity({ path, entry, run = defaultRun }) {
         `registry other than ${NPM_REGISTRY}`
     );
   }
+}
+
+// The one fixed dist-tag for a stable version older than the registry's
+// `latest`. It does not collide with the tags changesets, snapshots or
+// canaries use (`next`, `pre`, `canary`, `snapshot` names).
+export const PREVIOUS_TAG = 'previous';
+
+const SEMVER_PATTERN = /^v?(\d+)\.(\d+)\.(\d+)(?:-([0-9A-Za-z.-]+))?(?:\+[0-9A-Za-z.-]+)?$/;
+
+/** Splits a semver 2.0 version into numbers and prerelease identifiers; null when malformed. */
+export function parseSemver(text) {
+  const match = SEMVER_PATTERN.exec(String(text).trim());
+  if (!match) return null;
+  return {
+    core: [match[1], match[2], match[3]].map(Number),
+    pre: match[4] === undefined ? [] : match[4].split('.')
+  };
+}
+
+/** Semver 2.0 precedence: negative when a < b, 0 when equal (build metadata ignored), positive when a > b. */
+export function compareSemver(a, b) {
+  const left = parseSemver(a);
+  const right = parseSemver(b);
+  if (!left || !right) throw new Error(`cannot compare "${a}" and "${b}" as semver versions`);
+  for (let i = 0; i < 3; i++) {
+    if (left.core[i] !== right.core[i]) return left.core[i] < right.core[i] ? -1 : 1;
+  }
+  // A version without a prerelease outranks the same core with one.
+  if (left.pre.length === 0 || right.pre.length === 0) {
+    return left.pre.length === right.pre.length ? 0 : left.pre.length === 0 ? 1 : -1;
+  }
+  const length = Math.max(left.pre.length, right.pre.length);
+  for (let i = 0; i < length; i++) {
+    const x = left.pre[i];
+    const y = right.pre[i];
+    // A shorter identifier list is lower when everything before it is equal.
+    if (x === undefined) return -1;
+    if (y === undefined) return 1;
+    if (x === y) continue;
+    const xNumeric = /^\d+$/.test(x);
+    const yNumeric = /^\d+$/.test(y);
+    if (xNumeric && yNumeric) return BigInt(x) < BigInt(y) ? -1 : 1;
+    if (xNumeric !== yNumeric) return xNumeric ? -1 : 1;
+    return x < y ? -1 : 1;
+  }
+  return 0;
+}
+
+/**
+ * The dist-tag to publish `version` under, decided from the registry's
+ * current `latest` (null when the package has none or was never published).
+ * `recordedTag` is what npm-pack recorded.
+ *
+ * - A tag other than `latest` is kept: it is either an explicit override or
+ *   changesets' pre tag, and neither is ours to change.
+ * - A prerelease never gets `latest`, with or without a registry `latest`:
+ *   it uses the recorded tag when that is not `latest`, else `preTag` (the
+ *   pre-mode tag npm-pack recorded; a package with only prereleases so far is
+ *   recorded for `latest`). With neither, it fails closed.
+ * - A stable version above `latest`, or with no `latest` or a prerelease
+ *   `latest` to compare with, takes `latest`; an older or equal one takes `previous`.
+ *
+ * Throws when a version cannot be parsed, so the caller fails closed.
+ */
+export function resolvePublishTag({ version, recordedTag, preTag, latest }) {
+  const parsed = parseSemver(version);
+  if (!parsed) throw new Error(`"${version}" is not a semver version`);
+  const latestParsed = latest === null || latest === undefined ? null : parseSemver(latest);
+  if (latest !== null && latest !== undefined && latestParsed === null) {
+    throw new Error(`registry latest "${latest}" is not a semver version`);
+  }
+  if (parsed.pre.length > 0) {
+    const tag = recordedTag !== 'latest' ? recordedTag : preTag;
+    if (tag === undefined || tag === 'latest') {
+      throw new Error(
+        `prerelease ${version} has no tag other than "latest" to publish under; ` +
+          'a prerelease never takes "latest" (the manifest has no pre-mode tag for it)'
+      );
+    }
+    return tag;
+  }
+  if (recordedTag !== 'latest') return recordedTag;
+  // A prerelease should never hold `latest`, so a stable version replaces one
+  // even when it is semver-lower.
+  if (latestParsed === null || latestParsed.pre.length > 0) return 'latest';
+  return compareSemver(version, latest) > 0 ? 'latest' : PREVIOUS_TAG;
+}
+
+// Waits before the second and third attempt to read a package's `latest`.
+export const FETCH_LATEST_RETRY_DELAYS_MS = [2 * 1000, 4 * 1000];
+
+/** URL of the public registry's package document; scoped names keep `%2F` encoded. */
+export const packageDocumentUrl = (name) => `${NPM_REGISTRY}${encodeURIComponent(name)}`;
+
+/**
+ * The registry's current `latest` for a package, read unauthenticated:
+ * the version string, or null when the package is unknown (404) or has no
+ * `latest`. Any other failure (network, timeout, other status, malformed
+ * document) throws, so it is never read as "no latest".
+ */
+export async function fetchLatest({
+  name,
+  fetchFn = fetch,
+  sleep = defaultSleep,
+  timeoutMs = READ_BACK_REQUEST_TIMEOUT_MS,
+  retryDelaysMs = FETCH_LATEST_RETRY_DELAYS_MS
+}) {
+  // A failed read costs a re-run and a second approval, so transient
+  // failures (network error, timeout, 5xx) get a few attempts. Anything
+  // else (404, other statuses, a bad document) is an answer, not retried.
+  let response;
+  for (let attempt = 0; ; attempt++) {
+    let failure;
+    try {
+      response = await fetchFn(packageDocumentUrl(name), {
+        headers: { accept: 'application/vnd.npm.install-v1+json' },
+        signal: AbortSignal.timeout(timeoutMs)
+      });
+      if (response.status < 500) break;
+      failure = `registry lookup of ${name} answered ${response.status}`;
+    } catch (err) {
+      failure = `registry lookup of ${name} failed: ${err?.message ?? err}`;
+    }
+    if (attempt >= retryDelaysMs.length) throw new Error(failure);
+    await sleep(retryDelaysMs[attempt]);
+  }
+  if (response.status === 404) return null;
+  if (response.status !== 200) {
+    throw new Error(`registry lookup of ${name} answered ${response.status}`);
+  }
+  let document;
+  try {
+    document = await response.json();
+  } catch {
+    throw new Error(`registry document for ${name} is not valid JSON`);
+  }
+  const tags = document?.['dist-tags'];
+  if (tags === null || typeof tags !== 'object' || Array.isArray(tags)) {
+    throw new Error(`registry document for ${name} has no dist-tags`);
+  }
+  const latest = tags.latest;
+  if (latest === undefined) return null;
+  if (typeof latest !== 'string' || !parseSemver(latest)) {
+    throw new Error(`registry document for ${name} has a malformed latest tag`);
+  }
+  return latest;
 }
 
 /**
@@ -344,6 +504,7 @@ export async function publishAll({
   // shared deadline, so total waiting is one window however many packages.
   const pending = [];
   const failures = [];
+  const tags = new Map();
   for (const [index, entry] of manifest.entries()) {
     const id = `${entry.name}@${entry.version}`;
     try {
@@ -354,13 +515,22 @@ export async function publishAll({
         pending.push({ entry, integrity, kind: 'skipped' });
         continue;
       }
+      // Decided now, from the registry as it is now, so the order releases
+      // were approved in cannot move `latest` backwards. Always passed with
+      // --tag; no dist-tag is added or removed afterwards.
+      const tag = resolvePublishTag({
+        version: entry.version,
+        recordedTag: entry.tag,
+        preTag: entry.preTag,
+        latest: await fetchLatest({ name: entry.name, fetchFn, sleep })
+      });
       const result = run('npm', [
         'publish',
         paths[index],
         '--access',
         entry.access,
         '--tag',
-        entry.tag,
+        tag,
         '--registry',
         NPM_REGISTRY,
         '--ignore-scripts'
@@ -386,6 +556,7 @@ export async function publishAll({
           'npm reports a staged publish; the shared workflow does not support staged publishing yet'
         );
       }
+      tags.set(id, tag);
       pending.push({ entry, integrity, kind: 'published' });
     } catch (err) {
       log(`::error::${id}: ${err.message}`);
@@ -416,7 +587,7 @@ export async function publishAll({
         log(`::notice::${id} is already on the registry with the same contents; skipping`);
         skipped.push(id);
       } else {
-        log(`Published ${id} with tag ${entry.tag}; read back from the registry`);
+        log(`Published ${id} with tag ${tags.get(id)}; read back from the registry`);
         published.push(id);
       }
     }

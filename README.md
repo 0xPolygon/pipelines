@@ -216,7 +216,10 @@ skips `publish` and is tagged by `finalize` without any approval.
   reviewers, "prevent self-review" on, administrator bypass off, and
   deployment branches limited to the default branch. The workflow does not
   create or configure the environment; verify it with
-  `scripts/check-publish-environment.sh <owner>/<repo>`.
+  `scripts/check-publish-environment.sh <owner>/<repo>`. The script cannot
+  check two conditions, which need a human: that the required reviewers hold
+  no npm publish rights, and that only organisation admins can edit the
+  environment's protection rules.
 - **Trust config.** Each package's npm trusted-publisher configuration names
   the repository's release trigger workflow file and the environment
   `npm-publish`. Verify the environment with the script **before** recreating
@@ -228,6 +231,52 @@ skips `publish` and is tagged by `finalize` without any approval.
   while a release waits for approval, a second approval request can appear
   for the same versions; the second run finds them already published and
   skips them.
+- **Publishes run one at a time, normally in arrival order.** The `publish`
+  job (only that job) shares one concurrency group per repository and ref with
+  `queue: max` and `cancel-in-progress: false`; GitHub keeps up to 100 pending
+  publishes. GitHub says queue ordering "is not guaranteed", so the dist-tag
+  choice below, not the order, is what protects `latest`. A run waiting for
+  approval is expected to keep its place in the group, but GitHub does not
+  document this; it will be confirmed on a real run. If it holds, a publish
+  left awaiting approval holds the repository's publish queue: approve or
+  reject the oldest pending one first, or later publishes wait behind it. The
+  `version` job and
+  releases with nothing public to publish never wait on it. Runs on different
+  refs are not serialized, and the registry's package document can lag a
+  fresh publish, so a publish that starts immediately after another may still
+  read a stale `latest`.
+- **Dist-tags are chosen at publish time.** Just before each `npm publish`
+  the registry's current `latest` is read (unauthenticated), and the tag is
+  passed with `--tag`; no dist-tag is changed afterwards. Releases approved
+  out of order do not move `latest` backwards, except in one narrow case: the
+  registry's package document can lag a fresh publish, so a publish straight
+  after another may read a stale `latest`. A failed read is tried three times
+  (with a short wait) before that package fails closed. A stable version
+  above `latest` (or any stable version while `latest` is a prerelease), or a
+  package's first publish, gets `latest`. An older (or
+  equal) stable version gets `previous`; `previous` always names the most recently
+  published older stable version. A prerelease never gets `latest`: it keeps the tag recorded at pack time (changesets' pre tag; when only
+  prereleases have been published so far, the manifest's `preTag` from
+  `.changeset/pre.json` is used instead), and fails if neither is available. A recorded tag other than `latest` is kept; an
+  explicit `latest` cannot be told from the default, so an older stable version
+  still gets `previous`, and a prerelease fails. If
+  the registry cannot be read, nothing is published for that package. The
+  read-back checks the version document and its integrity, so a version
+  published under `previous` passes it like any other.
+- **A non-highest Release is not left as Latest.** After changesets creates
+  at least one Release (a push with nothing to release never touches Latest),
+  `finalize` checks the release tags and then judges the current Latest Release from current state:
+  if it is its package's highest stable version (from the package's tags;
+  per package, so multi-package repositories need no primary package) it
+  stays. Otherwise Latest goes to the Release recorded before the run if that
+  is still its package's highest stable version, else to that package's
+  highest stable tag that has a Release (falling down the tags past any
+  without one), else it is left unset. A Latest whose tag is not a version tag
+  is left alone. A re-run of a `finalize` whose correction failed creates no
+  new Release, so it does not run the correction again; the decision uses
+  current state, so the next release's `finalize` repairs a wrong Latest,
+  including the rare case where two `finalize` runs overlap tightly and leave
+  an older Release as Latest. Git tags are not changed.
 - **Artifact retention.** The tarballs are kept for 7 days. If approval or a
   re-run of `finalize` comes later, re-run all jobs to pack them again.
 - **Version hook (`version_script`, default `false`).** Set the input to
