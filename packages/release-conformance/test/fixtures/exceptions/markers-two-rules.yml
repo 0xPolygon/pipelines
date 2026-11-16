@@ -1,0 +1,10 @@
+# release-conformance-exception: publisher/no-cache until 2027-01-31 first reason
+name: example
+on:
+  push:
+    branches: [main]
+jobs:
+  build:
+    runs-on: ubuntu-latest # release-conformance-exception: publisher/environment until 2027-02-28 second reason
+    steps:
+      - run: echo hello

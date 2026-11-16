@@ -1,0 +1,16 @@
+name: job with an identity token that publishes nothing visible
+on:
+  push:
+    branches: [main]
+permissions: {}
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+    permissions:
+      id-token: write
+    steps:
+      - run: ./scripts/deploy.sh
+  known:
+    permissions:
+      id-token: write
+    uses: 0xPolygon/pipelines/.github/workflows/apps-some.yml@main

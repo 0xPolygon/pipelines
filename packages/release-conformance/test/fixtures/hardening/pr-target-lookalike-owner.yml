@@ -1,0 +1,9 @@
+name: reusable workflow of a repository that is only named pipelines
+on:
+  pull_request_target:
+jobs:
+  go:
+    permissions:
+      id-token: write
+    uses: someone-else/pipelines/.github/workflows/whatever.yml@main
+    secrets: inherit

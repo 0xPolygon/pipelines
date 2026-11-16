@@ -1,0 +1,10 @@
+name: workflow-level registry token
+on:
+  workflow_dispatch:
+env:
+  NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
+jobs:
+  release:
+    runs-on: ubuntu-latest
+    steps:
+      - run: npm ci && npm publish

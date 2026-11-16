@@ -23,13 +23,16 @@
     "typecheck": "tsc --noEmit",
     "build:slack-notify": "ncc build packages/slack-notify/src/index.ts -o .github/actions/slack-notify/dist",
     "build:upsert-changeset-comment": "ncc build packages/upsert-changeset-comment/src/index.ts -o .github/actions/upsert-changeset-comment/dist",
+    "build:release-conformance": "ncc build packages/release-conformance/src/index.ts -o .github/actions/release-conformance/dist",
     "ci:publish": "pnpm exec changeset publish",
     "test:npm-release": "bash scripts/test-tag-step.sh",
     "test:slack-pr-merged": "bash scripts/test-slack-pr-merged.sh",
     "test:actions": "node --test \".github/actions/**/*.test.mjs\"",
     "test:publish-environment": "bash scripts/test-check-publish-environment.sh",
     "test:npm-release-workflow": "bash scripts/test-npm-release-workflow.sh",
-    "test": "pnpm run test:slack-pr-merged && pnpm run test:actions && pnpm run test:publish-environment && pnpm run test:npm-release-workflow"
+    "test:release-conformance": "node --test \"packages/release-conformance/test/**/*.test.ts\"",
+    "test:release-conformance-workflow": "bash scripts/test-release-conformance-workflow.sh",
+    "test": "pnpm run test:slack-pr-merged && pnpm run test:actions && pnpm run test:publish-environment && pnpm run test:npm-release-workflow && pnpm run test:release-conformance && pnpm run test:release-conformance-workflow"
   },
   "devDependencies": {
     "@changesets/cli": "^2.30.0",

@@ -1,0 +1,8 @@
+name: caller that writes the owner and repository in another case
+on:
+  pull_request_target:
+permissions: write-all
+jobs:
+  release:
+    uses: 0xPolygon/Pipelines/.github/workflows/apps-npm-release.yml@some-branch
+    secrets: inherit

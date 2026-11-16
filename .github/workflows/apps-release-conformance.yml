@@ -1,0 +1,72 @@
+# Release workflow conformance check.
+#
+# Reads the repository's workflow files and fails when an npm release
+# workflow departs from the shared release standard (see "Release workflow
+# conformance" in the README for the rules). It only reads files: the job
+# needs `contents: read` and nothing else, and it never runs code from the
+# repository under review.
+#
+# This file deliberately declares `pull_request` and `merge_group` as well as
+# `workflow_call`, unlike the other reusable workflows here. A repository
+# ruleset can only require a workflow whose own file declares a pull request
+# or merge group trigger, so a `workflow_call`-only file could not be made
+# mandatory. There are no path filters, so the status is always reported and
+# can be required. It never uses the privileged pull request trigger.
+#
+# A repository the ruleset cannot reach calls it from its own trigger; the
+# README has the snippet.
+
+name: Release workflow conformance
+
+on:
+  pull_request:
+  merge_group:
+  workflow_call:
+
+permissions: {}
+
+jobs:
+  conformance:
+    # The job name becomes the status name that a ruleset or branch protection requires.
+    name: Release workflow conformance
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    permissions:
+      contents: read
+    steps:
+      - name: Check out the repository under review
+        uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4.3.1
+        with:
+          path: target
+          # Workflow files and the local actions they use, plus every package.json:
+          # the check reads package scripts to see what `<manager> run <script>`
+          # publishes. Pattern mode is needed to name package.json at any depth.
+          sparse-checkout: |
+            /.github/
+            /package.json
+            /**/package.json
+          sparse-checkout-cone-mode: false
+          persist-credentials: false
+
+      # This workflow's own commit supplies the bundled action and the shared
+      # release workflow the profile is derived from. It has its own path, and
+      # the repository under review has another (`target`), so no file of the
+      # reviewed repository can share a path with the action checkout.
+      - name: Check out the conformance action
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+        with:
+          repository: ${{ job.workflow_repository }}
+          ref: ${{ job.workflow_sha }}
+          path: .pipelines
+          sparse-checkout: |
+            .github/actions/release-conformance
+            .github/workflows/apps-npm-release-trigger.yml
+            .github/workflows/apps-npm-release.yml
+          persist-credentials: false
+
+      - name: Check release workflows
+        uses: ./.pipelines/.github/actions/release-conformance
+        with:
+          root: target
+          canonical-dir: .pipelines
+          default-branch: ${{ github.event.repository.default_branch }}

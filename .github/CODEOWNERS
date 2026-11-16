@@ -6,6 +6,7 @@
 /.github/actions/ci/                           @0xPolygon/product-applications
 /.github/actions/docker-test/                  @0xPolygon/product-applications
 /.github/actions/npm-release/                  @0xPolygon/product-applications
+/.github/actions/release-conformance/         @0xPolygon/product-applications
 /.github/actions/slack-notify/                 @0xPolygon/product-applications
 /.github/actions/upsert-changeset-comment/     @0xPolygon/product-applications
 /.github/scripts/                              @0xPolygon/product-applications

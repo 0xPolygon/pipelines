@@ -1,0 +1,14 @@
+name: job with an npm token that publishes nothing visible
+on:
+  push:
+    branches: [main]
+permissions: {}
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    env:
+      NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
+    steps:
+      - run: ./scripts/deploy.sh

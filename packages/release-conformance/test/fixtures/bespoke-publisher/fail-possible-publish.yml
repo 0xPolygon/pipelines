@@ -1,0 +1,13 @@
+name: a publish through a tool that may be a script name
+on:
+  push:
+    branches: [main]
+permissions: {}
+jobs:
+  release:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      id-token: write
+    steps:
+      - run: 'pnpm wrangler publish'

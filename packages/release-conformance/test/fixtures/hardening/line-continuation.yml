@@ -1,0 +1,12 @@
+name: publish command wrapped over two lines
+on:
+  workflow_dispatch:
+jobs:
+  release:
+    runs-on: ubuntu-latest
+    permissions:
+      id-token: write
+    steps:
+      - run: |
+          npm \
+            publish --provenance

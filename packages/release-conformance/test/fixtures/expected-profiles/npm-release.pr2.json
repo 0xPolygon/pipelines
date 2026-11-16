@@ -1,0 +1,35 @@
+{
+  "allowedEvents": {
+    "push": {
+      "inputs": []
+    },
+    "workflow_dispatch": {
+      "inputs": [
+        "snapshot_tag"
+      ]
+    }
+  },
+  "secretNames": [
+    "CHANGESET_RELEASE_BOT_APP_ID",
+    "CHANGESET_RELEASE_BOT_APP_PRIVATE_KEY"
+  ],
+  "withKeys": [
+    "snapshot_tag"
+  ],
+  "floor": {
+    "contents": "write",
+    "pull-requests": "write",
+    "id-token": "write",
+    "attestations": "write"
+  },
+  "ceiling": {
+    "contents": "write",
+    "pull-requests": "write",
+    "id-token": "write",
+    "attestations": "write"
+  },
+  "allowedRefs": [
+    "main"
+  ],
+  "callee": "0xPolygon/pipelines/.github/workflows/apps-npm-release.yml"
+}

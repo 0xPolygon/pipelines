@@ -63,6 +63,12 @@ importers:
         specifier: 2.8.2
         version: 2.8.2
 
+  packages/release-conformance:
+    dependencies:
+      yaml:
+        specifier: 2.8.2
+        version: 2.8.2
+
   packages/slack-notify:
     dependencies:
       '@slack/webhook':

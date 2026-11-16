@@ -1,0 +1,8 @@
+on:
+  pull_request_target:
+  workflow_dispatch:
+permissions:
+  id-token: write
+jobs:
+  go:
+    uses: acme/Widget/.github/workflows/publish.yml@main

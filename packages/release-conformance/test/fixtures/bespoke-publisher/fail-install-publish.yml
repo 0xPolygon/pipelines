@@ -1,0 +1,14 @@
+name: install and publish together
+on:
+  push:
+    branches: [main]
+permissions: {}
+jobs:
+  publish:
+    runs-on: ubuntu-latest
+    environment: npm-publish
+    permissions:
+      id-token: write
+    steps:
+      - run: pnpm install --frozen-lockfile
+      - run: npm publish

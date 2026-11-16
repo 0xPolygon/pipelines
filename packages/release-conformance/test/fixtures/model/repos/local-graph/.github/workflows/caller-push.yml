@@ -1,0 +1,9 @@
+name: caller on push
+on:
+  push:
+    branches: [main]
+permissions:
+  id-token: write
+jobs:
+  go:
+    uses: ./.github/workflows/publisher.yml

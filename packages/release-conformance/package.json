@@ -1,0 +1,12 @@
+{
+  "name": "release-conformance",
+  "version": "1.0.0",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "codegen-drift-check": "pnpm --workspace-root run build:release-conformance && git diff --exit-code -- ../../.github/actions/release-conformance/dist"
+  },
+  "dependencies": {
+    "yaml": "2.8.2"
+  }
+}

@@ -1,0 +1,4 @@
+name: broken file that mentions the release workflow
+# uses: 0xPolygon/pipelines/.github/workflows/apps-npm-release.yml@main
+on: [push
+jobs: {

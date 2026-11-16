@@ -1,0 +1,13 @@
+name: a hash character inside a quoted string
+on:
+  workflow_dispatch:
+jobs:
+  release:
+    runs-on: ubuntu-latest
+    permissions:
+      id-token: write
+      contents: write
+    steps:
+      - run: |
+          npm ci
+          echo "Release #12" && npm publish

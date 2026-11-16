@@ -1,0 +1,15 @@
+name: changesets action written in another case
+on:
+  push:
+    branches: [main]
+permissions:
+  contents: write
+  id-token: write
+jobs:
+  release:
+    runs-on: ubuntu-latest
+    steps:
+      - run: pnpm install
+      - uses: Changesets/Action@v1
+        with:
+          publish: pnpm changeset publish

@@ -1,0 +1,10 @@
+name: reusable workflow of a repository that is only named pipelines
+on:
+  push:
+    branches: [main]
+permissions: {}
+jobs:
+  known:
+    permissions:
+      id-token: write
+    uses: someone-else/pipelines/.github/workflows/apps-some.yml@main

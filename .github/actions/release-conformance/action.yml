@@ -1,0 +1,27 @@
+name: Release workflow conformance
+description: Checks that the repository's npm release workflows follow the shared release standard
+
+inputs:
+  root:
+    description: Directory of the repository under review
+    required: false
+    default: '.'
+  canonical-dir:
+    description: Checkout of the repository that holds the shared release workflow and its trigger
+    required: true
+  default-branch:
+    description: The default branch of the repository under review
+    required: true
+
+runs:
+  using: composite
+  steps:
+    - name: Check release workflows
+      shell: bash
+      env:
+        RC_ROOT: ${{ inputs.root }}
+        RC_CANONICAL_DIR: ${{ inputs.canonical-dir }}
+        RC_DEFAULT_BRANCH: ${{ inputs.default-branch }}
+        RC_REPOSITORY: ${{ github.repository }}
+        ACTION_PATH: ${{ github.action_path }}
+      run: node "$ACTION_PATH/dist/index.js"

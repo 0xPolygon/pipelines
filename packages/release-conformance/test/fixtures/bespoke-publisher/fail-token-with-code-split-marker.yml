@@ -1,0 +1,15 @@
+# release-conformance-exception: publisher/split until 2027-01-31 legacy release job
+name: token publisher that installs, with a marker for another rule
+on:
+  push:
+    branches: [main]
+permissions:
+  contents: read
+jobs:
+  publish:
+    runs-on: ubuntu-latest
+    environment: npm-publish
+    env:
+      NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
+    steps:
+      - run: npm ci && npm run build && npm publish
