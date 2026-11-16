@@ -1,0 +1,14 @@
+name: changesets action whose publish script only starts with tag
+on:
+  push:
+    branches: [main]
+permissions:
+  contents: write
+  id-token: write
+jobs:
+  release:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: changesets/action@v1
+        with:
+          publish: pnpm run changeset tag-and-publish

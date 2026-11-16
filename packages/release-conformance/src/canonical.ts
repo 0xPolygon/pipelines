@@ -6,6 +6,16 @@ export const CALLEE_PATH = '.github/workflows/apps-npm-release.yml';
 /** The archived predecessor of the shared workflow repository; calls to it are still shared-caller calls. */
 export const ARCHIVED_CALLEE_REPOSITORY = '0xPolygon/apps-team-workflows';
 
+/** True when two `<owner>/<repo>` names are the same repository: GitHub ignores case in both. */
+export const sameRepository = ({ a, b }: { a: string; b: string }): boolean =>
+  a.toLowerCase() === b.toLowerCase();
+
+/** `<owner>/<repo>/<path>` with the owner and repository lower-cased and the file path left alone. */
+export const normalizeWorkflowTarget = (target: string): string => {
+  const [owner = '', repo = '', ...rest] = target.split('/');
+  return [owner.toLowerCase(), repo.toLowerCase(), ...rest].join('/');
+};
+
 /** Fixed settings: the most a caller may grant, and the refs it may use. */
 export const FIXED_CEILING: Record<string, PermissionLevel> = {
   contents: 'write',

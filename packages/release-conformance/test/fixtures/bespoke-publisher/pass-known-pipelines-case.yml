@@ -1,0 +1,10 @@
+name: call to the canonical repository written in another case
+on:
+  push:
+    branches: [main]
+permissions: {}
+jobs:
+  known:
+    permissions:
+      id-token: write
+    uses: 0xPolygon/Pipelines/.github/workflows/apps-some.yml@main

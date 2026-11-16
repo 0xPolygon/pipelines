@@ -1,6 +1,6 @@
 import type { CheckResult, Finding, Profile, RuleContext, ScannedFile } from './types.ts';
 
-import { CALLEE_PATH } from './canonical.ts';
+import { CALLEE_PATH, CALLEE_REPOSITORY, sameRepository } from './canonical.ts';
 import { applyExceptions } from './exceptions.ts';
 import { runsPublishText, scanRepo } from './repo-scan.ts';
 import { checkBespokePublisher, checkUnclassifiedIdToken } from './rules/bespoke-publisher.ts';
@@ -9,7 +9,9 @@ import { checkSharedCaller } from './rules/shared-caller.ts';
 /** An unreadable file is only a failure when it could be a release workflow; otherwise it is a notice. */
 const unparseableFinding = (file: ScannedFile): Finding => {
   const { model } = file;
-  const mentionsRelease = model.text.includes(CALLEE_PATH) || runsPublishText(model.text);
+  // A file that was never read (too large, not a regular file) could hold anything, so it always fails.
+  const mentionsRelease =
+    model.unreadable === true || model.text.includes(CALLEE_PATH) || runsPublishText(model.text);
   return {
     ruleId: 'workflow/unparseable',
     file: model.file,
@@ -19,14 +21,12 @@ const unparseableFinding = (file: ScannedFile): Finding => {
   };
 };
 
-const CANONICAL_REPOSITORY = '0xPolygon/pipelines';
 const CANONICAL_CALLEE_FILE = '.github/workflows/apps-npm-release.yml';
 
 /**
  * The shared release workflow is the reference this checker derives its
- * profile from. Its publisher findings are reported as notices until the
- * planned change to its snapshot path lands, at which point this exclusion is
- * deleted. It applies only when the run's own repository identity (never a
+ * profile from, so it is allowed to differ from the rules derived from it: its
+ * publisher findings are reported as notices. It applies only when the run's own repository identity (never a
  * value read from the scanned tree) is the canonical repository and the file
  * is exactly the canonical path; every other rule and every other file is
  * checked normally, and a fork or copy gets no exclusion.
@@ -38,7 +38,7 @@ const downgradeCanonicalCalleeFindings = ({
   findings: Finding[];
   repository: string;
 }): Finding[] =>
-  repository !== CANONICAL_REPOSITORY
+  !sameRepository({ a: repository, b: CALLEE_REPOSITORY })
     ? findings
     : findings.map((finding) =>
         finding.file === CANONICAL_CALLEE_FILE &&
@@ -60,7 +60,7 @@ export const runChecks = ({
   profile: Profile;
   context: RuleContext;
 }): CheckResult => {
-  const scan = scanRepo({ root });
+  const scan = scanRepo({ root, repository: context.repository });
   const findings: Finding[] = [];
   const notInScope: string[] = [];
 

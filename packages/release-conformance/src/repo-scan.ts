@@ -1,4 +1,4 @@
-import { existsSync, readFileSync, readdirSync } from 'node:fs';
+import { existsSync, lstatSync, readFileSync, readdirSync } from 'node:fs';
 import { join } from 'node:path';
 
 import { parse } from 'yaml';
@@ -15,7 +15,12 @@ import type {
 } from './types.ts';
 
 import { ARCHIVED_CALLEE_REPOSITORY, CALLEE_PATH } from './canonical.ts';
-import { parseWorkflow } from './workflow-model.ts';
+import {
+  NPM_TOKEN_KEYS,
+  parseWorkflow,
+  secretReferences,
+  unreadableWorkflow
+} from './workflow-model.ts';
 
 const WORKFLOW_DIR = '.github/workflows';
 const LOCAL_WORKFLOW_PREFIX = './.github/workflows/';
@@ -26,19 +31,61 @@ const PUBLISH_COMMAND =
   /(?:^|[\s;&|(])(?:(?:npm|pnpm|yarn)\b[^\n;&|]*?(?<![\w-])publish(?![\w-])|changesets?\s+publish(?![\w-]))/m;
 /** A `publish` input whose every line only creates tags does not publish a package. */
 const TAG_ONLY =
-  /^\s*(?:(?:pnpm|npm|yarn)(?:\s+exec|\s+run)?\s+)?(?:changesets?\s+tag|git\s+tag|git\s+push\s+--tags)\b/;
+  /^\s*(?:(?:pnpm|npm|yarn)(?:\s+exec|\s+run)?\s+)?(?:changesets?\s+tag|git\s+tag|git\s+push\s+--tags)(?:\s+(?:--?[\w-]+|[\w./:@-]+))*\s*$/;
 const NPM_TOKEN_NAME = /npm/i;
-const NPM_TOKEN_KEYS = new Set(['NODE_AUTH_TOKEN', 'NPM_TOKEN']);
 
-/** Drops shell comments so a comment that names a publish command does not count as running it. */
-export const stripShellComments = (text: string): string =>
-  text
-    .split('\n')
-    .map((line) => line.replace(/(^|\s)#.*$/, '$1'))
-    .join('\n');
+/**
+ * Drops shell comments so a comment that names a publish command does not count
+ * as running it. A `#` only starts a comment outside single and double quotes
+ * and at the start of a word, so `echo "Release #12" && npm publish` keeps its
+ * publish command. An unbalanced quote leaves later comments in place, which
+ * errs towards seeing more commands, never fewer.
+ */
+export const stripShellComments = (text: string): string => {
+  let out = '';
+  let quote: '"' | "'" | undefined;
+  for (let index = 0; index < text.length; index += 1) {
+    const char = text[index] ?? '';
+    if (quote !== undefined) {
+      if (char === '\\' && quote === '"') {
+        out += char + (text[index + 1] ?? '');
+        index += 1;
+        continue;
+      }
+      if (char === quote) quote = undefined;
+      out += char;
+      continue;
+    }
+    if (char === '\\') {
+      out += char + (text[index + 1] ?? '');
+      index += 1;
+      continue;
+    }
+    if (char === '"' || char === "'") {
+      quote = char;
+      out += char;
+      continue;
+    }
+    const previous = text[index - 1];
+    if (char === '#' && (previous === undefined || /\s/.test(previous))) {
+      while (index + 1 < text.length && text[index + 1] !== '\n') index += 1;
+      continue;
+    }
+    out += char;
+  }
+  return out;
+};
+
+/**
+ * The one form every matcher reads: backslash line continuations joined into
+ * one line, then comments removed. Joining first keeps a command that is wrapped
+ * across lines in one piece.
+ */
+export const normalizeShell = (text: string): string =>
+  stripShellComments(text.replace(/\\\r?\n/g, ' '));
 
 export const runsPublishText = (text: string): boolean =>
-  PUBLISH_COMMAND.test(stripShellComments(text));
+  PUBLISH_COMMAND.test(normalizeShell(text));
 
 const isTagOnly = (command: string): boolean =>
   command
@@ -47,19 +94,18 @@ const isTagOnly = (command: string): boolean =>
     .filter((line) => line !== '')
     .every((line) => TAG_ONLY.test(line));
 
-const isNpmTokenRef = ({ key, expression }: { key: string; expression: string }): boolean => {
-  if (NPM_TOKEN_KEYS.has(key)) return true;
-  for (const match of expression.matchAll(/secrets\.([A-Za-z0-9_]+)/g)) {
-    if (NPM_TOKEN_NAME.test(match[1] ?? '')) return true;
-  }
-  return false;
-};
+/** A secret whose name mentions npm, or any value under the variable names the npm client reads. */
+const mentionsNpmSecret = (text: string): boolean =>
+  secretReferences(text).some((name) => NPM_TOKEN_NAME.test(name));
+
+const isNpmTokenRef = ({ key, expression }: { key: string; expression: string }): boolean =>
+  NPM_TOKEN_KEYS.has(key.toUpperCase()) || mentionsNpmSecret(expression);
 
 export const isSharedCallee = (uses: UsesRef): boolean => {
   if (uses.local) return uses.path === `./${CALLEE_PATH}`;
   if (uses.repo === 'pipelines' && uses.path === CALLEE_PATH) return true;
   return (
-    `${uses.owner}/${uses.repo}` === ARCHIVED_CALLEE_REPOSITORY &&
+    `${uses.owner}/${uses.repo}` === ARCHIVED_CALLEE_REPOSITORY.toLowerCase() &&
     uses.path.startsWith(`${WORKFLOW_DIR}/`) &&
     uses.path.includes('npm-release')
   );
@@ -105,7 +151,7 @@ const readComposite = ({ root, uses }: { root: string; uses: UsesRef }): Composi
 };
 
 const isChangesetsAction = (uses: string | undefined): boolean =>
-  uses !== undefined && /^changesets\/action@/.test(uses);
+  uses !== undefined && /^changesets\/action@/i.test(uses);
 
 const changesetsPublishesPackages = (withInputs: Record<string, string>): boolean => {
   const command = withInputs['publish'] ?? withInputs['publish-script'] ?? '';
@@ -125,7 +171,11 @@ const scanJob = ({ job, root }: { job: JobModel; root: string }): JobScan => {
     credential = true;
 
   for (const step of job.steps) {
-    if (step.run !== undefined) runs.push(stripShellComments(step.run));
+    if (step.run !== undefined) {
+      runs.push(normalizeShell(step.run));
+      // A token written straight into a command (for example an `.npmrc` line) is still a credential.
+      if (mentionsNpmSecret(step.run)) credential = true;
+    }
     if (step.envSecretRefs.some(isNpmTokenRef)) credential = true;
     if (Object.entries(step.with).some(([key, expression]) => isNpmTokenRef({ key, expression })))
       credential = true;
@@ -133,7 +183,7 @@ const scanJob = ({ job, root }: { job: JobModel; root: string }): JobScan => {
       publishes = true;
     if (step.uses?.local && step.uses.path.startsWith(LOCAL_ACTION_PREFIX)) {
       for (const inner of readComposite({ root, uses: step.uses })) {
-        if (inner.run !== undefined) runs.push(stripShellComments(inner.run));
+        if (inner.run !== undefined) runs.push(normalizeShell(inner.run));
         if (isChangesetsAction(inner.uses) && changesetsPublishesPackages(inner.with))
           publishes = true;
       }
@@ -162,9 +212,30 @@ const listWorkflowFiles = (root: string): string[] => {
   const dir = join(root, WORKFLOW_DIR);
   if (!existsSync(dir)) return [];
   return readdirSync(dir)
-    .filter((name) => name.endsWith('.yml') || name.endsWith('.yaml'))
+    .filter((name) => /\.ya?ml$/i.test(name))
     .sort()
     .map((name) => `${WORKFLOW_DIR}/${name}`);
+};
+
+/**
+ * Reads one workflow entry without following links. A directory is not a
+ * workflow file and is skipped; any other entry that is not a regular file
+ * (a link, for example) is reported as unreadable instead of being followed.
+ */
+const readWorkflow = ({
+  root,
+  file
+}: {
+  root: string;
+  file: string;
+}): WorkflowModel | undefined => {
+  const path = join(root, file);
+  const info = lstatSync(path);
+  if (info.isDirectory()) return undefined;
+  if (!info.isFile()) {
+    return unreadableWorkflow({ file, reason: 'the entry is not a regular file and was not read' });
+  }
+  return parseWorkflow({ file, text: readFileSync(path, 'utf8') });
 };
 
 /**
@@ -197,19 +268,43 @@ const entryEventsOf = ({
   return [...own, ...inherited];
 };
 
-export const scanRepo = ({ root }: { root: string }): ScanResult => {
+/**
+ * The workflow file a job calls inside this repository, or undefined. A call by
+ * `./.github/workflows/<file>` and a call by `<this repository>/.github/workflows/<file>@<ref>`
+ * both reach a file of this tree, so both count as local callers.
+ */
+const localCallee = ({ uses, repository }: { uses: UsesRef; repository: string }) => {
+  if (uses.local) {
+    return uses.raw.startsWith(LOCAL_WORKFLOW_PREFIX) ? uses.raw.replace(/^\.\//, '') : undefined;
+  }
+  if (
+    repository !== '' &&
+    `${uses.owner}/${uses.repo}` === repository.toLowerCase() &&
+    uses.path.startsWith(`${WORKFLOW_DIR}/`)
+  )
+    return uses.path;
+  return undefined;
+};
+
+export const scanRepo = ({
+  root,
+  repository = ''
+}: {
+  root: string;
+  /** `<owner>/<repo>` the tree belongs to; lets a call that names this repository count as local. */
+  repository?: string;
+}): ScanResult => {
   const models = new Map<string, WorkflowModel>();
   for (const file of listWorkflowFiles(root)) {
-    models.set(file, parseWorkflow({ file, text: readFileSync(join(root, file), 'utf8') }));
+    const model = readWorkflow({ root, file });
+    if (model) models.set(file, model);
   }
 
   const callers = new Map<string, string[]>();
   for (const model of models.values()) {
     for (const job of model.jobs) {
-      if (job.uses?.local && job.uses.raw.startsWith(LOCAL_WORKFLOW_PREFIX)) {
-        const callee = job.uses.raw.replace(/^\.\//, '');
-        callers.set(callee, [...(callers.get(callee) ?? []), model.file]);
-      }
+      const callee = job.uses ? localCallee({ uses: job.uses, repository }) : undefined;
+      if (callee !== undefined) callers.set(callee, [...(callers.get(callee) ?? []), model.file]);
     }
   }
 

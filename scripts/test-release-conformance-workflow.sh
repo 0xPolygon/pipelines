@@ -73,6 +73,11 @@ checkouts="$(query 'const c = steps.filter((s) => /^actions\/checkout@/.test(s.u
 [ "$checkouts" = 'true' ]
 check "every checkout sets persist-credentials: false" $? "got: $checkouts"
 
+# --- Checkout paths ---
+paths="$(query 'const c = steps.filter((s) => /^actions\/checkout@/.test(s.uses ?? "")); const ps = c.map((s) => s.with?.path); const action = steps.find((s) => (s.uses ?? "").startsWith("./")); const review = c.find((s) => s.with?.repository === undefined); out(ps.every((p) => typeof p === "string" && p !== "" && p !== ".") && new Set(ps).size === ps.length && review?.with?.path !== undefined && action?.with?.root === review.with.path)')"
+[ "$paths" = 'true' ]
+check "each checkout has its own subdirectory and the action reads the reviewed repository's" $? "got: $paths"
+
 # --- No caches, no installs ---
 ! grep -nE '^[[:space:]]*(-[[:space:]]*)?cache:|actions/cache|actions/setup-node' "$WORK/check.yml" >"$WORK/out"
 check "no setup-node, no cache: input, no actions/cache" $? "$(head -3 "$WORK/out" | tr '\n' ';')"

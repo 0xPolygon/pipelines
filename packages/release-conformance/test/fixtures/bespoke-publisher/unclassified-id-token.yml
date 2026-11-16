@@ -13,4 +13,4 @@ jobs:
   known:
     permissions:
       id-token: write
-    uses: example-org/pipelines/.github/workflows/apps-some.yml@main
+    uses: 0xPolygon/pipelines/.github/workflows/apps-some.yml@main

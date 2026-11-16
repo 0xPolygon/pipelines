@@ -58,7 +58,10 @@ interface Case {
  */
 const CASES: Record<string, Case> = {
   'caller/callee': {
-    passing: [{ path: 'shared-caller/pass-canonical-shape.yml' }],
+    passing: [
+      { path: 'shared-caller/pass-canonical-shape.yml' },
+      { path: 'shared-caller/pass-callee-owner-case.yml' }
+    ],
     failing: [
       { path: 'shared-caller/fail-callee-archived.yml' },
       { path: 'shared-caller/fail-callee-ref-v1.yml' }
@@ -119,7 +122,8 @@ const CASES: Record<string, Case> = {
     passing: [{ path: 'bespoke-publisher/pass-release.yml' }],
     failing: [
       { path: 'bespoke-publisher/fail-other-branch.yml' },
-      { path: 'bespoke-publisher/fail-schedule.yml' }
+      { path: 'bespoke-publisher/fail-schedule.yml' },
+      { path: 'bespoke-publisher/fail-tags-ignore.yml' }
     ]
   },
   'publisher/id-token-with-code': {
@@ -127,10 +131,16 @@ const CASES: Record<string, Case> = {
     failing: [{ path: 'bespoke-publisher/fail-install-publish.yml' }]
   },
   'publisher/no-cache': {
-    passing: [{ path: 'bespoke-publisher/pass-split.yml' }],
+    passing: [
+      { path: 'bespoke-publisher/pass-split.yml' },
+      { path: 'bespoke-publisher/pass-setup-node-no-cache.yml' },
+      { path: 'bespoke-publisher/pass-setup-node-v4.yml' }
+    ],
     failing: [
       { path: 'bespoke-publisher/fail-cache-setup.yml' },
-      { path: 'bespoke-publisher/fail-cache-action.yml' }
+      { path: 'bespoke-publisher/fail-cache-action.yml' },
+      { path: 'bespoke-publisher/fail-cache-setup-default.yml' },
+      { path: 'hardening/cache-action-case.yml' }
     ]
   },
   'publisher/publishing-dispatch': {
@@ -149,8 +159,15 @@ const CASES: Record<string, Case> = {
     ]
   },
   'publisher/unclassified-id-token': {
-    passing: [{ path: 'model/on-map.yml' }],
-    failing: [{ path: 'bespoke-publisher/unclassified-id-token.yml' }]
+    passing: [
+      { path: 'model/on-map.yml' },
+      { path: 'bespoke-publisher/pass-known-pipelines-case.yml' }
+    ],
+    failing: [
+      { path: 'bespoke-publisher/unclassified-id-token.yml' },
+      { path: 'bespoke-publisher/unclassified-id-token-lookalike-owner.yml' },
+      { path: 'hardening/pr-target-lookalike-owner.yml' }
+    ]
   },
   'workflow/unparseable': {
     passing: [{ path: 'model/on-map.yml' }],

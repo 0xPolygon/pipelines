@@ -9,7 +9,8 @@ import type {
   StepModel
 } from '../types.ts';
 
-import { stripShellComments } from '../repo-scan.ts';
+import { CALLEE_REPOSITORY, sameRepository } from '../canonical.ts';
+import { normalizeShell } from '../repo-scan.ts';
 
 /** Rules a dated in-file marker may waive. */
 export const PUBLISHER_WAIVABLE_RULES = [
@@ -17,15 +18,14 @@ export const PUBLISHER_WAIVABLE_RULES = [
   'publisher/no-cache',
   'publisher/environment',
   'publisher/events',
-  // Waivability follows the snapshot-dispatch decision; move to the never-waivable list if option (a) is ruled.
+  // Waivable for now; move it to the never-waivable list if a publishing dispatch is ever disallowed outright.
   'publisher/publishing-dispatch'
 ] as const;
 
 /**
  * Rules no marker may waive: the publishing credential in a job that runs
  * repository or dependency code and an event that lets untrusted input start a
- * publisher. The exception stage must
- * treat a marker naming one of these as invalid.
+ * publisher. A marker naming one of these is invalid.
  */
 export const PUBLISHER_NEVER_WAIVABLE_RULES = [
   'publisher/id-token-with-code',
@@ -71,7 +71,7 @@ const subcommandOf = (tokens: string[]): [string | undefined, string | undefined
 
 /** True when the shell text installs dependencies or runs a build, test or lint script. */
 export const runsRepositoryCode = (runText: string): boolean => {
-  const joined = stripShellComments(runText).replace(/\\\n/g, ' ');
+  const joined = normalizeShell(runText);
   for (const segment of joined.split(/\n|;|&&|\|\||\|/)) {
     const tokens = segment.trim().split(/\s+/);
     const [first] = tokens;
@@ -158,31 +158,57 @@ const splitFindings = (params: RuleParams): Finding[] => {
   return out;
 };
 
-const CACHE_ACTION = /^actions\/cache(?:\/(?:restore|save))?$/;
+const CACHE_ACTION = /^actions\/cache(?:\/(?:restore|save))?$/i;
 
-const stepSetsCache = (step: StepModel): boolean => {
-  if (
-    step.uses &&
-    !step.uses.local &&
-    CACHE_ACTION.test(
-      `${step.uses.owner}/${step.uses.repo}${step.uses.path === '' ? '' : `/${step.uses.path}`}`
-    )
-  )
-    return true;
+const SETUP_NODE_ACTION = /^actions\/setup-node$/i;
+/** From this major version `actions/setup-node` caches npm dependencies unless told not to. */
+const SETUP_NODE_DEFAULT_CACHE_MAJOR = 6;
+
+const actionName = (step: StepModel): string | undefined =>
+  step.uses && !step.uses.local
+    ? `${step.uses.owner}/${step.uses.repo}${step.uses.path === '' ? '' : `/${step.uses.path}`}`
+    : undefined;
+
+/**
+ * `actions/setup-node` from v6 caches npm dependencies on its own when
+ * `package.json` names npm as the package manager, and `package-manager-cache: false`
+ * turns that off. The workflow file cannot show what `package.json` says, so the
+ * opt-out is required whenever the action's major version is 6 or later, or
+ * cannot be told (a branch or a commit SHA).
+ */
+const setupNodeCachesByDefault = (step: StepModel): boolean => {
+  const name = actionName(step);
+  if (name === undefined || !SETUP_NODE_ACTION.test(name)) return false;
+  if (step.with['package-manager-cache']?.trim().toLowerCase() === 'false') return false;
+  const major = /^v?(\d+)(?:\.\d+){0,2}$/.exec(step.uses?.ref ?? '')?.[1];
+  return major === undefined || Number(major) >= SETUP_NODE_DEFAULT_CACHE_MAJOR;
+};
+
+const cacheProblem = (step: StepModel): string | undefined => {
+  const name = actionName(step);
+  if (name !== undefined && CACHE_ACTION.test(name)) return 'remove the cache action';
   const cache = step.with['cache'];
-  return cache !== undefined && cache.trim() !== '' && cache.trim() !== 'false';
+  if (cache !== undefined && cache.trim() !== '' && cache.trim() !== 'false')
+    return 'remove the `cache` input';
+  if (setupNodeCachesByDefault(step))
+    return 'set `package-manager-cache: false` on the setup action, which caches by default';
+  return undefined;
 };
 
 const cacheFindings = ({ model }: RuleParams): Finding[] =>
   model.jobs.flatMap((job) =>
-    job.steps.filter(stepSetsCache).map((step) =>
-      finding({
-        ruleId: 'publisher/no-cache',
-        model,
-        line: step.line,
-        message: `Job \`${job.id}\` must not use a dependency or build cache; remove the \`cache\` input or the cache action.`
-      })
-    )
+    job.steps.flatMap((step) => {
+      const problem = cacheProblem(step);
+      if (problem === undefined) return [];
+      return [
+        finding({
+          ruleId: 'publisher/no-cache',
+          model,
+          line: step.line,
+          message: `Job \`${job.id}\` must not use a dependency or build cache; ${problem}.`
+        })
+      ];
+    })
   );
 
 const environmentFindings = (params: RuleParams): Finding[] =>
@@ -210,8 +236,8 @@ const pushProblem = ({
   event: EventModel;
   defaultBranch: string;
 }): string | undefined => {
-  if (event.tags !== undefined && event.tags.length > 0)
-    return '`push` must not list `tags`; publish from the default branch only.';
+  if (event.tags !== undefined || event.tagsIgnore !== undefined)
+    return '`push` must not declare `tags` or `tags-ignore`; publish from the default branch only.';
   const branches = event.branches ?? [];
   if (branches.length === 0 || branches.some((branch) => branch !== defaultBranch))
     return `\`push\` must be limited to \`branches: [${defaultBranch}]\`.`;
@@ -251,6 +277,11 @@ const eventFindings = ({ model, scan, context }: RuleParams): Finding[] => {
         break;
       }
       case 'workflow_call':
+        // No caller in this repository: whatever starts it is out of sight, so it cannot be checked.
+        add(
+          'publisher/events',
+          'A reusable workflow that publishes has no caller in this repository, so the events that start it cannot be checked; call it from a workflow in this repository.'
+        );
         break;
       default:
         add(
@@ -262,9 +293,11 @@ const eventFindings = ({ model, scan, context }: RuleParams): Finding[] => {
   return out;
 };
 
-/** Pipelines workflows are checked in their own right; any other reusable workflow is not seen into. */
+/** Workflows of the canonical repository are checked in their own right; any other reusable workflow is not seen into. */
 const callsKnownPipelinesWorkflow = (job: JobModel): boolean =>
-  job.uses !== undefined && !job.uses.local && job.uses.repo === 'pipelines';
+  job.uses !== undefined &&
+  !job.uses.local &&
+  sameRepository({ a: `${job.uses.owner}/${job.uses.repo}`, b: CALLEE_REPOSITORY });
 
 const idTokenNotices = ({ params, jobs }: { params: RuleParams; jobs: JobModel[] }): Finding[] =>
   jobs

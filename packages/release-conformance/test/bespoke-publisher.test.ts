@@ -205,7 +205,7 @@ suite('publisher/events', () => {
     assert.match(findings[0]?.message ?? '', /calling workflow/);
   });
 
-  test('the never-waivable rule ids are listed for the exception stage', () => {
+  test('the never-waivable rule ids are exported for the exception logic', () => {
     assert.deepEqual([...PUBLISHER_NEVER_WAIVABLE_RULES].sort(), [
       'publisher/id-token-with-code',
       'publisher/pull-request-target'

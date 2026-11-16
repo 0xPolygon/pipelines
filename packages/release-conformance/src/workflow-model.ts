@@ -46,6 +46,11 @@ const toStringMap = (value: unknown): Record<string, string> => {
 
 export const emptyPermissions = (): Permissions => ({ present: false, scopes: {}, line: 0 });
 
+/**
+ * GitHub resolves owner and repository names case-insensitively, so identity is
+ * compared on the lower-cased pair. The path inside the repository is a file
+ * path and keeps its case.
+ */
 export const parseUses = (raw: string): UsesRef => {
   if (raw.startsWith('./')) {
     return { raw, local: true, owner: '', repo: '', path: raw, ref: '' };
@@ -57,8 +62,8 @@ export const parseUses = (raw: string): UsesRef => {
   return {
     raw,
     local: false,
-    owner: match[1] ?? '',
-    repo: match[2] ?? '',
+    owner: (match[1] ?? '').toLowerCase(),
+    repo: (match[2] ?? '').toLowerCase(),
     path: match[3] ?? '',
     ref: match[4] ?? ''
   };
@@ -86,12 +91,32 @@ const parsePermissions = ({
   return { present: true, scopes, line };
 };
 
+/**
+ * Secret names referenced in an expression. The `secrets` context name and the
+ * property syntax are case-insensitive in expressions, and both `secrets.NAME`
+ * and `secrets['NAME']` read the same secret.
+ */
+export const secretReferences = (text: string): string[] => {
+  const names: string[] = [];
+  for (const match of text.matchAll(
+    /\bsecrets\s*(?:\.\s*([A-Za-z0-9_-]+)|\[\s*(?:'([^']*)'|"([^"]*)")\s*\])/gi
+  )) {
+    names.push(match[1] ?? match[2] ?? match[3] ?? '');
+  }
+  return names;
+};
+
+/** Environment variable names the npm client reads its registry token from. */
+export const NPM_TOKEN_KEYS = new Set(['NODE_AUTH_TOKEN', 'NPM_TOKEN']);
+
+/** Entries that reference a secret, plus every npm token variable whatever its value. */
 const envSecretRefs = (env: unknown): EnvSecretRef[] => {
   const refs: EnvSecretRef[] = [];
   if (isRecord(env)) {
     for (const [key, entry] of Object.entries(env)) {
       const expression = toText(entry);
-      if (expression.includes('secrets.')) refs.push({ key, expression });
+      if (NPM_TOKEN_KEYS.has(key.toUpperCase()) || secretReferences(expression).length > 0)
+        refs.push({ key, expression });
     }
   }
   return refs;
@@ -198,10 +223,12 @@ const parseSteps = ({
 const parseJobs = ({
   raw,
   topLevel,
+  topLevelEnv,
   lines
 }: {
   raw: unknown;
   topLevel: Permissions;
+  topLevelEnv: EnvSecretRef[];
   lines: Lines;
 }): JobModel[] => {
   if (!isRecord(raw)) return [];
@@ -227,7 +254,8 @@ const parseJobs = ({
       },
       withKeys: isRecord(job['with']) ? Object.keys(job['with']) : [],
       withValues: toStringMap(job['with']),
-      envSecretRefs: envSecretRefs(job['env']),
+      // Workflow-level `env` reaches every job, so its secret references are held by each of them.
+      envSecretRefs: [...topLevelEnv, ...envSecretRefs(job['env'])],
       steps: parseSteps({ raw: job['steps'], lines, jobId: id })
     };
     if (typeof job['uses'] === 'string') model.uses = parseUses(job['uses']);
@@ -238,28 +266,46 @@ const parseJobs = ({
 const failed = ({
   file,
   text,
-  reason
+  reason,
+  unreadable = false
 }: {
   file: string;
   text: string;
   reason: string;
+  unreadable?: boolean;
 }): WorkflowModel => ({
   file,
   text,
   parseError: reason,
+  ...(unreadable ? { unreadable } : {}),
   events: [],
   permissions: emptyPermissions(),
   jobs: []
 });
 
+/** A directory entry that looks like a workflow file but was not read, so it cannot be checked. */
+export const unreadableWorkflow = ({ file, reason }: { file: string; reason: string }) =>
+  failed({ file, text: '', reason, unreadable: true });
+
 export const parseWorkflow = ({ file, text }: { file: string; text: string }): WorkflowModel => {
   if (Buffer.byteLength(text, 'utf8') > MAX_WORKFLOW_BYTES) {
-    return failed({ file, text: '', reason: `file is larger than ${MAX_WORKFLOW_BYTES} bytes` });
+    return unreadableWorkflow({
+      file,
+      reason: `file is larger than ${MAX_WORKFLOW_BYTES} bytes`
+    });
   }
   const counter = new LineCounter();
   const doc = parseDocument(text, { lineCounter: counter });
   const firstError = doc.errors[0];
-  if (firstError) return failed({ file, text, reason: firstError.message });
+  // The parser's own message quotes the offending source line; the code and position are enough.
+  if (firstError) {
+    const position = firstError.linePos?.[0];
+    return failed({
+      file,
+      text,
+      reason: `YAML ${firstError.code}${position ? ` at line ${position.line}` : ''}`
+    });
+  }
 
   let raw: unknown;
   try {
@@ -284,6 +330,11 @@ export const parseWorkflow = ({ file, text }: { file: string; text: string }): W
     text,
     events: parseEvents({ raw: raw['on'], lines }),
     permissions,
-    jobs: parseJobs({ raw: raw['jobs'], topLevel: permissions, lines })
+    jobs: parseJobs({
+      raw: raw['jobs'],
+      topLevel: permissions,
+      topLevelEnv: envSecretRefs(raw['env']),
+      lines
+    })
   };
 };

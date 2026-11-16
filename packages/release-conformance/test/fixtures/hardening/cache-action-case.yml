@@ -1,0 +1,22 @@
+name: cache action written in another case
+on:
+  push:
+    branches: [main]
+permissions: {}
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    steps:
+      - uses: Actions/Cache@v4
+        with:
+          path: node_modules
+          key: deps
+  publish:
+    runs-on: ubuntu-latest
+    environment: npm-publish
+    permissions:
+      id-token: write
+    steps:
+      - run: npm publish

@@ -39,7 +39,7 @@ export interface EventModel {
 export interface UsesRef {
   raw: string;
   local: boolean;
-  /** Empty for local references. */
+  /** Lower case: GitHub resolves owner and repository names case-insensitively. Empty for local references. */
   owner: string;
   repo: string;
   /** Path inside the repository (`.github/workflows/x.yml`, `./.github/actions/y` for local). */
@@ -89,6 +89,8 @@ export interface WorkflowModel {
   text: string;
   /** Set when the file could not be read as a workflow; other fields are then empty. */
   parseError?: string;
+  /** True when the file was not read at all (too large, or not a regular file): always an error. */
+  unreadable?: boolean;
   events: EventModel[];
   permissions: Permissions;
   jobs: JobModel[];

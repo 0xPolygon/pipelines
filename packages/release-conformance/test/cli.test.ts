@@ -132,6 +132,21 @@ suite('entry point exit status', () => {
     assert.ok(r.stdout.includes('title=publisher/unclassified-id-token'));
   });
 
+  test('a crash message is escaped so a path cannot add a second log line', () => {
+    const args = baseArgs(repoWith('pass-canonical-shape.yml'));
+    args[args.indexOf('--root') + 1] = join(tmp(), 'absent\n::error::injected');
+    const r = run(args);
+    assert.equal(r.status, 2);
+    assert.equal(r.stderr.trimEnd().split('\n').length, 1, r.stderr);
+    assert.ok(r.stderr.includes('%0A'));
+  });
+
+  test('a directory named like a workflow file does not stop the run', () => {
+    const root = tmp();
+    mkdirSync(join(root, '.github/workflows/x.yml'), { recursive: true });
+    assert.equal(run(baseArgs(root)).status, 0);
+  });
+
   test('an unknown flag exits 2', () => {
     assert.equal(run([...baseArgs(repoWith()), '--nope']).status, 2);
   });

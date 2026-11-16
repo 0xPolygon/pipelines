@@ -7,7 +7,7 @@ import type { Profile } from './types.ts';
 import { deriveProfile } from './canonical.ts';
 import { runChecks } from './engine.ts';
 import { scanRepo } from './repo-scan.ts';
-import { formatAnnotations, formatJson, formatSummary } from './report.ts';
+import { escapeCommandData, formatAnnotations, formatJson, formatSummary } from './report.ts';
 import { parseWorkflow } from './workflow-model.ts';
 
 const VERSION = '1.0.0';
@@ -123,7 +123,7 @@ const main = (): number => {
   const context = { defaultBranch, repository, today };
   const result = runChecks({ root, profile, context });
 
-  const inScope = scanRepo({ root }).files.flatMap((file) =>
+  const inScope = scanRepo({ root, repository }).files.flatMap((file) =>
     file.class === 'not-in-scope' ? [] : [{ file: file.model.file, class: file.class }]
   );
 
@@ -152,6 +152,6 @@ try {
 } catch (err) {
   const message = err instanceof Error ? err.message : String(err);
   // A crash must never read as a pass: any failure here is exit 2.
-  process.stderr.write(`release-conformance: ${message}\n`);
+  process.stderr.write(`release-conformance: ${escapeCommandData(message)}\n`);
   process.exitCode = 2;
 }

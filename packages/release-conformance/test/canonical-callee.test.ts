@@ -67,8 +67,8 @@ suite('canonical callee reference', () => {
     assert.ok(findings.every((f) => f.severity === 'error'));
   });
 
-  test('a fork named like the canonical repository by case or suffix is not excluded', () => {
-    for (const repository of ['0xpolygon/pipelines', '0xPolygon/pipelines-fork', 'unknown']) {
+  test('a fork named like the canonical repository by suffix is not excluded', () => {
+    for (const repository of ['0xPolygon/pipelines-fork', 'someone/pipelines', 'unknown']) {
       const findings = publisherFindings(check({ target: CALLEE, repository }));
       assert.ok(findings.length > 0 && findings.every((f) => f.severity === 'error'), repository);
     }
@@ -82,6 +82,13 @@ suite('canonical callee reference', () => {
     const lines = formatAnnotations({ result });
     assert.ok(lines.some((line) => line.startsWith('::notice file=' + CALLEE)));
     assert.ok(!lines.some((line) => line.startsWith('::error')));
+  });
+
+  test('the canonical repository is recognised whatever the case of its name', () => {
+    const findings = publisherFindings(
+      check({ target: CALLEE, repository: '0xpolygon/Pipelines' })
+    );
+    assert.ok(findings.length > 0 && findings.every((f) => f.severity === 'notice'));
   });
 
   test('a differently located or named file in the canonical repository is not excluded', () => {

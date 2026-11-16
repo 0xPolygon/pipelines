@@ -19,8 +19,7 @@ export const WAIVABLE_RULE_IDS: readonly string[] = [
   'publisher/no-cache',
   'publisher/environment',
   'publisher/events',
-  // Waivable for now: whether a publishing workflow_dispatch may ever be waived follows the
-  // snapshot-release decision.
+  // Waivable for now: a publishing workflow_dispatch may still be waived with a dated marker.
   'publisher/publishing-dispatch'
 ];
 
@@ -86,7 +85,8 @@ const readComments = (text: string): { line: number; text: string }[] => {
   });
 };
 
-const MARKER_COMMENT = new RegExp(`^#\\s*${EXCEPTION_MARKER}:(.*)$`, 's');
+/** Matched case-insensitively so a marker in the wrong case is reported, not silently ignored. */
+const MARKER_COMMENT = new RegExp(`^#\\s*(${EXCEPTION_MARKER}):(.*)$`, 'is');
 
 type Parsed =
   | { ok: true; ruleId: string; until: string; reason: string }
@@ -153,7 +153,17 @@ export const applyExceptions = ({
       const match = MARKER_COMMENT.exec(comment.text);
       if (!match) continue;
       const { line } = comment;
-      const parsed = parseMarker({ body: match[1] ?? '', today });
+      if (match[1] !== EXCEPTION_MARKER) {
+        added.push(
+          invalid({
+            file: model.file,
+            line,
+            message: `Exception marker ignored: the keyword must be written in lower case as "${EXCEPTION_MARKER}".`
+          })
+        );
+        continue;
+      }
+      const parsed = parseMarker({ body: match[2] ?? '', today });
       if (!parsed.ok) {
         added.push(
           invalid({

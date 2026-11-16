@@ -1,0 +1,10 @@
+name: registry token variable with a value the checker cannot read
+on:
+  workflow_dispatch:
+jobs:
+  release:
+    runs-on: ubuntu-latest
+    steps:
+      - run: npm publish
+        env:
+          NODE_AUTH_TOKEN: ${{ steps.mint.outputs.token }}

@@ -22,7 +22,11 @@ export const escapeMarkdown = (value: string): string =>
     .replace(/&/g, '&amp;')
     .replace(/</g, '&lt;')
     .replace(/>/g, '&gt;')
-    .replace(/[\\`*_{}[\]()|~]/g, (char) => `\\${char}`);
+    .replace(/[\\`*_{}[\]()|~]/g, (char) => `\\${char}`)
+    // Break what the Markdown renderer would turn into a link or a mention.
+    .replace(/:\/\//g, ':\u200b//')
+    .replace(/www\./gi, (match) => `${match.slice(0, 3)}\u200b.`)
+    .replace(/@/g, '@\u200b');
 
 export interface InScopeFile {
   file: string;

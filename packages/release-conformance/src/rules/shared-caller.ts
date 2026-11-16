@@ -7,7 +7,12 @@ import type {
   Rule
 } from '../types.ts';
 
-import { CALLEE_REPOSITORY, levelRank } from '../canonical.ts';
+import {
+  CALLEE_REPOSITORY,
+  levelRank,
+  normalizeWorkflowTarget,
+  sameRepository
+} from '../canonical.ts';
 import { isSharedCallee } from '../repo-scan.ts';
 
 const levelOf = ({
@@ -56,7 +61,7 @@ export const checkSharedCaller: Rule = ({ model, scan, profile, context }) => {
     const uses = job.uses;
     if (uses === undefined) continue;
     if (uses.local) {
-      if (context.repository !== CALLEE_REPOSITORY) {
+      if (!sameRepository({ a: context.repository, b: CALLEE_REPOSITORY })) {
         add({
           ruleId: 'caller/callee',
           line: job.line,
@@ -65,8 +70,8 @@ export const checkSharedCaller: Rule = ({ model, scan, profile, context }) => {
       }
       continue;
     }
-    const target = `${uses.owner}/${uses.repo}/${uses.path}`;
-    if (target !== profile.callee) {
+    const target = uses.raw.slice(0, uses.raw.lastIndexOf('@'));
+    if (normalizeWorkflowTarget(target) !== normalizeWorkflowTarget(profile.callee)) {
       add({
         ruleId: 'caller/callee',
         line: job.line,

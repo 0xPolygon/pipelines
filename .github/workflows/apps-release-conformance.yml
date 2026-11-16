@@ -37,12 +37,14 @@ jobs:
       - name: Check out the repository under review
         uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4.3.1
         with:
+          path: target
           sparse-checkout: .github
           persist-credentials: false
 
       # This workflow's own commit supplies the bundled action and the shared
-      # release workflow the profile is derived from. `.pipelines` keeps it
-      # out of the repository's own files.
+      # release workflow the profile is derived from. It has its own path, and
+      # the repository under review has another (`target`), so no file of the
+      # reviewed repository can share a path with the action checkout.
       - name: Check out the conformance action
         uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
         with:
@@ -58,5 +60,6 @@ jobs:
       - name: Check release workflows
         uses: ./.pipelines/.github/actions/release-conformance
         with:
+          root: target
           canonical-dir: .pipelines
           default-branch: ${{ github.event.repository.default_branch }}

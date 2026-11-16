@@ -8591,6 +8591,13 @@ const CALLEE_REPOSITORY = '0xPolygon/pipelines';
 const CALLEE_PATH = '.github/workflows/apps-npm-release.yml';
 /** The archived predecessor of the shared workflow repository; calls to it are still shared-caller calls. */
 const ARCHIVED_CALLEE_REPOSITORY = '0xPolygon/apps-team-workflows';
+/** True when two `<owner>/<repo>` names are the same repository: GitHub ignores case in both. */
+const sameRepository = ({ a, b }) => a.toLowerCase() === b.toLowerCase();
+/** `<owner>/<repo>/<path>` with the owner and repository lower-cased and the file path left alone. */
+const normalizeWorkflowTarget = (target) => {
+    const [owner = '', repo = '', ...rest] = target.split('/');
+    return [owner.toLowerCase(), repo.toLowerCase(), ...rest].join('/');
+};
 /** Fixed settings: the most a caller may grant, and the refs it may use. */
 const FIXED_CEILING = {
     contents: 'write',
@@ -8661,8 +8668,7 @@ const WAIVABLE_RULE_IDS = [
     'publisher/no-cache',
     'publisher/environment',
     'publisher/events',
-    // Waivable for now: whether a publishing workflow_dispatch may ever be waived follows the
-    // snapshot-release decision.
+    // Waivable for now: a publishing workflow_dispatch may still be waived with a dated marker.
     'publisher/publishing-dispatch'
 ];
 /**
@@ -8724,7 +8730,8 @@ const readComments = (text) => {
         return { line, text: source };
     });
 };
-const MARKER_COMMENT = new RegExp(`^#\\s*${EXCEPTION_MARKER}:(.*)$`, 's');
+/** Matched case-insensitively so a marker in the wrong case is reported, not silently ignored. */
+const MARKER_COMMENT = new RegExp(`^#\\s*(${EXCEPTION_MARKER}):(.*)$`, 'is');
 const parseMarker = ({ body, today }) => {
     const match = /^\s*(\S+)\s+until\s+(\S+)(?:\s+(.*\S))?\s*$/s.exec(body);
     if (!match) {
@@ -8771,7 +8778,15 @@ const applyExceptions = ({ findings, files, today }) => {
             if (!match)
                 continue;
             const { line } = comment;
-            const parsed = parseMarker({ body: match[1] ?? '', today });
+            if (match[1] !== EXCEPTION_MARKER) {
+                added.push(invalid({
+                    file: model.file,
+                    line,
+                    message: `Exception marker ignored: the keyword must be written in lower case as "${EXCEPTION_MARKER}".`
+                }));
+                continue;
+            }
+            const parsed = parseMarker({ body: match[2] ?? '', today });
             if (!parsed.ok) {
                 added.push(invalid({
                     file: model.file,
@@ -8843,6 +8858,11 @@ const toStringMap = (value) => {
     return out;
 };
 const emptyPermissions = () => ({ present: false, scopes: {}, line: 0 });
+/**
+ * GitHub resolves owner and repository names case-insensitively, so identity is
+ * compared on the lower-cased pair. The path inside the repository is a file
+ * path and keeps its case.
+ */
 const parseUses = (raw) => {
     if (raw.startsWith('./')) {
         return { raw, local: true, owner: '', repo: '', path: raw, ref: '' };
@@ -8854,8 +8874,8 @@ const parseUses = (raw) => {
     return {
         raw,
         local: false,
-        owner: match[1] ?? '',
-        repo: match[2] ?? '',
+        owner: (match[1] ?? '').toLowerCase(),
+        repo: (match[2] ?? '').toLowerCase(),
         path: match[3] ?? '',
         ref: match[4] ?? ''
     };
@@ -8873,12 +8893,27 @@ const parsePermissions = ({ value, present, line }) => {
     }
     return { present: true, scopes, line };
 };
+/**
+ * Secret names referenced in an expression. The `secrets` context name and the
+ * property syntax are case-insensitive in expressions, and both `secrets.NAME`
+ * and `secrets['NAME']` read the same secret.
+ */
+const secretReferences = (text) => {
+    const names = [];
+    for (const match of text.matchAll(/\bsecrets\s*(?:\.\s*([A-Za-z0-9_-]+)|\[\s*(?:'([^']*)'|"([^"]*)")\s*\])/gi)) {
+        names.push(match[1] ?? match[2] ?? match[3] ?? '');
+    }
+    return names;
+};
+/** Environment variable names the npm client reads its registry token from. */
+const NPM_TOKEN_KEYS = new Set(['NODE_AUTH_TOKEN', 'NPM_TOKEN']);
+/** Entries that reference a secret, plus every npm token variable whatever its value. */
 const envSecretRefs = (env) => {
     const refs = [];
     if (isRecord(env)) {
         for (const [key, entry] of Object.entries(env)) {
             const expression = toText(entry);
-            if (expression.includes('secrets.'))
+            if (NPM_TOKEN_KEYS.has(key.toUpperCase()) || secretReferences(expression).length > 0)
                 refs.push({ key, expression });
         }
     }
@@ -8967,7 +9002,7 @@ const parseSteps = ({ raw, lines, jobId }) => {
         return model;
     });
 };
-const parseJobs = ({ raw, topLevel, lines }) => {
+const parseJobs = ({ raw, topLevel, topLevelEnv, lines }) => {
     if (!isRecord(raw))
         return [];
     return Object.entries(raw).map(([id, value]) => {
@@ -8992,7 +9027,8 @@ const parseJobs = ({ raw, topLevel, lines }) => {
             },
             withKeys: isRecord(job['with']) ? Object.keys(job['with']) : [],
             withValues: toStringMap(job['with']),
-            envSecretRefs: envSecretRefs(job['env']),
+            // Workflow-level `env` reaches every job, so its secret references are held by each of them.
+            envSecretRefs: [...topLevelEnv, ...envSecretRefs(job['env'])],
             steps: parseSteps({ raw: job['steps'], lines, jobId: id })
         };
         if (typeof job['uses'] === 'string')
@@ -9000,23 +9036,36 @@ const parseJobs = ({ raw, topLevel, lines }) => {
         return model;
     });
 };
-const failed = ({ file, text, reason }) => ({
+const failed = ({ file, text, reason, unreadable = false }) => ({
     file,
     text,
     parseError: reason,
+    ...(unreadable ? { unreadable } : {}),
     events: [],
     permissions: emptyPermissions(),
     jobs: []
 });
+/** A directory entry that looks like a workflow file but was not read, so it cannot be checked. */
+const unreadableWorkflow = ({ file, reason }) => failed({ file, text: '', reason, unreadable: true });
 const parseWorkflow = ({ file, text }) => {
     if (Buffer.byteLength(text, 'utf8') > MAX_WORKFLOW_BYTES) {
-        return failed({ file, text: '', reason: `file is larger than ${MAX_WORKFLOW_BYTES} bytes` });
+        return unreadableWorkflow({
+            file,
+            reason: `file is larger than ${MAX_WORKFLOW_BYTES} bytes`
+        });
     }
     const counter = new dist/* LineCounter */.HN();
     const doc = (0,dist/* parseDocument */.Tp)(text, { lineCounter: counter });
     const firstError = doc.errors[0];
-    if (firstError)
-        return failed({ file, text, reason: firstError.message });
+    // The parser's own message quotes the offending source line; the code and position are enough.
+    if (firstError) {
+        const position = firstError.linePos?.[0];
+        return failed({
+            file,
+            text,
+            reason: `YAML ${firstError.code}${position ? ` at line ${position.line}` : ''}`
+        });
+    }
     let raw;
     try {
         raw = doc.toJS({ maxAliasCount: MAX_ALIAS_COUNT });
@@ -9041,7 +9090,12 @@ const parseWorkflow = ({ file, text }) => {
         text,
         events: parseEvents({ raw: raw['on'], lines }),
         permissions,
-        jobs: parseJobs({ raw: raw['jobs'], topLevel: permissions, lines })
+        jobs: parseJobs({
+            raw: raw['jobs'],
+            topLevel: permissions,
+            topLevelEnv: envSecretRefs(raw['env']),
+            lines
+        })
     };
 };
 
@@ -9057,35 +9111,72 @@ const LOCAL_ACTION_PREFIX = './.github/actions/';
 /** Shell publish commands: `npm|pnpm|yarn ... publish`, `npm stage publish`, `changeset publish`. */
 const PUBLISH_COMMAND = /(?:^|[\s;&|(])(?:(?:npm|pnpm|yarn)\b[^\n;&|]*?(?<![\w-])publish(?![\w-])|changesets?\s+publish(?![\w-]))/m;
 /** A `publish` input whose every line only creates tags does not publish a package. */
-const TAG_ONLY = /^\s*(?:(?:pnpm|npm|yarn)(?:\s+exec|\s+run)?\s+)?(?:changesets?\s+tag|git\s+tag|git\s+push\s+--tags)\b/;
+const TAG_ONLY = /^\s*(?:(?:pnpm|npm|yarn)(?:\s+exec|\s+run)?\s+)?(?:changesets?\s+tag|git\s+tag|git\s+push\s+--tags)(?:\s+(?:--?[\w-]+|[\w./:@-]+))*\s*$/;
 const NPM_TOKEN_NAME = /npm/i;
-const NPM_TOKEN_KEYS = new Set(['NODE_AUTH_TOKEN', 'NPM_TOKEN']);
-/** Drops shell comments so a comment that names a publish command does not count as running it. */
-const stripShellComments = (text) => text
-    .split('\n')
-    .map((line) => line.replace(/(^|\s)#.*$/, '$1'))
-    .join('\n');
-const runsPublishText = (text) => PUBLISH_COMMAND.test(stripShellComments(text));
+/**
+ * Drops shell comments so a comment that names a publish command does not count
+ * as running it. A `#` only starts a comment outside single and double quotes
+ * and at the start of a word, so `echo "Release #12" && npm publish` keeps its
+ * publish command. An unbalanced quote leaves later comments in place, which
+ * errs towards seeing more commands, never fewer.
+ */
+const stripShellComments = (text) => {
+    let out = '';
+    let quote;
+    for (let index = 0; index < text.length; index += 1) {
+        const char = text[index] ?? '';
+        if (quote !== undefined) {
+            if (char === '\\' && quote === '"') {
+                out += char + (text[index + 1] ?? '');
+                index += 1;
+                continue;
+            }
+            if (char === quote)
+                quote = undefined;
+            out += char;
+            continue;
+        }
+        if (char === '\\') {
+            out += char + (text[index + 1] ?? '');
+            index += 1;
+            continue;
+        }
+        if (char === '"' || char === "'") {
+            quote = char;
+            out += char;
+            continue;
+        }
+        const previous = text[index - 1];
+        if (char === '#' && (previous === undefined || /\s/.test(previous))) {
+            while (index + 1 < text.length && text[index + 1] !== '\n')
+                index += 1;
+            continue;
+        }
+        out += char;
+    }
+    return out;
+};
+/**
+ * The one form every matcher reads: backslash line continuations joined into
+ * one line, then comments removed. Joining first keeps a command that is wrapped
+ * across lines in one piece.
+ */
+const normalizeShell = (text) => stripShellComments(text.replace(/\\\r?\n/g, ' '));
+const runsPublishText = (text) => PUBLISH_COMMAND.test(normalizeShell(text));
 const isTagOnly = (command) => command
     .split('\n')
     .map((line) => line.trim())
     .filter((line) => line !== '')
     .every((line) => TAG_ONLY.test(line));
-const isNpmTokenRef = ({ key, expression }) => {
-    if (NPM_TOKEN_KEYS.has(key))
-        return true;
-    for (const match of expression.matchAll(/secrets\.([A-Za-z0-9_]+)/g)) {
-        if (NPM_TOKEN_NAME.test(match[1] ?? ''))
-            return true;
-    }
-    return false;
-};
+/** A secret whose name mentions npm, or any value under the variable names the npm client reads. */
+const mentionsNpmSecret = (text) => secretReferences(text).some((name) => NPM_TOKEN_NAME.test(name));
+const isNpmTokenRef = ({ key, expression }) => NPM_TOKEN_KEYS.has(key.toUpperCase()) || mentionsNpmSecret(expression);
 const isSharedCallee = (uses) => {
     if (uses.local)
         return uses.path === `./${CALLEE_PATH}`;
     if (uses.repo === 'pipelines' && uses.path === CALLEE_PATH)
         return true;
-    return (`${uses.owner}/${uses.repo}` === ARCHIVED_CALLEE_REPOSITORY &&
+    return (`${uses.owner}/${uses.repo}` === ARCHIVED_CALLEE_REPOSITORY.toLowerCase() &&
         uses.path.startsWith(`${WORKFLOW_DIR}/`) &&
         uses.path.includes('npm-release'));
 };
@@ -9126,7 +9217,7 @@ const readComposite = ({ root, uses }) => {
     }
     return [];
 };
-const isChangesetsAction = (uses) => uses !== undefined && /^changesets\/action@/.test(uses);
+const isChangesetsAction = (uses) => uses !== undefined && /^changesets\/action@/i.test(uses);
 const changesetsPublishesPackages = (withInputs) => {
     const command = withInputs['publish'] ?? withInputs['publish-script'] ?? '';
     return command.trim() !== '' && !isTagOnly(command);
@@ -9143,8 +9234,12 @@ const scanJob = ({ job, root }) => {
     if (Object.entries(job.withValues).some(([key, expression]) => isNpmTokenRef({ key, expression })))
         credential = true;
     for (const step of job.steps) {
-        if (step.run !== undefined)
-            runs.push(stripShellComments(step.run));
+        if (step.run !== undefined) {
+            runs.push(normalizeShell(step.run));
+            // A token written straight into a command (for example an `.npmrc` line) is still a credential.
+            if (mentionsNpmSecret(step.run))
+                credential = true;
+        }
         if (step.envSecretRefs.some(isNpmTokenRef))
             credential = true;
         if (Object.entries(step.with).some(([key, expression]) => isNpmTokenRef({ key, expression })))
@@ -9154,7 +9249,7 @@ const scanJob = ({ job, root }) => {
         if (step.uses?.local && step.uses.path.startsWith(LOCAL_ACTION_PREFIX)) {
             for (const inner of readComposite({ root, uses: step.uses })) {
                 if (inner.run !== undefined)
-                    runs.push(stripShellComments(inner.run));
+                    runs.push(normalizeShell(inner.run));
                 if (isChangesetsAction(inner.uses) && changesetsPublishesPackages(inner.with))
                     publishes = true;
             }
@@ -9184,9 +9279,24 @@ const listWorkflowFiles = (root) => {
     if (!(0,external_node_fs_namespaceObject.existsSync)(dir))
         return [];
     return (0,external_node_fs_namespaceObject.readdirSync)(dir)
-        .filter((name) => name.endsWith('.yml') || name.endsWith('.yaml'))
+        .filter((name) => /\.ya?ml$/i.test(name))
         .sort()
         .map((name) => `${WORKFLOW_DIR}/${name}`);
+};
+/**
+ * Reads one workflow entry without following links. A directory is not a
+ * workflow file and is skipped; any other entry that is not a regular file
+ * (a link, for example) is reported as unreadable instead of being followed.
+ */
+const readWorkflow = ({ root, file }) => {
+    const path = (0,external_node_path_namespaceObject.join)(root, file);
+    const info = (0,external_node_fs_namespaceObject.lstatSync)(path);
+    if (info.isDirectory())
+        return undefined;
+    if (!info.isFile()) {
+        return unreadableWorkflow({ file, reason: 'the entry is not a regular file and was not read' });
+    }
+    return parseWorkflow({ file, text: (0,external_node_fs_namespaceObject.readFileSync)(path, 'utf8') });
 };
 /**
  * Events that can start a workflow. A reusable workflow is started by whatever
@@ -9208,18 +9318,34 @@ const entryEventsOf = ({ file, models, callers, seen }) => {
     const inherited = localCallers.flatMap((caller) => entryEventsOf({ file: caller, models, callers, seen: visited }));
     return [...own, ...inherited];
 };
-const scanRepo = ({ root }) => {
+/**
+ * The workflow file a job calls inside this repository, or undefined. A call by
+ * `./.github/workflows/<file>` and a call by `<this repository>/.github/workflows/<file>@<ref>`
+ * both reach a file of this tree, so both count as local callers.
+ */
+const localCallee = ({ uses, repository }) => {
+    if (uses.local) {
+        return uses.raw.startsWith(LOCAL_WORKFLOW_PREFIX) ? uses.raw.replace(/^\.\//, '') : undefined;
+    }
+    if (repository !== '' &&
+        `${uses.owner}/${uses.repo}` === repository.toLowerCase() &&
+        uses.path.startsWith(`${WORKFLOW_DIR}/`))
+        return uses.path;
+    return undefined;
+};
+const scanRepo = ({ root, repository = '' }) => {
     const models = new Map();
     for (const file of listWorkflowFiles(root)) {
-        models.set(file, parseWorkflow({ file, text: (0,external_node_fs_namespaceObject.readFileSync)((0,external_node_path_namespaceObject.join)(root, file), 'utf8') }));
+        const model = readWorkflow({ root, file });
+        if (model)
+            models.set(file, model);
     }
     const callers = new Map();
     for (const model of models.values()) {
         for (const job of model.jobs) {
-            if (job.uses?.local && job.uses.raw.startsWith(LOCAL_WORKFLOW_PREFIX)) {
-                const callee = job.uses.raw.replace(/^\.\//, '');
+            const callee = job.uses ? localCallee({ uses: job.uses, repository }) : undefined;
+            if (callee !== undefined)
                 callers.set(callee, [...(callers.get(callee) ?? []), model.file]);
-            }
         }
     }
     const files = [...models.values()].map((model) => {
@@ -9237,20 +9363,20 @@ const scanRepo = ({ root }) => {
 
 ;// CONCATENATED MODULE: ./packages/release-conformance/src/rules/bespoke-publisher.ts
 
+
 /** Rules a dated in-file marker may waive. */
 const PUBLISHER_WAIVABLE_RULES = (/* unused pure expression or super */ null && ([
     'publisher/split',
     'publisher/no-cache',
     'publisher/environment',
     'publisher/events',
-    // Waivability follows the snapshot-dispatch decision; move to the never-waivable list if option (a) is ruled.
+    // Waivable for now; move it to the never-waivable list if a publishing dispatch is ever disallowed outright.
     'publisher/publishing-dispatch'
 ]));
 /**
  * Rules no marker may waive: the publishing credential in a job that runs
  * repository or dependency code and an event that lets untrusted input start a
- * publisher. The exception stage must
- * treat a marker naming one of these as invalid.
+ * publisher. A marker naming one of these is invalid.
  */
 const PUBLISHER_NEVER_WAIVABLE_RULES = (/* unused pure expression or super */ null && ([
     'publisher/id-token-with-code',
@@ -9280,7 +9406,7 @@ const subcommandOf = (tokens) => {
 };
 /** True when the shell text installs dependencies or runs a build, test or lint script. */
 const runsRepositoryCode = (runText) => {
-    const joined = stripShellComments(runText).replace(/\\\n/g, ' ');
+    const joined = normalizeShell(runText);
     for (const segment of joined.split(/\n|;|&&|\|\||\|/)) {
         const tokens = segment.trim().split(/\s+/);
         const [first] = tokens;
@@ -9358,21 +9484,53 @@ const splitFindings = (params) => {
     }
     return out;
 };
-const CACHE_ACTION = /^actions\/cache(?:\/(?:restore|save))?$/;
-const stepSetsCache = (step) => {
-    if (step.uses &&
-        !step.uses.local &&
-        CACHE_ACTION.test(`${step.uses.owner}/${step.uses.repo}${step.uses.path === '' ? '' : `/${step.uses.path}`}`))
-        return true;
-    const cache = step.with['cache'];
-    return cache !== undefined && cache.trim() !== '' && cache.trim() !== 'false';
+const CACHE_ACTION = /^actions\/cache(?:\/(?:restore|save))?$/i;
+const SETUP_NODE_ACTION = /^actions\/setup-node$/i;
+/** From this major version `actions/setup-node` caches npm dependencies unless told not to. */
+const SETUP_NODE_DEFAULT_CACHE_MAJOR = 6;
+const actionName = (step) => step.uses && !step.uses.local
+    ? `${step.uses.owner}/${step.uses.repo}${step.uses.path === '' ? '' : `/${step.uses.path}`}`
+    : undefined;
+/**
+ * `actions/setup-node` from v6 caches npm dependencies on its own when
+ * `package.json` names npm as the package manager, and `package-manager-cache: false`
+ * turns that off. The workflow file cannot show what `package.json` says, so the
+ * opt-out is required whenever the action's major version is 6 or later, or
+ * cannot be told (a branch or a commit SHA).
+ */
+const setupNodeCachesByDefault = (step) => {
+    const name = actionName(step);
+    if (name === undefined || !SETUP_NODE_ACTION.test(name))
+        return false;
+    if (step.with['package-manager-cache']?.trim().toLowerCase() === 'false')
+        return false;
+    const major = /^v?(\d+)(?:\.\d+){0,2}$/.exec(step.uses?.ref ?? '')?.[1];
+    return major === undefined || Number(major) >= SETUP_NODE_DEFAULT_CACHE_MAJOR;
 };
-const cacheFindings = ({ model }) => model.jobs.flatMap((job) => job.steps.filter(stepSetsCache).map((step) => finding({
-    ruleId: 'publisher/no-cache',
-    model,
-    line: step.line,
-    message: `Job \`${job.id}\` must not use a dependency or build cache; remove the \`cache\` input or the cache action.`
-})));
+const cacheProblem = (step) => {
+    const name = actionName(step);
+    if (name !== undefined && CACHE_ACTION.test(name))
+        return 'remove the cache action';
+    const cache = step.with['cache'];
+    if (cache !== undefined && cache.trim() !== '' && cache.trim() !== 'false')
+        return 'remove the `cache` input';
+    if (setupNodeCachesByDefault(step))
+        return 'set `package-manager-cache: false` on the setup action, which caches by default';
+    return undefined;
+};
+const cacheFindings = ({ model }) => model.jobs.flatMap((job) => job.steps.flatMap((step) => {
+    const problem = cacheProblem(step);
+    if (problem === undefined)
+        return [];
+    return [
+        finding({
+            ruleId: 'publisher/no-cache',
+            model,
+            line: step.line,
+            message: `Job \`${job.id}\` must not use a dependency or build cache; ${problem}.`
+        })
+    ];
+}));
 const environmentFindings = (params) => publishingJobs(params.scan).flatMap(({ job }) => {
     const { environment } = job;
     if (environment.kind === 'literal' && environment.name.trim() !== '')
@@ -9390,8 +9548,8 @@ const environmentFindings = (params) => publishingJobs(params.scan).flatMap(({ j
     ];
 });
 const pushProblem = ({ event, defaultBranch }) => {
-    if (event.tags !== undefined && event.tags.length > 0)
-        return '`push` must not list `tags`; publish from the default branch only.';
+    if (event.tags !== undefined || event.tagsIgnore !== undefined)
+        return '`push` must not declare `tags` or `tags-ignore`; publish from the default branch only.';
     const branches = event.branches ?? [];
     if (branches.length === 0 || branches.some((branch) => branch !== defaultBranch))
         return `\`push\` must be limited to \`branches: [${defaultBranch}]\`.`;
@@ -9424,6 +9582,8 @@ const eventFindings = ({ model, scan, context }) => {
                 break;
             }
             case 'workflow_call':
+                // No caller in this repository: whatever starts it is out of sight, so it cannot be checked.
+                add('publisher/events', 'A reusable workflow that publishes has no caller in this repository, so the events that start it cannot be checked; call it from a workflow in this repository.');
                 break;
             default:
                 add('publisher/events', `A workflow that publishes must start only on \`push\` to the default branch or on \`release\` with \`types: [published]\`, not \`${event.name}\`.`);
@@ -9431,8 +9591,10 @@ const eventFindings = ({ model, scan, context }) => {
     }
     return out;
 };
-/** Pipelines workflows are checked in their own right; any other reusable workflow is not seen into. */
-const callsKnownPipelinesWorkflow = (job) => job.uses !== undefined && !job.uses.local && job.uses.repo === 'pipelines';
+/** Workflows of the canonical repository are checked in their own right; any other reusable workflow is not seen into. */
+const callsKnownPipelinesWorkflow = (job) => job.uses !== undefined &&
+    !job.uses.local &&
+    sameRepository({ a: `${job.uses.owner}/${job.uses.repo}`, b: CALLEE_REPOSITORY });
 const idTokenNotices = ({ params, jobs }) => jobs
     .filter(holdsIdToken)
     .filter((job) => !callsKnownPipelinesWorkflow(job))
@@ -9495,7 +9657,7 @@ const checkSharedCaller = ({ model, scan, profile, context }) => {
         if (uses === undefined)
             continue;
         if (uses.local) {
-            if (context.repository !== CALLEE_REPOSITORY) {
+            if (!sameRepository({ a: context.repository, b: CALLEE_REPOSITORY })) {
                 add({
                     ruleId: 'caller/callee',
                     line: job.line,
@@ -9504,8 +9666,8 @@ const checkSharedCaller = ({ model, scan, profile, context }) => {
             }
             continue;
         }
-        const target = `${uses.owner}/${uses.repo}/${uses.path}`;
-        if (target !== profile.callee) {
+        const target = uses.raw.slice(0, uses.raw.lastIndexOf('@'));
+        if (normalizeWorkflowTarget(target) !== normalizeWorkflowTarget(profile.callee)) {
             add({
                 ruleId: 'caller/callee',
                 line: job.line,
@@ -9669,7 +9831,8 @@ const checkSharedCaller = ({ model, scan, profile, context }) => {
 /** An unreadable file is only a failure when it could be a release workflow; otherwise it is a notice. */
 const unparseableFinding = (file) => {
     const { model } = file;
-    const mentionsRelease = model.text.includes(CALLEE_PATH) || runsPublishText(model.text);
+    // A file that was never read (too large, not a regular file) could hold anything, so it always fails.
+    const mentionsRelease = model.unreadable === true || model.text.includes(CALLEE_PATH) || runsPublishText(model.text);
     return {
         ruleId: 'workflow/unparseable',
         file: model.file,
@@ -9678,18 +9841,16 @@ const unparseableFinding = (file) => {
         severity: mentionsRelease ? 'error' : 'notice'
     };
 };
-const CANONICAL_REPOSITORY = '0xPolygon/pipelines';
 const CANONICAL_CALLEE_FILE = '.github/workflows/apps-npm-release.yml';
 /**
  * The shared release workflow is the reference this checker derives its
- * profile from. Its publisher findings are reported as notices until the
- * planned change to its snapshot path lands, at which point this exclusion is
- * deleted. It applies only when the run's own repository identity (never a
+ * profile from, so it is allowed to differ from the rules derived from it: its
+ * publisher findings are reported as notices. It applies only when the run's own repository identity (never a
  * value read from the scanned tree) is the canonical repository and the file
  * is exactly the canonical path; every other rule and every other file is
  * checked normally, and a fork or copy gets no exclusion.
  */
-const downgradeCanonicalCalleeFindings = ({ findings, repository }) => repository !== CANONICAL_REPOSITORY
+const downgradeCanonicalCalleeFindings = ({ findings, repository }) => !sameRepository({ a: repository, b: CALLEE_REPOSITORY })
     ? findings
     : findings.map((finding) => finding.file === CANONICAL_CALLEE_FILE &&
         finding.ruleId.startsWith('publisher/') &&
@@ -9698,7 +9859,7 @@ const downgradeCanonicalCalleeFindings = ({ findings, repository }) => repositor
         : finding);
 const byLocation = (a, b) => a.file === b.file ? a.line - b.line : a.file < b.file ? -1 : 1;
 const runChecks = ({ root, profile, context }) => {
-    const scan = scanRepo({ root });
+    const scan = scanRepo({ root, repository: context.repository });
     const findings = [];
     const notInScope = [];
     for (const file of scan.files) {
@@ -9742,7 +9903,11 @@ const escapeMarkdown = (value) => value
     .replace(/&/g, '&amp;')
     .replace(/</g, '&lt;')
     .replace(/>/g, '&gt;')
-    .replace(/[\\`*_{}[\]()|~]/g, (char) => `\\${char}`);
+    .replace(/[\\`*_{}[\]()|~]/g, (char) => `\\${char}`)
+    // Break what the Markdown renderer would turn into a link or a mention.
+    .replace(/:\/\//g, ':\u200b//')
+    .replace(/www\./gi, (match) => `${match.slice(0, 3)}\u200b.`)
+    .replace(/@/g, '@\u200b');
 const CLASS_LABEL = {
     'shared-caller': 'shared caller',
     'bespoke-publisher': 'bespoke publisher',
@@ -9934,7 +10099,7 @@ const main = () => {
     const profile = loadProfile(canonicalDir);
     const context = { defaultBranch, repository, today };
     const result = runChecks({ root, profile, context });
-    const inScope = scanRepo({ root }).files.flatMap((file) => file.class === 'not-in-scope' ? [] : [{ file: file.model.file, class: file.class }]);
+    const inScope = scanRepo({ root, repository }).files.flatMap((file) => file.class === 'not-in-scope' ? [] : [{ file: file.model.file, class: file.class }]);
     for (const line of formatAnnotations({ result }))
         process.stdout.write(`${line}\n`);
     const errors = result.findings.filter((f) => f.severity === 'error').length;
@@ -9956,7 +10121,7 @@ try {
 catch (err) {
     const message = err instanceof Error ? err.message : String(err);
     // A crash must never read as a pass: any failure here is exit 2.
-    process.stderr.write(`release-conformance: ${message}\n`);
+    process.stderr.write(`release-conformance: ${escapeCommandData(message)}\n`);
     process.exitCode = 2;
 }
 
