@@ -239,7 +239,8 @@ skips `publish` and is tagged by `finalize` without any approval.
   token, like changesets' configured plugins, and is reviewed like the
   workflow. Only the `version` job runs it; that job has no `id-token`
   permission. The `snapshot` job does not run the hook; it uses plain
-  `changeset version --snapshot`.
+  `changeset version --snapshot`. Pass a YAML boolean `true`, not a string; a
+  string expression is not supported.
 - **Trigger permissions.** Copy `apps-npm-release-trigger.yml`; its top-level
   `permissions` must cover every scope the called jobs request.
 
