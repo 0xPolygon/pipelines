@@ -49,7 +49,7 @@ replaces each local path with the `0xPolygon/pipelines/...` form.
 
 ### Composite actions
 
-Called via `uses: 0xPolygon/pipelines/.github/actions/<name>@<40-hex-sha> # <date>` as a
+Called via `uses: 0xPolygon/pipelines/.github/actions/<name>@<40-hex-sha> # main` as a
 **step** inside a job, pinned to a full commit SHA that Dependabot's
 `github-actions` updates keep current (monthly, grouped). A fix to a composite
 action reaches consumers at their next bump; an urgent fix is a coordinated bump. Composite actions run in the calling job's
@@ -86,7 +86,7 @@ jobs:
     env:
       MY_RPC: https://rpc.example.com?token=${{ secrets.MY_TOKEN }}
     steps:
-      - uses: 0xPolygon/pipelines/.github/actions/ci@<40-hex-sha> # <date>
+      - uses: 0xPolygon/pipelines/.github/actions/ci@<40-hex-sha> # main
 ```
 
 Repositories with no test env var requirements omit the `env:` block entirely.
@@ -150,7 +150,7 @@ jobs:
       # ... other env vars
     steps:
       - id: gate
-        uses: 0xPolygon/pipelines/.github/actions/check-dockerfile@<40-hex-sha> # <date>
+        uses: 0xPolygon/pipelines/.github/actions/check-dockerfile@<40-hex-sha> # main
         with:
           tag: ${{ inputs.tag || '' }}
 
@@ -159,7 +159,7 @@ jobs:
 
       - id: docker-test
         if: steps.gate.outputs.has_dockerfile == 'true'
-        uses: 0xPolygon/pipelines/.github/actions/docker-test@<40-hex-sha> # <date>
+        uses: 0xPolygon/pipelines/.github/actions/docker-test@<40-hex-sha> # main
         with:
           tag: ${{ inputs.tag || '' }}
           test_vars: FIRESTORE_EMULATOR_HOST # ...
@@ -377,7 +377,7 @@ jobs:
       # ... other outputs
     steps:
       - id: docker-test
-        uses: 0xPolygon/pipelines/.github/actions/docker-test@<40-hex-sha> # <date>
+        uses: 0xPolygon/pipelines/.github/actions/docker-test@<40-hex-sha> # main
         with:
           tag: ${{ inputs.tag || '' }}
           # test_vars: MY_RPC   # space-separated env var names to forward to container
@@ -405,24 +405,27 @@ repository's composite actions from the same commit as itself.
 
 ```yaml
 steps:
-  # Full commit SHA, with a human-readable comment
-  - uses: 0xPolygon/pipelines/.github/actions/<name>@<40-hex-sha> # <date>
+  # Full commit SHA; the comment names the branch the pinned commit came from
+  - uses: 0xPolygon/pipelines/.github/actions/<name>@<40-hex-sha> # main
 ```
 
 - **Full commit SHA** is the only ref that cannot be moved. Use it for every
   composite action called from a step.
-- **A release tag** (`@vX.Y.Z`) is acceptable when it is protected against
-  re-pointing. Tags are only as immutable as the repo's tag protection.
+- The `# main` comment names the branch the pinned commit came from; Dependabot
+  keeps the SHA current.
+- **A release tag** (`@vX.Y.Z`) is acceptable only for a job-level reusable
+  workflow call, and only when it is protected against re-pointing. Tags are only
+  as immutable as the repo's tag protection. A step-level composite action is
+  always pinned to a full commit SHA.
 - A reusable workflow checks out `${{ job.workflow_repository }}` at
   `${{ job.workflow_sha }}` into `.pipelines/` and calls
   `./.pipelines/.github/actions/<name>`, never `@main`. (`job.workflow_*` is
   not available on GitHub Enterprise Server.)
 
-> **Status:** this repo does not yet publish release tags that contain the
-> current `apps-*` workflows (the existing `v1`–`v3` tags predate them), so the
-> trigger templates in this repo still show `@main` for reusable workflows.
-> Until a tag is cut, pin step-level composite actions to a commit SHA of
-> this repo.
+> **Status:** this repo does not publish release tags that contain the current
+> `apps-*` workflows (the existing `v1`–`v3` tags predate them). Reusable
+> workflows are called at `@main`; step-level composite actions are pinned to a
+> commit SHA of this repo.
 
 ---
 
