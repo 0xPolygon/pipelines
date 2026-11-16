@@ -40,8 +40,12 @@ in its own separate GitHub Actions job with its own runner.
 | `apps-claude.yml` | Interactive Claude Code agent (triggered by @claude mentions) | `CLAUDE_API_KEY` |
 
 Trigger file examples for each of the above live alongside them as
-`apps-*-trigger.yml` and also serve as canonical templates for consuming
-repos.
+`apps-*-trigger.yml` (for example `apps-changeset-check-trigger.yml`) and also
+serve as canonical templates for consuming repos.
+
+The trigger files here call workflows and actions by local `./.github/...`
+paths because they also run in this repository. A consuming repository
+replaces each local path with the `0xPolygon/pipelines/...` form.
 
 ### Composite actions
 

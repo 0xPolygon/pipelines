@@ -6,3 +6,4 @@ dist/
 !.github/actions/*/dist/
 .env*
 *.tsbuildinfo
+/.claude/worktrees/

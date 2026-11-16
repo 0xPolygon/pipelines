@@ -93,8 +93,9 @@ called workflow's jobs declare. GitHub enforces this at startup — mismatches
 produce an immediate `startup_failure` before any step runs.
 
 When writing a trigger file, read the called workflow's job-level `permissions:`
-block and mirror those scopes in the trigger. The canonical examples in
-`apps-team-ts-template` already have the correct permissions for each workflow.
+block and mirror those scopes in the trigger. The canonical examples in this
+repository's own `.github/workflows/apps-*-trigger.yml` files already have the
+correct permissions for each workflow.
 
 ## Adding a new reusable workflow
 
