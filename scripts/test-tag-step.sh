@@ -139,7 +139,9 @@ EOF
 }
 EOF
 
-  pnpm add -D @changesets/cli --silent 2>/dev/null
+  # The release workflow supports @changesets/cli 2.x only (its tag output is
+  # what the release job reads), so the scratch repo installs a 2.x release.
+  pnpm add -D '@changesets/cli@^2' --silent 2>/dev/null
   git add -A
   git commit -q -m "initial: $pkg@$old_ver"
   git push -q origin main
