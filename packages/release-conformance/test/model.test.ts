@@ -10,6 +10,7 @@ import { deriveProfile } from '../src/canonical.ts';
 import { runChecks } from '../src/engine.ts';
 import { scanRepo } from '../src/repo-scan.ts';
 import { MAX_WORKFLOW_BYTES, parseWorkflow } from '../src/workflow-model.ts';
+import { materialiseFixtureRepo } from './helpers/fixture-repo.ts';
 
 /** `node:test` registration returns a promise that runner bookkeeping owns; callers never await it. */
 const suite = (name: string, body: () => void): void => {
@@ -41,7 +42,8 @@ const scanFlat = (name: string): ScannedFile => {
   return file;
 };
 
-const scanRepoFixture = (name: string) => scanRepo({ root: join(modelDir, 'repos', name) });
+const scanRepoFixture = (name: string) =>
+  scanRepo({ root: materialiseFixtureRepo(join(modelDir, 'repos', name)) });
 
 const job = (name: string, id: string) => {
   const found = parseFixture(name).jobs.find((candidate) => candidate.id === id);
@@ -345,7 +347,11 @@ suite('engine', () => {
   });
 
   test('runs the rules over the local call graph without reporting an error', () => {
-    const result = runChecks({ root: join(modelDir, 'repos', 'local-graph'), profile, context });
+    const result = runChecks({
+      root: materialiseFixtureRepo(join(modelDir, 'repos', 'local-graph')),
+      profile,
+      context
+    });
     assert.deepEqual(
       result.findings.filter((f) => f.severity === 'error'),
       []

@@ -20,6 +20,7 @@ import { normalizeShell, scanRepo, stripShellComments } from '../src/repo-scan.t
 import { escapeMarkdown } from '../src/report.ts';
 import { runsRepositoryCode } from '../src/rules/bespoke-publisher.ts';
 import { parseUses, parseWorkflow, secretReferences } from '../src/workflow-model.ts';
+import { materialiseFixtureRepo } from './helpers/fixture-repo.ts';
 
 const suite = (name: string, body: () => void): void => {
   void describe(name, body);
@@ -205,7 +206,9 @@ suite('owner and repository names are compared without case', () => {
 
 suite('a reusable publisher is followed to the workflows that start it', () => {
   test('a call that names this repository counts as a local caller', () => {
-    const findings = check({ root: join(dir, 'repos/self-qualified-caller') }).findings;
+    const findings = check({
+      root: materialiseFixtureRepo(join(dir, 'repos/self-qualified-caller'))
+    }).findings;
     assert.deepEqual(
       findings
         .filter((f) => f.severity === 'error' && f.file.endsWith('publish.yml'))
@@ -217,14 +220,16 @@ suite('a reusable publisher is followed to the workflows that start it', () => {
 
   test('a call that names another repository does not', () => {
     const findings = check({
-      root: join(dir, 'repos/self-qualified-caller'),
+      root: materialiseFixtureRepo(join(dir, 'repos/self-qualified-caller')),
       repository: 'acme/other'
     }).findings;
     assert.ok(!findings.some((f) => f.ruleId === 'publisher/pull-request-target'));
   });
 
   test('a reusable publisher with no caller here cannot be checked and is an error', () => {
-    const findings = check({ root: join(dir, 'repos/reusable-no-caller') }).findings;
+    const findings = check({
+      root: materialiseFixtureRepo(join(dir, 'repos/reusable-no-caller'))
+    }).findings;
     assert.deepEqual(ruleIds(findings), ['publisher/events']);
   });
 });
