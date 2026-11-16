@@ -8669,7 +8669,8 @@ const WAIVABLE_RULE_IDS = [
     'publisher/environment',
     'publisher/events',
     // Waivable for now: a publishing workflow_dispatch may still be waived with a dated marker.
-    'publisher/publishing-dispatch'
+    'publisher/publishing-dispatch',
+    'publisher/unreadable-local-action'
 ];
 /**
  * Rules that protect the publishing credential itself: untrusted triggers, inherited secrets, and
@@ -8682,7 +8683,8 @@ const NEVER_WAIVABLE_RULE_IDS = [
     'caller/pull-request-target',
     'caller/publish-permission-scope',
     'publisher/pull-request-target',
-    'publisher/id-token-with-code'
+    'publisher/id-token-with-code',
+    'publisher/token-with-code'
 ];
 const DAY_MS = 86_400_000;
 const DATE_SHAPE = /^\d{4}-\d{2}-\d{2}$/;
@@ -8826,6 +8828,470 @@ const applyExceptions = ({ findings, files, today }) => {
         }
     }
     return { findings: [...findings.filter((f) => !waived.has(f)), ...added], exceptions };
+};
+
+;// CONCATENATED MODULE: ./packages/release-conformance/src/package-scripts.ts
+
+
+const MAX_PACKAGE_JSON_BYTES = 1_000_000;
+const MAX_WALK_DEPTH = 5;
+const MAX_WALK_DIRECTORIES = 400;
+const SKIPPED_DIRECTORIES = new Set(['node_modules', '.git']);
+/** A repository-relative directory, or undefined for one that escapes the repository or holds an expression. */
+const relativeDirectory = (dir) => {
+    if (dir.includes('${{') || external_node_path_namespaceObject.posix.isAbsolute(dir))
+        return undefined;
+    const normal = external_node_path_namespaceObject.posix.normalize(dir === '' ? '.' : dir);
+    return normal === '..' || normal.startsWith('../') ? undefined : normal;
+};
+/**
+ * Reads `scripts` from the package.json files of a repository tree, read-only:
+ * a file that is a link, too large or not valid JSON counts as absent. A script
+ * that no readable file defines is reported as not defined, never as harmless.
+ */
+const createScriptReader = (root) => {
+    const cache = new Map();
+    const readScripts = (dir) => {
+        if (cache.has(dir))
+            return cache.get(dir);
+        let scripts;
+        try {
+            const path = (0,external_node_path_namespaceObject.join)(root, dir, 'package.json');
+            const info = (0,external_node_fs_namespaceObject.lstatSync)(path);
+            if (info.isFile() && info.size <= MAX_PACKAGE_JSON_BYTES) {
+                const doc = JSON.parse((0,external_node_fs_namespaceObject.readFileSync)(path, 'utf8'));
+                if (typeof doc === 'object' && doc !== null && 'scripts' in doc) {
+                    const raw = doc.scripts;
+                    if (typeof raw === 'object' && raw !== null) {
+                        scripts = {};
+                        for (const [name, body] of Object.entries(raw)) {
+                            if (typeof body === 'string')
+                                scripts[name] = body;
+                        }
+                    }
+                }
+                else if (typeof doc === 'object' && doc !== null) {
+                    scripts = {};
+                }
+            }
+        }
+        catch {
+            scripts = undefined;
+        }
+        cache.set(dir, scripts);
+        return scripts;
+    };
+    let packageDirs;
+    const allPackageDirs = () => {
+        if (packageDirs)
+            return packageDirs;
+        const found = [];
+        let visited = 0;
+        const walk = (dir, depth) => {
+            if (visited >= MAX_WALK_DIRECTORIES)
+                return;
+            visited += 1;
+            if (readScripts(dir) !== undefined)
+                found.push(dir);
+            if (depth >= MAX_WALK_DEPTH)
+                return;
+            let entries;
+            try {
+                entries = (0,external_node_fs_namespaceObject.readdirSync)((0,external_node_path_namespaceObject.join)(root, dir), { withFileTypes: true });
+            }
+            catch {
+                return;
+            }
+            for (const entry of entries.sort((a, b) => (a.name < b.name ? -1 : 1))) {
+                if (entry.isDirectory() && !SKIPPED_DIRECTORIES.has(entry.name))
+                    walk(external_node_path_namespaceObject.posix.join(dir, entry.name), depth + 1);
+            }
+        };
+        walk('.', 0);
+        packageDirs = found;
+        return found;
+    };
+    const lookup = (ref) => {
+        const named = ref.dirs.map(relativeDirectory);
+        const dirs = new Set();
+        if (ref.dirs.length === 0)
+            dirs.add('.');
+        for (const dir of named)
+            if (dir !== undefined)
+                dirs.add(dir);
+        if (ref.wide)
+            for (const dir of allPackageDirs())
+                dirs.add(dir);
+        const bodies = [];
+        let defined = false;
+        for (const dir of dirs) {
+            const scripts = readScripts(dir);
+            if (scripts === undefined)
+                continue;
+            for (const key of [ref.name, `pre${ref.name}`, `post${ref.name}`]) {
+                const body = scripts[key];
+                if (body === undefined)
+                    continue;
+                bodies.push(body);
+                if (key === ref.name)
+                    defined = true;
+            }
+        }
+        return { defined, bodies };
+    };
+    return { lookup };
+};
+
+;// CONCATENATED MODULE: ./packages/release-conformance/src/shell-commands.ts
+/**
+ * Reads shell text the way the release rules need it: which commands publish a
+ * package, which install or run repository code, and which package scripts a
+ * command refers to. Nothing here runs a command; it only reads text.
+ */
+/**
+ * Drops shell comments so a comment that names a publish command does not count
+ * as running it. A `#` only starts a comment outside single and double quotes
+ * and at the start of a word, so `echo "Release #12" && npm publish` keeps its
+ * publish command. An unbalanced quote leaves later comments in place, which
+ * errs towards seeing more commands, never fewer.
+ */
+const stripShellComments = (text) => {
+    let out = '';
+    let quote;
+    for (let index = 0; index < text.length; index += 1) {
+        const char = text[index] ?? '';
+        if (quote !== undefined) {
+            if (char === '\\' && quote === '"') {
+                out += char + (text[index + 1] ?? '');
+                index += 1;
+                continue;
+            }
+            if (char === quote)
+                quote = undefined;
+            out += char;
+            continue;
+        }
+        if (char === '\\') {
+            out += char + (text[index + 1] ?? '');
+            index += 1;
+            continue;
+        }
+        if (char === '"' || char === "'") {
+            quote = char;
+            out += char;
+            continue;
+        }
+        const previous = text[index - 1];
+        if (char === '#' && (previous === undefined || /\s/.test(previous))) {
+            while (index + 1 < text.length && text[index + 1] !== '\n')
+                index += 1;
+            continue;
+        }
+        out += char;
+    }
+    return out;
+};
+/**
+ * The one form every matcher reads: backslash line continuations joined into
+ * one line, then comments removed. Joining first keeps a command that is wrapped
+ * across lines in one piece.
+ */
+const normalizeShell = (text) => stripShellComments(text.replace(/\\\r?\n/g, ' '));
+const noFacts = () => ({ publishes: false, runsCode: false, scripts: [] });
+const merge = (into, from) => {
+    if (from.publishes)
+        into.publishes = true;
+    if (from.runsCode)
+        into.runsCode = true;
+    into.scripts.push(...from.scripts);
+};
+const PACKAGE_MANAGERS = new Set(['npm', 'pnpm', 'yarn', 'bun', 'lerna']);
+/** Runs a package binary that is not installed yet: the command that follows is the real one. */
+const BINARY_RUNNERS = new Set(['npx', 'pnpx', 'bunx']);
+const CODE_SUBCOMMANDS = new Set([
+    'install',
+    'i',
+    'ci',
+    'add',
+    'test',
+    't',
+    'build',
+    'lint',
+    'install-test',
+    'it',
+    'rebuild'
+]);
+const CODE_SCRIPTS = /^(?:build|test|lint|prepublishOnly|prepublish|prepare|prepack)(?::.*)?$/;
+const RUN_SUBCOMMANDS = new Set(['run', 'run-script']);
+const EXEC_SUBCOMMANDS = new Set(['exec', 'dlx', 'x']);
+/** Subcommands that wrap another command whose own words follow (`npm stage publish`, `yarn npm publish`). */
+const WRAPPING_SUBCOMMANDS = new Set([
+    'stage',
+    'npm',
+    'workspaces',
+    'workspace',
+    'foreach',
+    'recursive',
+    'multi'
+]);
+/** Package-manager commands that are not a package script, so `pnpm <word>` for these is not a script. */
+const BUILTIN_COMMANDS = new Set([
+    'access',
+    'approve-builds',
+    'audit',
+    'bin',
+    'cache',
+    'config',
+    'create',
+    'deploy',
+    'deprecate',
+    'dist-tag',
+    'env',
+    'fetch',
+    'help',
+    'import',
+    'info',
+    'init',
+    'licenses',
+    'link',
+    'list',
+    'login',
+    'logout',
+    'ls',
+    'node',
+    'outdated',
+    'owner',
+    'pack',
+    'patch',
+    'patch-commit',
+    'prune',
+    'publish',
+    'remove',
+    'rm',
+    'root',
+    'set',
+    'setup',
+    'store',
+    'team',
+    'token',
+    'unlink',
+    'unpublish',
+    'up',
+    'update',
+    'upgrade',
+    'version',
+    'view',
+    'whoami',
+    'why'
+]);
+const SHELL_KEYWORDS = new Set([
+    'if',
+    'then',
+    'else',
+    'elif',
+    'do',
+    'while',
+    'until',
+    '!',
+    '{',
+    '(',
+    'time',
+    'env',
+    'sudo',
+    'command',
+    'nohup',
+    'corepack'
+]);
+const ASSIGNMENT = /^[A-Za-z_][A-Za-z0-9_]*=/;
+const DIR_FLAGS = new Set(['--dir', '-C', '--prefix', '--cwd']);
+const WIDE_FLAGS = new Set(['-r', '--recursive', '--workspaces', '-ws', '--filter', '-F']);
+/** Flags that take a separate value, so the value is not the subcommand. */
+const flagTakesValue = ({ manager, flag }) => {
+    if (DIR_FLAGS.has(flag) || flag === '--filter' || flag === '-F')
+        return true;
+    if (flag === '--workspace')
+        return true;
+    if (flag === '-w')
+        return manager === 'npm';
+    return flag === '--package' || flag === '-p';
+};
+const unquote = (token) => token.replace(/^["'`]+|["'`]+$/g, '');
+/** Words of one command with leading shell keywords, variable assignments and wrappers removed. */
+const commandWords = (segment) => {
+    const raw = segment
+        .trim()
+        .replace(/^[({]+\s*/, '')
+        .split(/\s+/)
+        .filter((token) => token !== '');
+    let index = 0;
+    while (index < raw.length) {
+        const token = raw[index] ?? '';
+        if (SHELL_KEYWORDS.has(token)) {
+            index += 1;
+            continue;
+        }
+        if (ASSIGNMENT.test(token)) {
+            // A quoted value may hold spaces: skip to the word that closes the quote.
+            const value = token.slice(token.indexOf('=') + 1);
+            const open = value[0];
+            index += 1;
+            if ((open === '"' || open === "'") && !(value.length > 1 && value.endsWith(open))) {
+                while (index < raw.length && !(raw[index] ?? '').endsWith(open))
+                    index += 1;
+                index += 1;
+            }
+            continue;
+        }
+        break;
+    }
+    return raw.slice(index).map(unquote);
+};
+const basename = (word) => word.replace(/^.*\//, '');
+const classify = ({ words, dirs }) => {
+    const [first = '', ...rest] = words;
+    const name = basename(first);
+    if (PACKAGE_MANAGERS.has(name))
+        return classifyManager({ manager: name, rest, dirs });
+    if (BINARY_RUNNERS.has(name))
+        return classifyExec({ rest, dirs });
+    if (name === 'changeset' || name === 'changesets') {
+        return { ...noFacts(), publishes: firstWord(rest) === 'publish' };
+    }
+    if (name === 'node')
+        return { ...noFacts(), runsCode: !runsOwnActionScript(rest) };
+    if (name === 'make')
+        return { ...noFacts(), runsCode: true };
+    return noFacts();
+};
+/**
+ * Stands in for a composite action's own directory in its shell text, so a
+ * script the action ships can be told from a script of the repository that runs
+ * it. Control characters are removed from input first, so it cannot be typed.
+ */
+const ACTION_PATH_MARK = '\u0001ACTIONPATH\u0001';
+const CONTROL_MARK = /\u0001/g;
+/** `node <script>` where the script sits inside the action's own directory (and does not climb out of it). */
+const runsOwnActionScript = (rest) => {
+    const script = firstWord(rest);
+    return script !== undefined && script.startsWith(ACTION_PATH_MARK) && !script.includes('..');
+};
+const firstWord = (tokens) => tokens.find((t) => !t.startsWith('-'));
+/** `<runner> [flags] <command ...>`: runs another command, which is repository code unless it only publishes. */
+const classifyExec = ({ rest, dirs }) => {
+    let index = 0;
+    while (index < rest.length) {
+        const token = rest[index] ?? '';
+        if (token === '--') {
+            index += 1;
+            break;
+        }
+        if (!token.startsWith('-'))
+            break;
+        index += token === '--package' || token === '-p' ? 2 : 1;
+    }
+    const inner = rest.slice(index);
+    if (inner.length === 0)
+        return { ...noFacts(), runsCode: true };
+    const facts = classify({ words: inner, dirs });
+    return { publishes: facts.publishes, runsCode: !facts.publishes, scripts: facts.scripts };
+};
+const classifyManager = ({ manager, rest, dirs }) => {
+    const facts = noFacts();
+    const flagDirs = [];
+    let wide = false;
+    const words = [];
+    let subIndex = -1;
+    for (let index = 0; index < rest.length; index += 1) {
+        const token = rest[index] ?? '';
+        if (token.startsWith('-')) {
+            const [flag = '', inline] = token.split('=', 2);
+            if (WIDE_FLAGS.has(flag) || (flag === '-w' && manager === 'npm') || flag === '--workspace')
+                wide = true;
+            let value = inline;
+            if (inline === undefined && flagTakesValue({ manager, flag })) {
+                value = rest[index + 1];
+                index += 1;
+            }
+            if (DIR_FLAGS.has(flag) && value !== undefined)
+                flagDirs.push(value);
+            continue;
+        }
+        if (words.length === 0)
+            subIndex = index;
+        words.push(token);
+    }
+    const [sub, second, third] = words;
+    const where = [...flagDirs, ...dirs];
+    if (sub === undefined) {
+        // A bare `yarn` installs dependencies.
+        facts.runsCode = manager === 'yarn';
+        return facts;
+    }
+    if (sub === 'foreach' || sub === 'workspaces')
+        wide = true;
+    if (sub === 'publish') {
+        facts.publishes = true;
+        return facts;
+    }
+    if (WRAPPING_SUBCOMMANDS.has(sub) && words.slice(1).includes('publish')) {
+        facts.publishes = true;
+        return facts;
+    }
+    if (RUN_SUBCOMMANDS.has(sub)) {
+        if (second !== undefined) {
+            facts.scripts.push({ name: second, dirs: where, wide });
+            facts.runsCode = CODE_SCRIPTS.test(second);
+        }
+        return facts;
+    }
+    if (sub === 'workspace' && third !== undefined) {
+        // `yarn workspace <package> <script>`
+        facts.scripts.push({ name: third, dirs: where, wide: true });
+        facts.runsCode = CODE_SCRIPTS.test(third);
+        return facts;
+    }
+    if (EXEC_SUBCOMMANDS.has(sub)) {
+        return classifyExec({ rest: rest.slice(subIndex + 1), dirs: where });
+    }
+    if (CODE_SUBCOMMANDS.has(sub) || CODE_SCRIPTS.test(sub)) {
+        facts.runsCode = true;
+        return facts;
+    }
+    // `pnpm <script>` and `yarn <script>` run a package script by name.
+    if ((manager === 'pnpm' || manager === 'yarn') && !BUILTIN_COMMANDS.has(sub)) {
+        facts.scripts.push({ name: sub, dirs: where, wide });
+    }
+    return facts;
+};
+/** Splits shell text into commands at newlines and the usual command separators. */
+const SEGMENT_SEPARATOR = /\n|;|&&|\|\||\||\$\(|\)|`/;
+/**
+ * Reads normalized shell text command by command. `baseDirs` are the directories
+ * the step already runs in (its `working-directory`); a `cd` earlier in the same
+ * text adds to them.
+ */
+const shell_commands_analyzeShell = ({ text, baseDirs = [], actionPathVars }) => {
+    const facts = noFacts();
+    let cwd;
+    let source = text.replace(CONTROL_MARK, '');
+    if (actionPathVars !== undefined) {
+        const names = ['GITHUB_ACTION_PATH', ...actionPathVars].map((n) => n.replace(/[^A-Za-z0-9_]/g, ''));
+        source = source.replace(/\$\{\{\s*github\.action_path\s*\}\}/g, ACTION_PATH_MARK);
+        for (const name of names)
+            source = source.replace(new RegExp(`\\$(?:\\{${name}\\}|${name}(?![A-Za-z0-9_]))`, 'g'), ACTION_PATH_MARK);
+    }
+    for (const segment of normalizeShell(source).split(SEGMENT_SEPARATOR)) {
+        const words = commandWords(segment);
+        if (words.length === 0)
+            continue;
+        if (words[0] === 'cd') {
+            cwd = words[1];
+            continue;
+        }
+        const dirs = [...(cwd === undefined ? [] : [cwd]), ...baseDirs];
+        merge(facts, classify({ words, dirs }));
+    }
+    return facts;
 };
 
 ;// CONCATENATED MODULE: ./packages/release-conformance/src/workflow-model.ts
@@ -8984,6 +9450,19 @@ const parseEvents = ({ raw, lines }) => {
     }
     return [];
 };
+const literalWorkingDirectory = (value) => typeof value === 'string' && value.trim() !== '' && !value.includes('${{')
+    ? value.trim()
+    : undefined;
+/** `defaults.run.working-directory` of a job or of the workflow. */
+const defaultWorkingDirectory = (container) => {
+    if (!isRecord(container))
+        return undefined;
+    const defaults = container['defaults'];
+    if (!isRecord(defaults))
+        return undefined;
+    const run = defaults['run'];
+    return isRecord(run) ? literalWorkingDirectory(run['working-directory']) : undefined;
+};
 const parseSteps = ({ raw, lines, jobId }) => {
     if (!Array.isArray(raw))
         return [];
@@ -8999,10 +9478,13 @@ const parseSteps = ({ raw, lines, jobId }) => {
             model.uses = uses;
         if (typeof step['run'] === 'string')
             model.run = step['run'];
+        const dir = literalWorkingDirectory(step['working-directory']);
+        if (dir !== undefined)
+            model.workingDirectory = dir;
         return model;
     });
 };
-const parseJobs = ({ raw, topLevel, topLevelEnv, lines }) => {
+const parseJobs = ({ raw, topLevel, topLevelEnv, topLevelDirectory, lines }) => {
     if (!isRecord(raw))
         return [];
     return Object.entries(raw).map(([id, value]) => {
@@ -9033,6 +9515,9 @@ const parseJobs = ({ raw, topLevel, topLevelEnv, lines }) => {
         };
         if (typeof job['uses'] === 'string')
             model.uses = parseUses(job['uses']);
+        const directory = defaultWorkingDirectory(job) ?? topLevelDirectory;
+        if (directory !== undefined)
+            model.workingDirectory = directory;
         return model;
     });
 };
@@ -9094,6 +9579,9 @@ const parseWorkflow = ({ file, text }) => {
             raw: raw['jobs'],
             topLevel: permissions,
             topLevelEnv: envSecretRefs(raw['env']),
+            ...(defaultWorkingDirectory(raw) === undefined
+                ? {}
+                : { topLevelDirectory: defaultWorkingDirectory(raw) }),
             lines
         })
     };
@@ -9105,63 +9593,25 @@ const parseWorkflow = ({ file, text }) => {
 
 
 
+
+
+
 const WORKFLOW_DIR = '.github/workflows';
 const LOCAL_WORKFLOW_PREFIX = './.github/workflows/';
-const LOCAL_ACTION_PREFIX = './.github/actions/';
-/** Shell publish commands: `npm|pnpm|yarn ... publish`, `npm stage publish`, `changeset publish`. */
-const PUBLISH_COMMAND = /(?:^|[\s;&|(])(?:(?:npm|pnpm|yarn)\b[^\n;&|]*?(?<![\w-])publish(?![\w-])|changesets?\s+publish(?![\w-]))/m;
+const LOCAL_ACTION_DIR = '.github/actions/';
+/**
+ * The shared release workflow checks out its own repository to this path and
+ * runs actions from it. In that one file of the canonical repository the path
+ * stands for the repository root, so its actions can be read from the tree.
+ */
+const CALLEE_CHECKOUT_PREFIX = '.pipelines/';
+/** The action of the shared release workflow that publishes tarballs with the npm client; its script is not shell. */
+const CALLEE_PUBLISH_ACTION = '.github/actions/npm-publish-tarballs';
+/** Loose publish-command test for text that did not parse as a workflow; errs towards seeing a publish. */
+const PUBLISH_COMMAND = /(?:^|[\s;&|(])(?:(?:npm|pnpm|yarn|lerna|bun)\b[^\n;&|]*?(?<![\w-])publish(?![\w-])|changesets?\s+publish(?![\w-]))/m;
 /** A `publish` input whose every line only creates tags does not publish a package. */
 const TAG_ONLY = /^\s*(?:(?:pnpm|npm|yarn)(?:\s+exec|\s+run)?\s+)?(?:changesets?\s+tag|git\s+tag|git\s+push\s+--tags)(?:\s+(?:--?[\w-]+|[\w./:@-]+))*\s*$/;
 const NPM_TOKEN_NAME = /npm/i;
-/**
- * Drops shell comments so a comment that names a publish command does not count
- * as running it. A `#` only starts a comment outside single and double quotes
- * and at the start of a word, so `echo "Release #12" && npm publish` keeps its
- * publish command. An unbalanced quote leaves later comments in place, which
- * errs towards seeing more commands, never fewer.
- */
-const stripShellComments = (text) => {
-    let out = '';
-    let quote;
-    for (let index = 0; index < text.length; index += 1) {
-        const char = text[index] ?? '';
-        if (quote !== undefined) {
-            if (char === '\\' && quote === '"') {
-                out += char + (text[index + 1] ?? '');
-                index += 1;
-                continue;
-            }
-            if (char === quote)
-                quote = undefined;
-            out += char;
-            continue;
-        }
-        if (char === '\\') {
-            out += char + (text[index + 1] ?? '');
-            index += 1;
-            continue;
-        }
-        if (char === '"' || char === "'") {
-            quote = char;
-            out += char;
-            continue;
-        }
-        const previous = text[index - 1];
-        if (char === '#' && (previous === undefined || /\s/.test(previous))) {
-            while (index + 1 < text.length && text[index + 1] !== '\n')
-                index += 1;
-            continue;
-        }
-        out += char;
-    }
-    return out;
-};
-/**
- * The one form every matcher reads: backslash line continuations joined into
- * one line, then comments removed. Joining first keeps a command that is wrapped
- * across lines in one piece.
- */
-const normalizeShell = (text) => stripShellComments(text.replace(/\\\r?\n/g, ' '));
 const runsPublishText = (text) => PUBLISH_COMMAND.test(normalizeShell(text));
 const isTagOnly = (command) => command
     .split('\n')
@@ -9180,92 +9630,176 @@ const isSharedCallee = (uses) => {
         uses.path.startsWith(`${WORKFLOW_DIR}/`) &&
         uses.path.includes('npm-release'));
 };
-const readComposite = ({ root, uses }) => {
-    const dir = (0,external_node_path_namespaceObject.join)(root, uses.path.replace(/^\.\//, ''));
+/**
+ * Reads one local composite action: only under `.github/actions/`, which the
+ * checker's checkout holds, and only its own steps. Anything else (a path
+ * elsewhere, a missing file, a node or docker action, a second level of local
+ * action) is reported as unreadable rather than assumed harmless.
+ */
+const readLocalAction = ({ root, path, calleeContext }) => {
+    let relative = external_node_path_namespaceObject.posix.normalize(path.replace(/^\.\//, ''));
+    if (calleeContext && relative.startsWith(CALLEE_CHECKOUT_PREFIX))
+        relative = relative.slice(CALLEE_CHECKOUT_PREFIX.length);
+    if (!relative.startsWith(LOCAL_ACTION_DIR))
+        return { ok: false, reason: 'it is outside `.github/actions/`, which the check reads' };
     for (const name of ['action.yml', 'action.yaml']) {
-        const path = (0,external_node_path_namespaceObject.join)(dir, name);
-        if (!(0,external_node_fs_namespaceObject.existsSync)(path))
-            continue;
+        const file = (0,external_node_path_namespaceObject.join)(root, relative, name);
+        let text;
         try {
-            const doc = (0,dist/* parse */.qg)((0,external_node_fs_namespaceObject.readFileSync)(path, 'utf8'), { maxAliasCount: 50 });
+            if (!(0,external_node_fs_namespaceObject.lstatSync)(file).isFile())
+                continue;
+            text = (0,external_node_fs_namespaceObject.readFileSync)(file, 'utf8');
+        }
+        catch {
+            continue;
+        }
+        try {
+            const doc = (0,dist/* parse */.qg)(text, { maxAliasCount: 50 });
             if (typeof doc !== 'object' || doc === null || !('runs' in doc))
-                return [];
+                return { ok: false, reason: 'it has no `runs` block' };
             const runs = doc.runs;
             if (typeof runs !== 'object' ||
                 runs === null ||
+                !('using' in runs) ||
+                runs.using !== 'composite' ||
                 !('steps' in runs) ||
                 !Array.isArray(runs.steps))
-                return [];
-            return runs.steps.map((step) => {
-                const out = { with: {} };
+                return { ok: false, reason: 'it is not a composite action, so its code is not read' };
+            const steps = runs.steps.map((step) => {
+                const out = { local: false, with: {}, actionPathVars: [] };
                 if (typeof step !== 'object' || step === null)
                     return out;
                 if ('run' in step && typeof step.run === 'string')
                     out.run = step.run;
-                if ('uses' in step && typeof step.uses === 'string')
+                if ('uses' in step && typeof step.uses === 'string') {
                     out.uses = step.uses;
+                    out.local = step.uses.startsWith('./');
+                }
+                if ('env' in step && typeof step.env === 'object' && step.env !== null) {
+                    for (const [key, value] of Object.entries(step.env)) {
+                        if (/github\.action_path|GITHUB_ACTION_PATH/.test(String(value)))
+                            out.actionPathVars.push(key);
+                    }
+                }
                 if ('with' in step && typeof step.with === 'object' && step.with !== null) {
                     for (const [key, value] of Object.entries(step.with))
                         out.with[key] = String(value);
                 }
                 return out;
             });
+            if (steps.some((step) => step.local))
+                return {
+                    ok: false,
+                    reason: 'it uses a further local action, which the check does not follow'
+                };
+            return { ok: true, steps };
         }
         catch {
-            return [];
+            return { ok: false, reason: 'it could not be parsed' };
         }
     }
-    return [];
+    return { ok: false, reason: 'no `action.yml` was found there' };
 };
 const isChangesetsAction = (uses) => uses !== undefined && /^changesets\/action@/i.test(uses);
 const changesetsPublishesPackages = (withInputs) => {
     const command = withInputs['publish'] ?? withInputs['publish-script'] ?? '';
     return command.trim() !== '' && !isTagOnly(command);
 };
-const scanJob = ({ job, root }) => {
+const scanJob = ({ job, env }) => {
     const runs = [];
     let publishes = false;
-    let credential = false;
+    let runsCode = false;
+    let idToken = false;
+    let npmToken = false;
+    const unreadable = [];
+    const unresolved = new Set();
     const eff = job.effectivePermissions;
     if (eff.all === 'write-all' || eff.scopes['id-token'] === 'write')
-        credential = true;
+        idToken = true;
     if (job.envSecretRefs.some(isNpmTokenRef))
-        credential = true;
+        npmToken = true;
     if (Object.entries(job.withValues).some(([key, expression]) => isNpmTokenRef({ key, expression })))
-        credential = true;
+        npmToken = true;
+    const readShell = ({ text, baseDirs, actionPathVars }) => {
+        runs.push(normalizeShell(text));
+        const facts = shell_commands_analyzeShell({
+            text,
+            baseDirs,
+            ...(actionPathVars === undefined ? {} : { actionPathVars })
+        });
+        if (facts.publishes)
+            publishes = true;
+        if (facts.runsCode)
+            runsCode = true;
+        for (const ref of facts.scripts) {
+            const found = env.reader.lookup(ref);
+            if (!found.defined)
+                unresolved.add(ref.name);
+            // One level only: the script body itself must hold an explicit publish command.
+            for (const body of found.bodies)
+                if (shell_commands_analyzeShell({ text: body }).publishes)
+                    publishes = true;
+        }
+    };
     for (const step of job.steps) {
+        const dir = step.workingDirectory ?? job.workingDirectory;
+        const baseDirs = dir === undefined ? [] : [dir];
         if (step.run !== undefined) {
-            runs.push(normalizeShell(step.run));
+            readShell({ text: step.run, baseDirs });
             // A token written straight into a command (for example an `.npmrc` line) is still a credential.
             if (mentionsNpmSecret(step.run))
-                credential = true;
+                npmToken = true;
         }
         if (step.envSecretRefs.some(isNpmTokenRef))
-            credential = true;
+            npmToken = true;
         if (Object.entries(step.with).some(([key, expression]) => isNpmTokenRef({ key, expression })))
-            credential = true;
+            npmToken = true;
         if (isChangesetsAction(step.uses?.raw) && changesetsPublishesPackages(step.with))
             publishes = true;
-        if (step.uses?.local && step.uses.path.startsWith(LOCAL_ACTION_PREFIX)) {
-            for (const inner of readComposite({ root, uses: step.uses })) {
+        if (step.uses?.local) {
+            const read = readLocalAction({
+                root: env.root,
+                path: step.uses.path,
+                calleeContext: env.calleeContext
+            });
+            if (!read.ok) {
+                unreadable.push({ path: step.uses.raw, reason: read.reason });
+                continue;
+            }
+            if (env.calleeContext &&
+                external_node_path_namespaceObject.posix.normalize(step.uses.path.replace(/^\.\//, '')) ===
+                    `${CALLEE_CHECKOUT_PREFIX}${CALLEE_PUBLISH_ACTION}`)
+                publishes = true;
+            // Only an action that does not come from the repository under review has its own
+            // directory outside what the change can alter; in a reviewed repository the
+            // action's directory is repository code like any other.
+            const external = env.calleeContext &&
+                external_node_path_namespaceObject.posix.normalize(step.uses.path.replace(/^\.\//, '')).startsWith(CALLEE_CHECKOUT_PREFIX);
+            for (const inner of read.steps) {
                 if (inner.run !== undefined)
-                    runs.push(normalizeShell(inner.run));
+                    readShell({
+                        text: inner.run,
+                        baseDirs: [],
+                        ...(external ? { actionPathVars: inner.actionPathVars } : {})
+                    });
                 if (isChangesetsAction(inner.uses) && changesetsPublishesPackages(inner.with))
                     publishes = true;
             }
         }
     }
-    const runText = runs.join('\n');
-    if (PUBLISH_COMMAND.test(runText))
-        publishes = true;
     return {
         jobId: job.id,
-        runText,
-        holdsPublishCredential: credential,
-        runsPublishCommand: publishes
+        runText: runs.join('\n'),
+        holdsPublishCredential: idToken || npmToken,
+        holdsIdToken: idToken,
+        holdsNpmToken: npmToken,
+        runsPublishCommand: publishes,
+        runsRepositoryCode: runsCode,
+        unreadableActions: unreadable,
+        unresolvedScripts: [...unresolved]
     };
 };
-const classify = ({ model, jobs }) => {
+const repo_scan_classify = ({ model, jobs }) => {
     if (model.parseError !== undefined)
         return 'unparseable';
     if (model.jobs.some((job) => job.uses !== undefined && isSharedCallee(job.uses)))
@@ -9348,11 +9882,17 @@ const scanRepo = ({ root, repository = '' }) => {
                 callers.set(callee, [...(callers.get(callee) ?? []), model.file]);
         }
     }
+    const reader = createScriptReader(root);
     const files = [...models.values()].map((model) => {
-        const jobs = model.jobs.map((job) => scanJob({ job, root }));
+        const env = {
+            root,
+            reader,
+            calleeContext: model.file === CALLEE_PATH && sameRepository({ a: repository, b: CALLEE_REPOSITORY })
+        };
+        const jobs = model.jobs.map((job) => scanJob({ job, env }));
         return {
             model,
-            class: classify({ model, jobs }),
+            class: repo_scan_classify({ model, jobs }),
             jobs,
             entryEvents: entryEventsOf({ file: model.file, models, callers, seen: new Set() }),
             localCallers: callers.get(model.file) ?? []
@@ -9371,7 +9911,8 @@ const PUBLISHER_WAIVABLE_RULES = (/* unused pure expression or super */ null && 
     'publisher/environment',
     'publisher/events',
     // Waivable for now; move it to the never-waivable list if a publishing dispatch is ever disallowed outright.
-    'publisher/publishing-dispatch'
+    'publisher/publishing-dispatch',
+    'publisher/unreadable-local-action'
 ]));
 /**
  * Rules no marker may waive: the publishing credential in a job that runs
@@ -9380,50 +9921,15 @@ const PUBLISHER_WAIVABLE_RULES = (/* unused pure expression or super */ null && 
  */
 const PUBLISHER_NEVER_WAIVABLE_RULES = (/* unused pure expression or super */ null && ([
     'publisher/id-token-with-code',
+    'publisher/token-with-code',
     'publisher/pull-request-target'
 ]));
 const UNCLASSIFIED_ID_TOKEN_RULE = 'publisher/unclassified-id-token';
-const CODE_SUBCOMMANDS = new Set(['install', 'i', 'ci', 'add', 'test', 't', 'build', 'lint']);
-const CODE_SCRIPTS = /^(?:build|test|lint|prepublishOnly|prepublish|prepare|prepack)(?::.*)?$/;
-const RUNNERS = new Set(['run', 'run-script']);
-const MANAGERS = new Set(['npm', 'pnpm', 'yarn', 'bun']);
-/** Package-manager flags that take a separate value, so the value is not the subcommand. */
-const FLAGS_WITH_VALUE = new Set(['--filter', '-F', '--dir', '-C', '--prefix', '--cwd']);
+const UNREADABLE_LOCAL_ACTION_RULE = 'publisher/unreadable-local-action';
+const UNCLASSIFIED_NPM_TOKEN_RULE = 'publisher/unclassified-npm-token';
 const finding = ({ ruleId, model, line, message, severity = 'error' }) => ({ ruleId, file: model.file, line, message, severity });
-/** The first non-flag tokens after the package manager name: the subcommand and the next word. */
-const subcommandOf = (tokens) => {
-    const words = [];
-    for (let index = 1; index < tokens.length && words.length < 2; index += 1) {
-        const token = tokens[index] ?? '';
-        if (token.startsWith('-')) {
-            if (FLAGS_WITH_VALUE.has(token))
-                index += 1;
-            continue;
-        }
-        words.push(token);
-    }
-    return [words[0], words[1]];
-};
-/** True when the shell text installs dependencies or runs a build, test or lint script. */
-const runsRepositoryCode = (runText) => {
-    const joined = normalizeShell(runText);
-    for (const segment of joined.split(/\n|;|&&|\|\||\|/)) {
-        const tokens = segment.trim().split(/\s+/);
-        const [first] = tokens;
-        if (first === undefined || !MANAGERS.has(first))
-            continue;
-        const [sub, next] = subcommandOf(tokens);
-        if (sub === undefined)
-            continue;
-        if (CODE_SUBCOMMANDS.has(sub))
-            return true;
-        if (RUNNERS.has(sub) && next !== undefined && CODE_SCRIPTS.test(next))
-            return true;
-        if (CODE_SCRIPTS.test(sub))
-            return true;
-    }
-    return false;
-};
+/** True when the shell text installs dependencies, runs a build, test or lint script, or runs a repository tool. */
+const runsRepositoryCode = (runText) => analyzeShell({ text: runText }).runsCode;
 const holdsIdToken = (job) => job.effectivePermissions.all === 'write-all' ||
     job.effectivePermissions.scopes['id-token'] === 'write';
 const otherWriteScopes = (job) => Object.entries(job.effectivePermissions.scopes)
@@ -9452,10 +9958,12 @@ const splitFindings = (params) => {
         }));
     }
     for (const { job, info } of publishingJobs(scan)) {
-        if (runsRepositoryCode(info.runText)) {
+        if (info.runsRepositoryCode) {
+            // The token and the OIDC credential each have their own never-waivable id, so a marker for
+            // another condition (the permissions rules, say) can never silence either.
             const idToken = holdsIdToken(job);
             out.push(finding({
-                ruleId: idToken ? 'publisher/id-token-with-code' : 'publisher/split',
+                ruleId: idToken ? 'publisher/id-token-with-code' : 'publisher/token-with-code',
                 model,
                 line: job.line,
                 message: `Job \`${job.id}\` holds the publishing credential and must not run a dependency install, build, test or lint command; run those in an earlier job and pass the result as an artifact.`
@@ -9496,41 +10004,68 @@ const actionName = (step) => step.uses && !step.uses.local
  * `package.json` names npm as the package manager, and `package-manager-cache: false`
  * turns that off. The workflow file cannot show what `package.json` says, so the
  * opt-out is required whenever the action's major version is 6 or later, or
- * cannot be told (a branch or a commit SHA).
+ * cannot be told (a branch, or a commit SHA with no version comment). A commit
+ * SHA is pinned with the version in a trailing comment on the `uses:` line
+ * (`@<sha> # v4.4.0`); that comment supplies the major version.
  */
-const setupNodeCachesByDefault = (step) => {
+const FULL_SHA = /^[0-9a-f]{40}$/i;
+/** The major version in the comment that trails a step's `uses:` line, if there is one. */
+const commentMajor = ({ step, lines }) => {
+    const raw = step.uses?.raw ?? '';
+    const first = lines[step.line - 1] ?? '';
+    const indent = first.length - first.trimStart().length;
+    for (let index = step.line - 1; index < Math.min(lines.length, step.line + 40); index += 1) {
+        const text = lines[index] ?? '';
+        if (index > step.line - 1 &&
+            /^\s*-\s/.test(text) &&
+            text.length - text.trimStart().length <= indent)
+            return undefined;
+        const at = text.indexOf(raw);
+        if (at < 0 || !/uses:\s*["']?$/.test(text.slice(0, at)))
+            continue;
+        return /\s#\s*v?(\d+)(?:\.\d+){0,2}(?:\s|$)/.exec(text.slice(at + raw.length))?.[1];
+    }
+    return undefined;
+};
+const setupNodeCachesByDefault = ({ step, lines }) => {
     const name = actionName(step);
     if (name === undefined || !SETUP_NODE_ACTION.test(name))
         return false;
     if (step.with['package-manager-cache']?.trim().toLowerCase() === 'false')
         return false;
-    const major = /^v?(\d+)(?:\.\d+){0,2}$/.exec(step.uses?.ref ?? '')?.[1];
+    const ref = step.uses?.ref ?? '';
+    const major = FULL_SHA.test(ref)
+        ? commentMajor({ step, lines })
+        : /^v?(\d+)(?:\.\d+){0,2}$/.exec(ref)?.[1];
     return major === undefined || Number(major) >= SETUP_NODE_DEFAULT_CACHE_MAJOR;
 };
-const cacheProblem = (step) => {
+const cacheProblem = ({ step, lines }) => {
     const name = actionName(step);
     if (name !== undefined && CACHE_ACTION.test(name))
         return 'remove the cache action';
     const cache = step.with['cache'];
     if (cache !== undefined && cache.trim() !== '' && cache.trim() !== 'false')
         return 'remove the `cache` input';
-    if (setupNodeCachesByDefault(step))
+    if (setupNodeCachesByDefault({ step, lines }))
         return 'set `package-manager-cache: false` on the setup action, which caches by default';
     return undefined;
 };
-const cacheFindings = ({ model }) => model.jobs.flatMap((job) => job.steps.flatMap((step) => {
-    const problem = cacheProblem(step);
-    if (problem === undefined)
-        return [];
-    return [
-        finding({
-            ruleId: 'publisher/no-cache',
-            model,
-            line: step.line,
-            message: `Job \`${job.id}\` must not use a dependency or build cache; ${problem}.`
-        })
-    ];
-}));
+const cacheFindings = ({ model }) => {
+    const lines = model.text.split('\n');
+    return model.jobs.flatMap((job) => job.steps.flatMap((step) => {
+        const problem = cacheProblem({ step, lines });
+        if (problem === undefined)
+            return [];
+        return [
+            finding({
+                ruleId: 'publisher/no-cache',
+                model,
+                line: step.line,
+                message: `Job \`${job.id}\` must not use a dependency or build cache; ${problem}.`
+            })
+        ];
+    }));
+};
 const environmentFindings = (params) => publishingJobs(params.scan).flatMap(({ job }) => {
     const { environment } = job;
     if (environment.kind === 'literal' && environment.name.trim() !== '')
@@ -9595,22 +10130,65 @@ const eventFindings = ({ model, scan, context }) => {
 const callsKnownPipelinesWorkflow = (job) => job.uses !== undefined &&
     !job.uses.local &&
     sameRepository({ a: `${job.uses.owner}/${job.uses.repo}`, b: CALLEE_REPOSITORY });
-const idTokenNotices = ({ params, jobs }) => jobs
-    .filter(holdsIdToken)
+const unresolvedNote = (info) => {
+    const names = info?.unresolvedScripts ?? [];
+    return names.length === 0
+        ? ''
+        : ` It runs ${names.map((n) => `\`${n}\``).join(', ')}, which no package.json the check reads defines.`;
+};
+const unclassifiedNotices = ({ params, jobs }) => jobs
     .filter((job) => !callsKnownPipelinesWorkflow(job))
-    .map((job) => finding({
-    ruleId: UNCLASSIFIED_ID_TOKEN_RULE,
-    model: params.model,
-    line: job.effectivePermissions.line || job.line,
-    severity: 'notice',
-    message: `Job \`${job.id}\` holds \`id-token: write\` but is not recognised as a release job; confirm it does not publish a package.`
-}));
+    .flatMap((job) => {
+    const info = params.scan.jobs.find((candidate) => candidate.jobId === job.id);
+    // The unreadable-action error already says why this job cannot be classified.
+    if (info !== undefined && info.unreadableActions.length > 0)
+        return [];
+    const out = [];
+    if (holdsIdToken(job)) {
+        out.push(finding({
+            ruleId: UNCLASSIFIED_ID_TOKEN_RULE,
+            model: params.model,
+            line: job.effectivePermissions.line || job.line,
+            severity: 'notice',
+            message: `Job \`${job.id}\` holds \`id-token: write\` but is not recognised as a release job; confirm it does not publish a package.${unresolvedNote(info)}`
+        }));
+    }
+    if (info?.holdsNpmToken) {
+        out.push(finding({
+            ruleId: UNCLASSIFIED_NPM_TOKEN_RULE,
+            model: params.model,
+            line: job.line,
+            severity: 'notice',
+            message: `Job \`${job.id}\` holds an npm token but is not recognised as a release job; confirm it does not publish a package.${unresolvedNote(info)}`
+        }));
+    }
+    return out;
+});
 /**
- * Notice for every job that holds `id-token: write` in a file the checker does
- * not otherwise classify, so a publish the checker cannot see is still surfaced.
- * Intended for files outside both rule sets.
+ * A job that holds a publishing credential and uses a local action the check
+ * cannot read: whatever that action runs is out of sight, so the job cannot be
+ * classified. Waivable with a dated marker; never part of the reference downgrade.
  */
-const checkUnclassifiedIdToken = (params) => idTokenNotices({ params, jobs: params.model.jobs });
+const unreadableActionFindings = (params) => params.model.jobs.flatMap((job) => {
+    const info = params.scan.jobs.find((candidate) => candidate.jobId === job.id);
+    if (!info?.holdsPublishCredential)
+        return [];
+    return info.unreadableActions.map(({ path, reason }) => finding({
+        ruleId: UNREADABLE_LOCAL_ACTION_RULE,
+        model: params.model,
+        line: job.line,
+        message: `Job \`${job.id}\` holds a publishing credential and uses the local action \`${path}\`, which the check cannot read (${reason}); use an action under \`.github/actions/\` or move its steps into the workflow.`
+    }));
+});
+/**
+ * Findings for every file outside both rule sets: a notice for each job holding
+ * `id-token: write` or an npm token that is not recognised as a release job,
+ * and an error for a credential-holding job whose local action cannot be read.
+ */
+const checkUnclassifiedJobs = (params) => [
+    ...unreadableActionFindings(params),
+    ...unclassifiedNotices({ params, jobs: params.model.jobs })
+];
 const checkBespokePublisher = (params) => {
     const publishing = new Set(publishingJobs(params.scan).map(({ job }) => job.id));
     return [
@@ -9618,7 +10196,11 @@ const checkBespokePublisher = (params) => {
         ...cacheFindings(params),
         ...environmentFindings(params),
         ...eventFindings(params),
-        ...idTokenNotices({ params, jobs: params.model.jobs.filter((job) => !publishing.has(job.id)) })
+        ...unreadableActionFindings(params),
+        ...unclassifiedNotices({
+            params,
+            jobs: params.model.jobs.filter((job) => !publishing.has(job.id))
+        })
     ];
 };
 
@@ -9841,22 +10423,42 @@ const unparseableFinding = (file) => {
         severity: mentionsRelease ? 'error' : 'notice'
     };
 };
-const CANONICAL_CALLEE_FILE = '.github/workflows/apps-npm-release.yml';
+/**
+ * The only publisher findings the reference workflow may carry as notices. The
+ * set is closed on purpose: a new rule, or any other condition on that file,
+ * stays an error so a change to the reference cannot add a defect unseen.
+ */
+const REFERENCE_DOWNGRADE_RULES = new Set([
+    'publisher/publishing-dispatch',
+    'publisher/id-token-with-code',
+    'publisher/environment'
+]);
 /**
  * The shared release workflow is the reference this checker derives its
- * profile from, so it is allowed to differ from the rules derived from it: its
- * publisher findings are reported as notices. It applies only when the run's own repository identity (never a
- * value read from the scanned tree) is the canonical repository and the file
- * is exactly the canonical path; every other rule and every other file is
- * checked normally, and a fork or copy gets no exclusion.
+ * profile from, so it is allowed to differ from the rules derived from it in
+ * the three ways named above. It applies only when the run's own repository
+ * identity (never a value read from the scanned tree) is the canonical
+ * repository and the file is exactly the canonical path; every other rule and
+ * every other file is checked normally, and a fork or copy gets no exclusion.
  */
 const downgradeCanonicalCalleeFindings = ({ findings, repository }) => !sameRepository({ a: repository, b: CALLEE_REPOSITORY })
     ? findings
-    : findings.map((finding) => finding.file === CANONICAL_CALLEE_FILE &&
-        finding.ruleId.startsWith('publisher/') &&
+    : findings.map((finding) => finding.file === CALLEE_PATH &&
+        REFERENCE_DOWNGRADE_RULES.has(finding.ruleId) &&
         finding.severity === 'error'
         ? { ...finding, severity: 'notice' }
         : finding);
+/** The same rule reporting the same message at the same place is one finding, however many steps led to it. */
+const unique = (findings) => {
+    const seen = new Set();
+    return findings.filter((f) => {
+        const key = JSON.stringify([f.ruleId, f.file, f.line, f.message, f.severity]);
+        if (seen.has(key))
+            return false;
+        seen.add(key);
+        return true;
+    });
+};
 const byLocation = (a, b) => a.file === b.file ? a.line - b.line : a.file < b.file ? -1 : 1;
 const runChecks = ({ root, profile, context }) => {
     const scan = scanRepo({ root, repository: context.repository });
@@ -9872,15 +10474,15 @@ const runChecks = ({ root, profile, context }) => {
             findings.push(...checkBespokePublisher(params));
         else {
             notInScope.push(file.model.file);
-            findings.push(...checkUnclassifiedIdToken(params));
+            findings.push(...checkUnclassifiedJobs(params));
         }
     }
     const applied = applyExceptions({ findings, files: scan.files, today: context.today });
     return {
-        findings: downgradeCanonicalCalleeFindings({
+        findings: unique(downgradeCanonicalCalleeFindings({
             findings: applied.findings,
             repository: context.repository
-        }).sort(byLocation),
+        })).sort(byLocation),
         exceptions: applied.exceptions,
         notInScope
     };
@@ -10103,7 +10705,7 @@ const main = () => {
     for (const line of formatAnnotations({ result }))
         process.stdout.write(`${line}\n`);
     const errors = result.findings.filter((f) => f.severity === 'error').length;
-    process.stdout.write(inScope.length === 0
+    process.stdout.write(inScope.length === 0 && errors === 0
         ? 'release-conformance: nothing in scope.\n'
         : `release-conformance: ${inScope.length} file(s) in scope, ${errors} error(s).\n`);
     const summaryPath = env['GITHUB_STEP_SUMMARY'];

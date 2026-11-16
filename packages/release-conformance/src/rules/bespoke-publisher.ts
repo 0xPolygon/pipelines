@@ -10,7 +10,7 @@ import type {
 } from '../types.ts';
 
 import { CALLEE_REPOSITORY, sameRepository } from '../canonical.ts';
-import { normalizeShell } from '../repo-scan.ts';
+import { analyzeShell } from '../shell-commands.ts';
 
 /** Rules a dated in-file marker may waive. */
 export const PUBLISHER_WAIVABLE_RULES = [
@@ -19,7 +19,8 @@ export const PUBLISHER_WAIVABLE_RULES = [
   'publisher/environment',
   'publisher/events',
   // Waivable for now; move it to the never-waivable list if a publishing dispatch is ever disallowed outright.
-  'publisher/publishing-dispatch'
+  'publisher/publishing-dispatch',
+  'publisher/unreadable-local-action'
 ] as const;
 
 /**
@@ -29,17 +30,13 @@ export const PUBLISHER_WAIVABLE_RULES = [
  */
 export const PUBLISHER_NEVER_WAIVABLE_RULES = [
   'publisher/id-token-with-code',
+  'publisher/token-with-code',
   'publisher/pull-request-target'
 ] as const;
 
 export const UNCLASSIFIED_ID_TOKEN_RULE = 'publisher/unclassified-id-token';
-
-const CODE_SUBCOMMANDS = new Set(['install', 'i', 'ci', 'add', 'test', 't', 'build', 'lint']);
-const CODE_SCRIPTS = /^(?:build|test|lint|prepublishOnly|prepublish|prepare|prepack)(?::.*)?$/;
-const RUNNERS = new Set(['run', 'run-script']);
-const MANAGERS = new Set(['npm', 'pnpm', 'yarn', 'bun']);
-/** Package-manager flags that take a separate value, so the value is not the subcommand. */
-const FLAGS_WITH_VALUE = new Set(['--filter', '-F', '--dir', '-C', '--prefix', '--cwd']);
+export const UNREADABLE_LOCAL_ACTION_RULE = 'publisher/unreadable-local-action';
+export const UNCLASSIFIED_NPM_TOKEN_RULE = 'publisher/unclassified-npm-token';
 
 const finding = ({
   ruleId,
@@ -55,35 +52,9 @@ const finding = ({
   severity?: Severity;
 }): Finding => ({ ruleId, file: model.file, line, message, severity });
 
-/** The first non-flag tokens after the package manager name: the subcommand and the next word. */
-const subcommandOf = (tokens: string[]): [string | undefined, string | undefined] => {
-  const words: string[] = [];
-  for (let index = 1; index < tokens.length && words.length < 2; index += 1) {
-    const token = tokens[index] ?? '';
-    if (token.startsWith('-')) {
-      if (FLAGS_WITH_VALUE.has(token)) index += 1;
-      continue;
-    }
-    words.push(token);
-  }
-  return [words[0], words[1]];
-};
-
-/** True when the shell text installs dependencies or runs a build, test or lint script. */
-export const runsRepositoryCode = (runText: string): boolean => {
-  const joined = normalizeShell(runText);
-  for (const segment of joined.split(/\n|;|&&|\|\||\|/)) {
-    const tokens = segment.trim().split(/\s+/);
-    const [first] = tokens;
-    if (first === undefined || !MANAGERS.has(first)) continue;
-    const [sub, next] = subcommandOf(tokens);
-    if (sub === undefined) continue;
-    if (CODE_SUBCOMMANDS.has(sub)) return true;
-    if (RUNNERS.has(sub) && next !== undefined && CODE_SCRIPTS.test(next)) return true;
-    if (CODE_SCRIPTS.test(sub)) return true;
-  }
-  return false;
-};
+/** True when the shell text installs dependencies, runs a build, test or lint script, or runs a repository tool. */
+export const runsRepositoryCode = (runText: string): boolean =>
+  analyzeShell({ text: runText }).runsCode;
 
 const holdsIdToken = (job: JobModel): boolean =>
   job.effectivePermissions.all === 'write-all' ||
@@ -120,11 +91,13 @@ const splitFindings = (params: RuleParams): Finding[] => {
     );
   }
   for (const { job, info } of publishingJobs(scan)) {
-    if (runsRepositoryCode(info.runText)) {
+    if (info.runsRepositoryCode) {
+      // The token and the OIDC credential each have their own never-waivable id, so a marker for
+      // another condition (the permissions rules, say) can never silence either.
       const idToken = holdsIdToken(job);
       out.push(
         finding({
-          ruleId: idToken ? 'publisher/id-token-with-code' : 'publisher/split',
+          ruleId: idToken ? 'publisher/id-token-with-code' : 'publisher/token-with-code',
           model,
           line: job.line,
           message: `Job \`${job.id}\` holds the publishing credential and must not run a dependency install, build, test or lint command; run those in an earlier job and pass the result as an artifact.`
@@ -174,31 +147,77 @@ const actionName = (step: StepModel): string | undefined =>
  * `package.json` names npm as the package manager, and `package-manager-cache: false`
  * turns that off. The workflow file cannot show what `package.json` says, so the
  * opt-out is required whenever the action's major version is 6 or later, or
- * cannot be told (a branch or a commit SHA).
+ * cannot be told (a branch, or a commit SHA with no version comment). A commit
+ * SHA is pinned with the version in a trailing comment on the `uses:` line
+ * (`@<sha> # v4.4.0`); that comment supplies the major version.
  */
-const setupNodeCachesByDefault = (step: StepModel): boolean => {
+const FULL_SHA = /^[0-9a-f]{40}$/i;
+
+/** The major version in the comment that trails a step's `uses:` line, if there is one. */
+const commentMajor = ({
+  step,
+  lines
+}: {
+  step: StepModel;
+  lines: string[];
+}): string | undefined => {
+  const raw = step.uses?.raw ?? '';
+  const first = lines[step.line - 1] ?? '';
+  const indent = first.length - first.trimStart().length;
+  for (let index = step.line - 1; index < Math.min(lines.length, step.line + 40); index += 1) {
+    const text = lines[index] ?? '';
+    if (
+      index > step.line - 1 &&
+      /^\s*-\s/.test(text) &&
+      text.length - text.trimStart().length <= indent
+    )
+      return undefined;
+    const at = text.indexOf(raw);
+    if (at < 0 || !/uses:\s*["']?$/.test(text.slice(0, at))) continue;
+    return /\s#\s*v?(\d+)(?:\.\d+){0,2}(?:\s|$)/.exec(text.slice(at + raw.length))?.[1];
+  }
+  return undefined;
+};
+
+const setupNodeCachesByDefault = ({
+  step,
+  lines
+}: {
+  step: StepModel;
+  lines: string[];
+}): boolean => {
   const name = actionName(step);
   if (name === undefined || !SETUP_NODE_ACTION.test(name)) return false;
   if (step.with['package-manager-cache']?.trim().toLowerCase() === 'false') return false;
-  const major = /^v?(\d+)(?:\.\d+){0,2}$/.exec(step.uses?.ref ?? '')?.[1];
+  const ref = step.uses?.ref ?? '';
+  const major = FULL_SHA.test(ref)
+    ? commentMajor({ step, lines })
+    : /^v?(\d+)(?:\.\d+){0,2}$/.exec(ref)?.[1];
   return major === undefined || Number(major) >= SETUP_NODE_DEFAULT_CACHE_MAJOR;
 };
 
-const cacheProblem = (step: StepModel): string | undefined => {
+const cacheProblem = ({
+  step,
+  lines
+}: {
+  step: StepModel;
+  lines: string[];
+}): string | undefined => {
   const name = actionName(step);
   if (name !== undefined && CACHE_ACTION.test(name)) return 'remove the cache action';
   const cache = step.with['cache'];
   if (cache !== undefined && cache.trim() !== '' && cache.trim() !== 'false')
     return 'remove the `cache` input';
-  if (setupNodeCachesByDefault(step))
+  if (setupNodeCachesByDefault({ step, lines }))
     return 'set `package-manager-cache: false` on the setup action, which caches by default';
   return undefined;
 };
 
-const cacheFindings = ({ model }: RuleParams): Finding[] =>
-  model.jobs.flatMap((job) =>
+const cacheFindings = ({ model }: RuleParams): Finding[] => {
+  const lines = model.text.split('\n');
+  return model.jobs.flatMap((job) =>
     job.steps.flatMap((step) => {
-      const problem = cacheProblem(step);
+      const problem = cacheProblem({ step, lines });
       if (problem === undefined) return [];
       return [
         finding({
@@ -210,6 +229,7 @@ const cacheFindings = ({ model }: RuleParams): Finding[] =>
       ];
     })
   );
+};
 
 const environmentFindings = (params: RuleParams): Finding[] =>
   publishingJobs(params.scan).flatMap(({ job }) => {
@@ -299,27 +319,80 @@ const callsKnownPipelinesWorkflow = (job: JobModel): boolean =>
   !job.uses.local &&
   sameRepository({ a: `${job.uses.owner}/${job.uses.repo}`, b: CALLEE_REPOSITORY });
 
-const idTokenNotices = ({ params, jobs }: { params: RuleParams; jobs: JobModel[] }): Finding[] =>
+const unresolvedNote = (info: JobScan | undefined): string => {
+  const names = info?.unresolvedScripts ?? [];
+  return names.length === 0
+    ? ''
+    : ` It runs ${names.map((n) => `\`${n}\``).join(', ')}, which no package.json the check reads defines.`;
+};
+
+const unclassifiedNotices = ({
+  params,
   jobs
-    .filter(holdsIdToken)
+}: {
+  params: RuleParams;
+  jobs: JobModel[];
+}): Finding[] =>
+  jobs
     .filter((job) => !callsKnownPipelinesWorkflow(job))
-    .map((job) =>
-      finding({
-        ruleId: UNCLASSIFIED_ID_TOKEN_RULE,
-        model: params.model,
-        line: job.effectivePermissions.line || job.line,
-        severity: 'notice',
-        message: `Job \`${job.id}\` holds \`id-token: write\` but is not recognised as a release job; confirm it does not publish a package.`
-      })
-    );
+    .flatMap((job) => {
+      const info = params.scan.jobs.find((candidate) => candidate.jobId === job.id);
+      // The unreadable-action error already says why this job cannot be classified.
+      if (info !== undefined && info.unreadableActions.length > 0) return [];
+      const out: Finding[] = [];
+      if (holdsIdToken(job)) {
+        out.push(
+          finding({
+            ruleId: UNCLASSIFIED_ID_TOKEN_RULE,
+            model: params.model,
+            line: job.effectivePermissions.line || job.line,
+            severity: 'notice',
+            message: `Job \`${job.id}\` holds \`id-token: write\` but is not recognised as a release job; confirm it does not publish a package.${unresolvedNote(info)}`
+          })
+        );
+      }
+      if (info?.holdsNpmToken) {
+        out.push(
+          finding({
+            ruleId: UNCLASSIFIED_NPM_TOKEN_RULE,
+            model: params.model,
+            line: job.line,
+            severity: 'notice',
+            message: `Job \`${job.id}\` holds an npm token but is not recognised as a release job; confirm it does not publish a package.${unresolvedNote(info)}`
+          })
+        );
+      }
+      return out;
+    });
 
 /**
- * Notice for every job that holds `id-token: write` in a file the checker does
- * not otherwise classify, so a publish the checker cannot see is still surfaced.
- * Intended for files outside both rule sets.
+ * A job that holds a publishing credential and uses a local action the check
+ * cannot read: whatever that action runs is out of sight, so the job cannot be
+ * classified. Waivable with a dated marker; never part of the reference downgrade.
  */
-export const checkUnclassifiedIdToken: Rule = (params) =>
-  idTokenNotices({ params, jobs: params.model.jobs });
+const unreadableActionFindings = (params: RuleParams): Finding[] =>
+  params.model.jobs.flatMap((job) => {
+    const info = params.scan.jobs.find((candidate) => candidate.jobId === job.id);
+    if (!info?.holdsPublishCredential) return [];
+    return info.unreadableActions.map(({ path, reason }) =>
+      finding({
+        ruleId: UNREADABLE_LOCAL_ACTION_RULE,
+        model: params.model,
+        line: job.line,
+        message: `Job \`${job.id}\` holds a publishing credential and uses the local action \`${path}\`, which the check cannot read (${reason}); use an action under \`.github/actions/\` or move its steps into the workflow.`
+      })
+    );
+  });
+
+/**
+ * Findings for every file outside both rule sets: a notice for each job holding
+ * `id-token: write` or an npm token that is not recognised as a release job,
+ * and an error for a credential-holding job whose local action cannot be read.
+ */
+export const checkUnclassifiedJobs: Rule = (params) => [
+  ...unreadableActionFindings(params),
+  ...unclassifiedNotices({ params, jobs: params.model.jobs })
+];
 
 export const checkBespokePublisher: Rule = (params) => {
   const publishing = new Set(publishingJobs(params.scan).map(({ job }) => job.id));
@@ -328,6 +401,10 @@ export const checkBespokePublisher: Rule = (params) => {
     ...cacheFindings(params),
     ...environmentFindings(params),
     ...eventFindings(params),
-    ...idTokenNotices({ params, jobs: params.model.jobs.filter((job) => !publishing.has(job.id)) })
+    ...unreadableActionFindings(params),
+    ...unclassifiedNotices({
+      params,
+      jobs: params.model.jobs.filter((job) => !publishing.has(job.id))
+    })
   ];
 };

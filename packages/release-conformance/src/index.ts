@@ -131,7 +131,7 @@ const main = (): number => {
 
   const errors = result.findings.filter((f) => f.severity === 'error').length;
   process.stdout.write(
-    inScope.length === 0
+    inScope.length === 0 && errors === 0
       ? 'release-conformance: nothing in scope.\n'
       : `release-conformance: ${inScope.length} file(s) in scope, ${errors} error(s).\n`
   );

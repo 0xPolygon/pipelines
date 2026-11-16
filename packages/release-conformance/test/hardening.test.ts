@@ -83,11 +83,12 @@ const runFixture = ({
 
 suite('publishers are recognised in more workflow forms', () => {
   const publisher = ['publisher/environment', 'publisher/publishing-dispatch', 'publisher/split'];
+  const withCode = [...publisher, 'publisher/token-with-code'].sort();
   const cases: Array<{ name: string; class: FileClass; errors: string[] }> = [
-    { name: 'workflow-env-token.yml', class: 'bespoke-publisher', errors: publisher },
-    { name: 'run-text-token.yml', class: 'bespoke-publisher', errors: publisher },
-    { name: 'bracket-secret.yml', class: 'bespoke-publisher', errors: publisher },
-    { name: 'upper-case-secret.yml', class: 'bespoke-publisher', errors: publisher },
+    { name: 'workflow-env-token.yml', class: 'bespoke-publisher', errors: withCode },
+    { name: 'run-text-token.yml', class: 'bespoke-publisher', errors: withCode },
+    { name: 'bracket-secret.yml', class: 'bespoke-publisher', errors: withCode },
+    { name: 'upper-case-secret.yml', class: 'bespoke-publisher', errors: withCode },
     { name: 'token-key-literal.yml', class: 'bespoke-publisher', errors: publisher },
     {
       name: 'hash-in-quotes.yml',

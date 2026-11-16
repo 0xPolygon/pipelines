@@ -196,6 +196,20 @@ const parseEvents = ({ raw, lines }: { raw: unknown; lines: Lines }): EventModel
   return [];
 };
 
+const literalWorkingDirectory = (value: unknown): string | undefined =>
+  typeof value === 'string' && value.trim() !== '' && !value.includes('${{')
+    ? value.trim()
+    : undefined;
+
+/** `defaults.run.working-directory` of a job or of the workflow. */
+const defaultWorkingDirectory = (container: unknown): string | undefined => {
+  if (!isRecord(container)) return undefined;
+  const defaults = container['defaults'];
+  if (!isRecord(defaults)) return undefined;
+  const run = defaults['run'];
+  return isRecord(run) ? literalWorkingDirectory(run['working-directory']) : undefined;
+};
+
 const parseSteps = ({
   raw,
   lines,
@@ -216,6 +230,8 @@ const parseSteps = ({
     };
     if (uses) model.uses = uses;
     if (typeof step['run'] === 'string') model.run = step['run'];
+    const dir = literalWorkingDirectory(step['working-directory']);
+    if (dir !== undefined) model.workingDirectory = dir;
     return model;
   });
 };
@@ -224,11 +240,13 @@ const parseJobs = ({
   raw,
   topLevel,
   topLevelEnv,
+  topLevelDirectory,
   lines
 }: {
   raw: unknown;
   topLevel: Permissions;
   topLevelEnv: EnvSecretRef[];
+  topLevelDirectory?: string;
   lines: Lines;
 }): JobModel[] => {
   if (!isRecord(raw)) return [];
@@ -259,6 +277,8 @@ const parseJobs = ({
       steps: parseSteps({ raw: job['steps'], lines, jobId: id })
     };
     if (typeof job['uses'] === 'string') model.uses = parseUses(job['uses']);
+    const directory = defaultWorkingDirectory(job) ?? topLevelDirectory;
+    if (directory !== undefined) model.workingDirectory = directory;
     return model;
   });
 };
@@ -334,6 +354,9 @@ export const parseWorkflow = ({ file, text }: { file: string; text: string }): W
       raw: raw['jobs'],
       topLevel: permissions,
       topLevelEnv: envSecretRefs(raw['env']),
+      ...(defaultWorkingDirectory(raw) === undefined
+        ? {}
+        : { topLevelDirectory: defaultWorkingDirectory(raw) }),
       lines
     })
   };

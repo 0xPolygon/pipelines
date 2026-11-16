@@ -63,6 +63,8 @@ export interface StepModel {
   run?: string;
   with: Record<string, string>;
   envSecretRefs: EnvSecretRef[];
+  /** Literal `working-directory`, when the step sets one. */
+  workingDirectory?: string;
 }
 
 export interface JobModel {
@@ -80,6 +82,8 @@ export interface JobModel {
   withKeys: string[];
   withValues: Record<string, string>;
   envSecretRefs: EnvSecretRef[];
+  /** Literal `defaults.run.working-directory` of the job or the workflow, when set. */
+  workingDirectory?: string;
   steps: StepModel[];
 }
 
@@ -103,7 +107,17 @@ export interface JobScan {
   /** Step `run` text of the job plus the `run` text of local composite actions it uses, comments removed. */
   runText: string;
   holdsPublishCredential: boolean;
+  /** `id-token: write` is in effect for the job. */
+  holdsIdToken: boolean;
+  /** An npm token reaches the job through a secret, an environment value or an `.npmrc` line. */
+  holdsNpmToken: boolean;
   runsPublishCommand: boolean;
+  /** The job installs dependencies or runs a build, test or lint step or a repository tool. */
+  runsRepositoryCode: boolean;
+  /** Local actions the job uses that the checker could not read, with the reason. */
+  unreadableActions: Array<{ path: string; reason: string }>;
+  /** Package scripts the job runs by name that no package.json the checker reads defines. */
+  unresolvedScripts: string[];
 }
 
 export interface ScannedFile {

@@ -38,7 +38,14 @@ jobs:
         uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4.3.1
         with:
           path: target
-          sparse-checkout: .github
+          # Workflow files and the local actions they use, plus every package.json:
+          # the check reads package scripts to see what `<manager> run <script>`
+          # publishes. Pattern mode is needed to name package.json at any depth.
+          sparse-checkout: |
+            /.github/
+            /package.json
+            /**/package.json
+          sparse-checkout-cone-mode: false
           persist-credentials: false
 
       # This workflow's own commit supplies the bundled action and the shared

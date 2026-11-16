@@ -20,7 +20,8 @@ export const WAIVABLE_RULE_IDS: readonly string[] = [
   'publisher/environment',
   'publisher/events',
   // Waivable for now: a publishing workflow_dispatch may still be waived with a dated marker.
-  'publisher/publishing-dispatch'
+  'publisher/publishing-dispatch',
+  'publisher/unreadable-local-action'
 ];
 
 /**
@@ -34,7 +35,8 @@ export const NEVER_WAIVABLE_RULE_IDS: readonly string[] = [
   'caller/pull-request-target',
   'caller/publish-permission-scope',
   'publisher/pull-request-target',
-  'publisher/id-token-with-code'
+  'publisher/id-token-with-code',
+  'publisher/token-with-code'
 ];
 
 const DAY_MS = 86_400_000;

@@ -1,8 +1,9 @@
 import { existsSync, lstatSync, readFileSync, readdirSync } from 'node:fs';
-import { join } from 'node:path';
+import { join, posix } from 'node:path';
 
 import { parse } from 'yaml';
 
+import type { ScriptReader } from './package-scripts.ts';
 import type {
   EventModel,
   FileClass,
@@ -14,7 +15,14 @@ import type {
   WorkflowModel
 } from './types.ts';
 
-import { ARCHIVED_CALLEE_REPOSITORY, CALLEE_PATH } from './canonical.ts';
+import {
+  ARCHIVED_CALLEE_REPOSITORY,
+  CALLEE_PATH,
+  CALLEE_REPOSITORY,
+  sameRepository
+} from './canonical.ts';
+import { createScriptReader } from './package-scripts.ts';
+import { analyzeShell, normalizeShell, stripShellComments } from './shell-commands.ts';
 import {
   NPM_TOKEN_KEYS,
   parseWorkflow,
@@ -22,67 +30,27 @@ import {
   unreadableWorkflow
 } from './workflow-model.ts';
 
+export { normalizeShell, stripShellComments };
+
 const WORKFLOW_DIR = '.github/workflows';
 const LOCAL_WORKFLOW_PREFIX = './.github/workflows/';
-const LOCAL_ACTION_PREFIX = './.github/actions/';
+const LOCAL_ACTION_DIR = '.github/actions/';
+/**
+ * The shared release workflow checks out its own repository to this path and
+ * runs actions from it. In that one file of the canonical repository the path
+ * stands for the repository root, so its actions can be read from the tree.
+ */
+const CALLEE_CHECKOUT_PREFIX = '.pipelines/';
+/** The action of the shared release workflow that publishes tarballs with the npm client; its script is not shell. */
+const CALLEE_PUBLISH_ACTION = '.github/actions/npm-publish-tarballs';
 
-/** Shell publish commands: `npm|pnpm|yarn ... publish`, `npm stage publish`, `changeset publish`. */
+/** Loose publish-command test for text that did not parse as a workflow; errs towards seeing a publish. */
 const PUBLISH_COMMAND =
-  /(?:^|[\s;&|(])(?:(?:npm|pnpm|yarn)\b[^\n;&|]*?(?<![\w-])publish(?![\w-])|changesets?\s+publish(?![\w-]))/m;
+  /(?:^|[\s;&|(])(?:(?:npm|pnpm|yarn|lerna|bun)\b[^\n;&|]*?(?<![\w-])publish(?![\w-])|changesets?\s+publish(?![\w-]))/m;
 /** A `publish` input whose every line only creates tags does not publish a package. */
 const TAG_ONLY =
   /^\s*(?:(?:pnpm|npm|yarn)(?:\s+exec|\s+run)?\s+)?(?:changesets?\s+tag|git\s+tag|git\s+push\s+--tags)(?:\s+(?:--?[\w-]+|[\w./:@-]+))*\s*$/;
 const NPM_TOKEN_NAME = /npm/i;
-
-/**
- * Drops shell comments so a comment that names a publish command does not count
- * as running it. A `#` only starts a comment outside single and double quotes
- * and at the start of a word, so `echo "Release #12" && npm publish` keeps its
- * publish command. An unbalanced quote leaves later comments in place, which
- * errs towards seeing more commands, never fewer.
- */
-export const stripShellComments = (text: string): string => {
-  let out = '';
-  let quote: '"' | "'" | undefined;
-  for (let index = 0; index < text.length; index += 1) {
-    const char = text[index] ?? '';
-    if (quote !== undefined) {
-      if (char === '\\' && quote === '"') {
-        out += char + (text[index + 1] ?? '');
-        index += 1;
-        continue;
-      }
-      if (char === quote) quote = undefined;
-      out += char;
-      continue;
-    }
-    if (char === '\\') {
-      out += char + (text[index + 1] ?? '');
-      index += 1;
-      continue;
-    }
-    if (char === '"' || char === "'") {
-      quote = char;
-      out += char;
-      continue;
-    }
-    const previous = text[index - 1];
-    if (char === '#' && (previous === undefined || /\s/.test(previous))) {
-      while (index + 1 < text.length && text[index + 1] !== '\n') index += 1;
-      continue;
-    }
-    out += char;
-  }
-  return out;
-};
-
-/**
- * The one form every matcher reads: backslash line continuations joined into
- * one line, then comments removed. Joining first keeps a command that is wrapped
- * across lines in one piece.
- */
-export const normalizeShell = (text: string): string =>
-  stripShellComments(text.replace(/\\\r?\n/g, ' '));
 
 export const runsPublishText = (text: string): boolean =>
   PUBLISH_COMMAND.test(normalizeShell(text));
@@ -114,40 +82,87 @@ export const isSharedCallee = (uses: UsesRef): boolean => {
 interface CompositeStep {
   run?: string;
   uses?: string;
+  local: boolean;
   with: Record<string, string>;
+  /** Environment variables the step sets from `github.action_path`. */
+  actionPathVars: string[];
 }
 
-const readComposite = ({ root, uses }: { root: string; uses: UsesRef }): CompositeStep[] => {
-  const dir = join(root, uses.path.replace(/^\.\//, ''));
+type ActionRead = { ok: true; steps: CompositeStep[] } | { ok: false; reason: string };
+
+/**
+ * Reads one local composite action: only under `.github/actions/`, which the
+ * checker's checkout holds, and only its own steps. Anything else (a path
+ * elsewhere, a missing file, a node or docker action, a second level of local
+ * action) is reported as unreadable rather than assumed harmless.
+ */
+const readLocalAction = ({
+  root,
+  path,
+  calleeContext
+}: {
+  root: string;
+  path: string;
+  calleeContext: boolean;
+}): ActionRead => {
+  let relative = posix.normalize(path.replace(/^\.\//, ''));
+  if (calleeContext && relative.startsWith(CALLEE_CHECKOUT_PREFIX))
+    relative = relative.slice(CALLEE_CHECKOUT_PREFIX.length);
+  if (!relative.startsWith(LOCAL_ACTION_DIR))
+    return { ok: false, reason: 'it is outside `.github/actions/`, which the check reads' };
   for (const name of ['action.yml', 'action.yaml']) {
-    const path = join(dir, name);
-    if (!existsSync(path)) continue;
+    const file = join(root, relative, name);
+    let text: string;
     try {
-      const doc: unknown = parse(readFileSync(path, 'utf8'), { maxAliasCount: 50 });
-      if (typeof doc !== 'object' || doc === null || !('runs' in doc)) return [];
+      if (!lstatSync(file).isFile()) continue;
+      text = readFileSync(file, 'utf8');
+    } catch {
+      continue;
+    }
+    try {
+      const doc: unknown = parse(text, { maxAliasCount: 50 });
+      if (typeof doc !== 'object' || doc === null || !('runs' in doc))
+        return { ok: false, reason: 'it has no `runs` block' };
       const runs = doc.runs;
       if (
         typeof runs !== 'object' ||
         runs === null ||
+        !('using' in runs) ||
+        runs.using !== 'composite' ||
         !('steps' in runs) ||
         !Array.isArray(runs.steps)
       )
-        return [];
-      return runs.steps.map((step: unknown): CompositeStep => {
-        const out: CompositeStep = { with: {} };
+        return { ok: false, reason: 'it is not a composite action, so its code is not read' };
+      const steps = runs.steps.map((step: unknown): CompositeStep => {
+        const out: CompositeStep = { local: false, with: {}, actionPathVars: [] };
         if (typeof step !== 'object' || step === null) return out;
         if ('run' in step && typeof step.run === 'string') out.run = step.run;
-        if ('uses' in step && typeof step.uses === 'string') out.uses = step.uses;
+        if ('uses' in step && typeof step.uses === 'string') {
+          out.uses = step.uses;
+          out.local = step.uses.startsWith('./');
+        }
+        if ('env' in step && typeof step.env === 'object' && step.env !== null) {
+          for (const [key, value] of Object.entries(step.env)) {
+            if (/github\.action_path|GITHUB_ACTION_PATH/.test(String(value)))
+              out.actionPathVars.push(key);
+          }
+        }
         if ('with' in step && typeof step.with === 'object' && step.with !== null) {
           for (const [key, value] of Object.entries(step.with)) out.with[key] = String(value);
         }
         return out;
       });
+      if (steps.some((step) => step.local))
+        return {
+          ok: false,
+          reason: 'it uses a further local action, which the check does not follow'
+        };
+      return { ok: true, steps };
     } catch {
-      return [];
+      return { ok: false, reason: 'it could not be parsed' };
     }
   }
-  return [];
+  return { ok: false, reason: 'no `action.yml` was found there' };
 };
 
 const isChangesetsAction = (uses: string | undefined): boolean =>
@@ -158,44 +173,111 @@ const changesetsPublishesPackages = (withInputs: Record<string, string>): boolea
   return command.trim() !== '' && !isTagOnly(command);
 };
 
-const scanJob = ({ job, root }: { job: JobModel; root: string }): JobScan => {
+interface ScanEnvironment {
+  root: string;
+  reader: ScriptReader;
+  /** The file is the shared release workflow of the canonical repository, by the run's own identity. */
+  calleeContext: boolean;
+}
+
+const scanJob = ({ job, env }: { job: JobModel; env: ScanEnvironment }): JobScan => {
   const runs: string[] = [];
   let publishes = false;
-  let credential = false;
+  let runsCode = false;
+  let idToken = false;
+  let npmToken = false;
+  const unreadable: JobScan['unreadableActions'] = [];
+  const unresolved = new Set<string>();
   const eff = job.effectivePermissions;
-  if (eff.all === 'write-all' || eff.scopes['id-token'] === 'write') credential = true;
-  if (job.envSecretRefs.some(isNpmTokenRef)) credential = true;
+  if (eff.all === 'write-all' || eff.scopes['id-token'] === 'write') idToken = true;
+  if (job.envSecretRefs.some(isNpmTokenRef)) npmToken = true;
   if (
     Object.entries(job.withValues).some(([key, expression]) => isNpmTokenRef({ key, expression }))
   )
-    credential = true;
+    npmToken = true;
+
+  const readShell = ({
+    text,
+    baseDirs,
+    actionPathVars
+  }: {
+    text: string;
+    baseDirs: string[];
+    actionPathVars?: string[];
+  }): void => {
+    runs.push(normalizeShell(text));
+    const facts = analyzeShell({
+      text,
+      baseDirs,
+      ...(actionPathVars === undefined ? {} : { actionPathVars })
+    });
+    if (facts.publishes) publishes = true;
+    if (facts.runsCode) runsCode = true;
+    for (const ref of facts.scripts) {
+      const found = env.reader.lookup(ref);
+      if (!found.defined) unresolved.add(ref.name);
+      // One level only: the script body itself must hold an explicit publish command.
+      for (const body of found.bodies) if (analyzeShell({ text: body }).publishes) publishes = true;
+    }
+  };
 
   for (const step of job.steps) {
+    const dir = step.workingDirectory ?? job.workingDirectory;
+    const baseDirs = dir === undefined ? [] : [dir];
     if (step.run !== undefined) {
-      runs.push(normalizeShell(step.run));
+      readShell({ text: step.run, baseDirs });
       // A token written straight into a command (for example an `.npmrc` line) is still a credential.
-      if (mentionsNpmSecret(step.run)) credential = true;
+      if (mentionsNpmSecret(step.run)) npmToken = true;
     }
-    if (step.envSecretRefs.some(isNpmTokenRef)) credential = true;
+    if (step.envSecretRefs.some(isNpmTokenRef)) npmToken = true;
     if (Object.entries(step.with).some(([key, expression]) => isNpmTokenRef({ key, expression })))
-      credential = true;
+      npmToken = true;
     if (isChangesetsAction(step.uses?.raw) && changesetsPublishesPackages(step.with))
       publishes = true;
-    if (step.uses?.local && step.uses.path.startsWith(LOCAL_ACTION_PREFIX)) {
-      for (const inner of readComposite({ root, uses: step.uses })) {
-        if (inner.run !== undefined) runs.push(normalizeShell(inner.run));
+    if (step.uses?.local) {
+      const read = readLocalAction({
+        root: env.root,
+        path: step.uses.path,
+        calleeContext: env.calleeContext
+      });
+      if (!read.ok) {
+        unreadable.push({ path: step.uses.raw, reason: read.reason });
+        continue;
+      }
+      if (
+        env.calleeContext &&
+        posix.normalize(step.uses.path.replace(/^\.\//, '')) ===
+          `${CALLEE_CHECKOUT_PREFIX}${CALLEE_PUBLISH_ACTION}`
+      )
+        publishes = true;
+      // Only an action that does not come from the repository under review has its own
+      // directory outside what the change can alter; in a reviewed repository the
+      // action's directory is repository code like any other.
+      const external =
+        env.calleeContext &&
+        posix.normalize(step.uses.path.replace(/^\.\//, '')).startsWith(CALLEE_CHECKOUT_PREFIX);
+      for (const inner of read.steps) {
+        if (inner.run !== undefined)
+          readShell({
+            text: inner.run,
+            baseDirs: [],
+            ...(external ? { actionPathVars: inner.actionPathVars } : {})
+          });
         if (isChangesetsAction(inner.uses) && changesetsPublishesPackages(inner.with))
           publishes = true;
       }
     }
   }
-  const runText = runs.join('\n');
-  if (PUBLISH_COMMAND.test(runText)) publishes = true;
   return {
     jobId: job.id,
-    runText,
-    holdsPublishCredential: credential,
-    runsPublishCommand: publishes
+    runText: runs.join('\n'),
+    holdsPublishCredential: idToken || npmToken,
+    holdsIdToken: idToken,
+    holdsNpmToken: npmToken,
+    runsPublishCommand: publishes,
+    runsRepositoryCode: runsCode,
+    unreadableActions: unreadable,
+    unresolvedScripts: [...unresolved]
   };
 };
 
@@ -308,8 +390,15 @@ export const scanRepo = ({
     }
   }
 
+  const reader = createScriptReader(root);
   const files: ScannedFile[] = [...models.values()].map((model) => {
-    const jobs = model.jobs.map((job) => scanJob({ job, root }));
+    const env: ScanEnvironment = {
+      root,
+      reader,
+      calleeContext:
+        model.file === CALLEE_PATH && sameRepository({ a: repository, b: CALLEE_REPOSITORY })
+    };
+    const jobs = model.jobs.map((job) => scanJob({ job, env }));
     return {
       model,
       class: classify({ model, jobs }),

@@ -12,7 +12,7 @@ import {
   PUBLISHER_NEVER_WAIVABLE_RULES,
   PUBLISHER_WAIVABLE_RULES,
   checkBespokePublisher,
-  checkUnclassifiedIdToken,
+  checkUnclassifiedJobs,
   runsRepositoryCode
 } from '../src/rules/bespoke-publisher.ts';
 import { parseWorkflow } from '../src/workflow-model.ts';
@@ -106,8 +106,8 @@ suite('publisher/split and credential-with-code', () => {
     failsOnly('fail-install-publish.yml', 'publisher/id-token-with-code');
   });
 
-  test('a token publisher with an install in the same job stays waivable', () => {
-    failsOnly('fail-token-install.yml', 'publisher/split');
+  test('a token publisher with an install in the same job has its own never-waivable id', () => {
+    failsOnly('fail-token-install.yml', 'publisher/token-with-code');
   });
 
   test('workflow-level credential with more than one job', () => {
@@ -208,7 +208,8 @@ suite('publisher/events', () => {
   test('the never-waivable rule ids are exported for the exception logic', () => {
     assert.deepEqual([...PUBLISHER_NEVER_WAIVABLE_RULES].sort(), [
       'publisher/id-token-with-code',
-      'publisher/pull-request-target'
+      'publisher/pull-request-target',
+      'publisher/token-with-code'
     ]);
     assert.ok(PUBLISHER_WAIVABLE_RULES.includes('publisher/publishing-dispatch'));
   });
@@ -218,7 +219,7 @@ suite('unclassified id-token notice', () => {
   test('a job holding id-token outside any recognised class gets a notice', () => {
     const file = scanFlat('unclassified-id-token.yml');
     assert.equal(file.class, 'not-in-scope');
-    const findings = checkUnclassifiedIdToken({
+    const findings = checkUnclassifiedJobs({
       model: file.model,
       scan: file,
       profile,

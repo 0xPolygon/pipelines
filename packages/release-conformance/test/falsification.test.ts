@@ -134,12 +134,15 @@ const CASES: Record<string, Case> = {
     passing: [
       { path: 'bespoke-publisher/pass-split.yml' },
       { path: 'bespoke-publisher/pass-setup-node-no-cache.yml' },
-      { path: 'bespoke-publisher/pass-setup-node-v4.yml' }
+      { path: 'bespoke-publisher/pass-setup-node-v4.yml' },
+      { path: 'bespoke-publisher/pass-setup-node-sha-v4.yml' }
     ],
     failing: [
       { path: 'bespoke-publisher/fail-cache-setup.yml' },
       { path: 'bespoke-publisher/fail-cache-action.yml' },
       { path: 'bespoke-publisher/fail-cache-setup-default.yml' },
+      { path: 'bespoke-publisher/fail-cache-setup-sha-v6.yml' },
+      { path: 'bespoke-publisher/fail-cache-setup-sha-no-comment.yml' },
       { path: 'hardening/cache-action-case.yml' }
     ]
   },
@@ -155,8 +158,20 @@ const CASES: Record<string, Case> = {
     passing: [{ path: 'bespoke-publisher/pass-split.yml' }],
     failing: [
       { path: 'bespoke-publisher/fail-extra-write.yml' },
-      { path: 'bespoke-publisher/fail-token-install.yml' }
+      { path: 'bespoke-publisher/fail-no-permissions.yml' }
     ]
+  },
+  'publisher/token-with-code': {
+    passing: [{ path: 'bespoke-publisher/pass-split.yml' }],
+    failing: [{ path: 'bespoke-publisher/fail-token-install.yml' }]
+  },
+  'publisher/unreadable-local-action': {
+    passing: [{ path: 'bespoke-publisher/pass-release.yml' }],
+    failing: [{ path: 'bespoke-publisher/fail-unreadable-local-action.yml' }]
+  },
+  'publisher/unclassified-npm-token': {
+    passing: [{ path: 'model/on-map.yml' }],
+    failing: [{ path: 'bespoke-publisher/fail-unclassified-npm-token.yml' }]
   },
   'publisher/unclassified-id-token': {
     passing: [

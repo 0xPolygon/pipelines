@@ -1,0 +1,13 @@
+name: publisher that ships through a local action outside the actions directory
+on:
+  push:
+    branches: [main]
+permissions: {}
+jobs:
+  ship:
+    runs-on: ubuntu-latest
+    environment: npm-publish
+    permissions:
+      id-token: write
+    steps:
+      - uses: ./tools/ship
