@@ -48,6 +48,18 @@ on:
         type: string
         required: false
         default: ''
+      version_script:
+        description: >
+          Opt-in. When true, the `version` job requires the root
+          package.json to define a `ci:version` script, fails if it does
+          not, and has changesets/action run `pnpm run ci:version` in place
+          of the default `changeset version`. The script must itself run
+          `changeset version`. It is release-path code that runs with the
+          release app token, like changesets' configured plugins, so review
+          it like this workflow. Leave false for the default behaviour.
+        type: boolean
+        required: false
+        default: false
     secrets:
       CHANGESET_RELEASE_BOT_APP_ID:
         required: true
@@ -123,6 +135,14 @@ jobs:
       # range into a clear error rather than a lockfile mismatch.
       - uses: ./.pipelines/.github/actions/check-workspace-protocol
 
+      # Opt-in version hook: fail clearly, before the token is minted, when
+      # the caller enabled it without defining the script. Reads package.json
+      # only; nothing from the repository runs here.
+      - uses: ./.pipelines/.github/actions/check-version-script
+        if: inputs.version_script
+        with:
+          enabled: 'true'
+
       # changesets/action in github-api mode commits untracked files too, so
       # the pipelines checkout must be gone before it runs or it would land in
       # the Version Packages commit.
@@ -164,6 +184,10 @@ jobs:
           # the repository's signed-commits requirement. git-cli (the
           # default) produces unsigned commits.
           commitMode: github-api
+          # Empty unless opted in, which leaves the action on its default
+          # `changeset version`. The caller's `ci:version` script replaces
+          # that command, so it must itself run `changeset version`.
+          version: ${{ inputs.version_script && 'pnpm run ci:version' || '' }}
           # Keeps the release PR's "publish" wording. The command prints no
           # `New tag:` line, so this job creates no tags or Releases:
           # publishing happens in the build, publish and finalize jobs.

@@ -31,7 +31,7 @@ in its own separate GitHub Actions job with its own runner.
 | `apps-ci.yml` | Lint, typecheck, and test on PRs | _(none)_ |
 | `apps-changeset-check.yml` | PR gate: requires a changeset (posts/deletes instructions comment) and that intra-workspace dependencies use `workspace:` | _(none)_ |
 | `apps-codegen-drift-check.yml` | PR gate: runs `pnpm -r --include-workspace-root run --if-present codegen-drift-check` (no-op when no package defines the script) | _(none)_ |
-| `apps-npm-release.yml` | Changesets release pipeline in jobs `version` (release PR), `build` (pack tarballs), `publish` (approval-gated npm publish via the `npm-publish` environment), `finalize` (git tags and GitHub Releases), plus on-demand snapshot publish via the `snapshot_tag` input. See [npm release](#npm-release-what-a-consuming-repository-must-configure) | `CHANGESET_RELEASE_BOT_APP_ID`, `CHANGESET_RELEASE_BOT_APP_PRIVATE_KEY` |
+| `apps-npm-release.yml` | Changesets release pipeline in jobs `version` (release PR), `build` (pack tarballs), `publish` (approval-gated npm publish via the `npm-publish` environment), `finalize` (git tags and GitHub Releases), plus on-demand snapshot publish via the `snapshot_tag` input and an opt-in `version_script` input. See [npm release](#npm-release-what-a-consuming-repository-must-configure) | `CHANGESET_RELEASE_BOT_APP_ID`, `CHANGESET_RELEASE_BOT_APP_PRIVATE_KEY` |
 | `apps-release-conformance.yml` | PR and merge-queue gate: checks that a repository's npm release workflows follow the shared release standard. Also callable with `workflow_call`. See [Release workflow conformance](#release-workflow-conformance) | _(none)_ |
 | `apps-docker-release.yml` | GCP image push on version tag (delegates to `gcp_pipeline_release_image.yaml`) | `build_params_gh_secret_keys` |
 | `apps-pr-labeler.yml` | Labels `.github/`-only PRs as `do-not-notify`; removes label when non-`.github/` changes are added | _(none)_ |
@@ -59,6 +59,7 @@ system state automatically.
 | `actions/npm-pack` | Pack every public workspace package whose version is not on npm into tarballs and write `manifest.json`; holds no publish credential | No — dependency-free Node script |
 | `actions/npm-publish-tarballs` | Publish the tarballs listed in `manifest.json` after checking each file's SHA-256 and the npm client version; needs no checkout or install | No — dependency-free Node script |
 | `actions/check-changesets-cli` | Fail unless the repository's resolved `@changesets/cli` is 2.x | No — dependency-free Node script |
+| `actions/check-version-script` | When the version hook is enabled, fail unless the root `package.json` defines `ci:version` | No — dependency-free Node script |
 | `actions/release-guard` | Fail unless the run is a push to the repository's default branch | No — dependency-free Node script |
 | `actions/check-release-tags` | Confirm every package in `manifest.json` has a git tag and a GitHub Release, read through the GitHub REST API | No — dependency-free Node script |
 | `actions/release-conformance` | Check a repository's npm release workflow files against the shared release standard; reads files only | Yes — ncc bundle |
@@ -229,6 +230,15 @@ skips `publish` and is tagged by `finalize` without any approval.
   skips them.
 - **Artifact retention.** The tarballs are kept for 7 days. If approval or a
   re-run of `finalize` comes later, re-run all jobs to pack them again.
+- **Version hook (`version_script`, default `false`).** Set the input to
+  `true` to have the `version` job run `pnpm run ci:version` from the root
+  `package.json` in place of the default `changeset version`. It is never
+  detected automatically. The job fails, before the release token is minted,
+  if the script is missing, and the script must itself run `changeset
+  version`. `ci:version` is release-path code that runs with the release app
+  token, like changesets' configured plugins, and is reviewed like the
+  workflow. Only the `version` job runs it; that job has no `id-token`
+  permission.
 - **Trigger permissions.** Copy `apps-npm-release-trigger.yml`; its top-level
   `permissions` must cover every scope the called jobs request.
 
