@@ -253,7 +253,9 @@ in release workflows. It is not a defence against a determined author with
 write access to the repository: human review of workflow changes, the rules
 that cannot be waived, and the npm trusted-publisher binding are the
 controls for that. Indirection the check cannot read, such as script files
-and third-party release tools, is reported as a notice rather than analysed.
+and third-party release tools, is not analysed: in a job that holds an OIDC
+token or an npm token it is reported as a notice, and a local action the
+check cannot read in such a job is an error.
 
 A workflow file is classified first:
 
