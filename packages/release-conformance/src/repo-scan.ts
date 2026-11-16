@@ -144,7 +144,12 @@ export const textPublishHits = (text: string): TextHits => {
       const tokens = (parts[at] ?? '').split(/\s+/);
       const printer = PRINTERS.has(segmentCommand(tokens));
       const piped = parts[at + 1] === '|';
-      const redirected = printer && redirectsOutput(line);
+      // The redirect must belong to this command: `&` separates `2>&1` and `&>` from the next command.
+      const separator = parts[at + 1];
+      const redirected =
+        printer &&
+        (redirectsOutput((parts[at] ?? '') + (separator === '&' ? '&' : '')) ||
+          (separator === '&' && (parts[at + 2] ?? '').startsWith('>')));
       for (let index = 0; index < tokens.length; index += 1) {
         const tool = toolName(tokens[index] ?? '');
         if (!PUBLISH_TOOL.test(tool)) continue;

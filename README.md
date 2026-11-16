@@ -246,6 +246,15 @@ ruleset can only require a workflow whose own file declares a pull request
 or merge group trigger. It has no path filters, so its status is always
 reported.
 
+#### What this check is for
+
+It enforces the shared release shape and catches drift and honest mistakes
+in release workflows. It is not a defence against a determined author with
+write access to the repository: human review of workflow changes, the rules
+that cannot be waived, and the npm trusted-publisher binding are the
+controls for that. Indirection the check cannot read, such as script files
+and third-party release tools, is reported as a notice rather than analysed.
+
 A workflow file is classified first:
 
 - **Shared caller**: a job that calls the shared npm release workflow.

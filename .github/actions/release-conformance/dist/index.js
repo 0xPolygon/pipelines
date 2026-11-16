@@ -9408,6 +9408,11 @@ const classify = ({ words, dirs, depth = 0 }) => {
         return inner(shellCommandString(rest));
     if (name === 'find')
         return inner(findExecCommand(rest));
+    if (name === 'nx') {
+        // Nx's documented publish form is `nx release publish`; its flags are skipped to reach the words.
+        const [verb, action] = rest.filter((token) => !token.startsWith('-'));
+        return { ...noFacts(), publishes: verb === 'release' && action === 'publish' };
+    }
     if (name === 'node') {
         return { ...noFacts(), runsCode: !runsOwnActionScript(rest) && !onlyReportsVersion(rest) };
     }
@@ -9991,7 +9996,11 @@ const textPublishHits = (text) => {
             const tokens = (parts[at] ?? '').split(/\s+/);
             const printer = PRINTERS.has(segmentCommand(tokens));
             const piped = parts[at + 1] === '|';
-            const redirected = printer && redirectsOutput(line);
+            // The redirect must belong to this command: `&` separates `2>&1` and `&>` from the next command.
+            const separator = parts[at + 1];
+            const redirected = printer &&
+                (redirectsOutput((parts[at] ?? '') + (separator === '&' ? '&' : '')) ||
+                    (separator === '&' && (parts[at + 2] ?? '').startsWith('>')));
             for (let index = 0; index < tokens.length; index += 1) {
                 const tool = toolName(tokens[index] ?? '');
                 if (!PUBLISH_TOOL.test(tool))

@@ -8,7 +8,7 @@ import type { CheckResult, Profile } from '../src/types.ts';
 
 import { deriveProfile } from '../src/canonical.ts';
 import { runChecks } from '../src/engine.ts';
-import { scanRepo } from '../src/repo-scan.ts';
+import { scanRepo, textPublishHits } from '../src/repo-scan.ts';
 import { parseWorkflow } from '../src/workflow-model.ts';
 
 const fixtures = join(import.meta.dirname, 'fixtures');
@@ -170,5 +170,36 @@ void describe('script lookup', () => {
     assert.equal(classOf(files), 'not-in-scope');
     const result = check(files);
     assert.ok(!result.findings.some((f) => f.message.includes('`install`')));
+  });
+});
+
+void describe('Nx release publish and per-command redirects', () => {
+  for (const command of [
+    'pnpm nx release publish',
+    'npx nx release publish',
+    'yarn nx release publish',
+    'nx release publish',
+    'pnpm nx release publish --dry-run --projects=a',
+    'npx --yes nx@latest release publish'
+  ]) {
+    void it(`confirms ${command}`, () => {
+      const result = scanRepo({ root: tree({ [WF]: workflow(runStep(command)) }) });
+      assert.equal(result.files[0]?.class, 'bespoke-publisher');
+    });
+  }
+  void it('does not confirm other nx commands', () => {
+    assert.notEqual(
+      classOf({ [WF]: workflow(runStep('pnpm nx release version')) }),
+      'bespoke-publisher'
+    );
+    assert.notEqual(classOf({ [WF]: workflow(runStep('pnpm nx build')) }), 'bespoke-publisher');
+  });
+  void it('reads the redirect of the command the echo belongs to', () => {
+    const second = textPublishHits('echo "done" > "$GITHUB_OUTPUT"; echo "npm publish next"');
+    assert.equal(second.confirmed, false);
+    assert.equal(second.printed, true);
+    assert.equal(textPublishHits('echo "npm publish" > p.sh; bash p.sh').confirmed, true);
+    assert.equal(textPublishHits('echo "npm publish" &> p.sh').confirmed, true);
+    assert.equal(textPublishHits('echo "npm publish" 2>&1').confirmed, false);
   });
 });

@@ -441,6 +441,11 @@ const classify = ({
   }
   if (SHELL_NAMES.has(name)) return inner(shellCommandString(rest));
   if (name === 'find') return inner(findExecCommand(rest));
+  if (name === 'nx') {
+    // Nx's documented publish form is `nx release publish`; its flags are skipped to reach the words.
+    const [verb, action] = rest.filter((token) => !token.startsWith('-'));
+    return { ...noFacts(), publishes: verb === 'release' && action === 'publish' };
+  }
   if (name === 'node') {
     return { ...noFacts(), runsCode: !runsOwnActionScript(rest) && !onlyReportsVersion(rest) };
   }
