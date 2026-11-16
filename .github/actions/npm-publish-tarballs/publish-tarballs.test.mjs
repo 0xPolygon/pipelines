@@ -6,7 +6,16 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { afterEach, beforeEach, describe, it } from 'node:test';
 
-import { defaultRun, main, meetsMinimum, publishAll } from './publish-tarballs.mjs';
+import {
+  defaultRun,
+  isStagedOutput,
+  main,
+  meetsMinimum,
+  publishAll,
+  READ_BACK_WINDOW_MS,
+  sha512Integrity,
+  versionDocumentUrl
+} from './publish-tarballs.mjs';
 
 const sha = (text) => createHash('sha256').update(text).digest('hex');
 
@@ -69,11 +78,42 @@ function fakeRun({ npmVersion = '11.6.0', views = {}, publishes = {} } = {}) {
 const publishCalls = (calls) => calls.filter((c) => c[1] === 'publish');
 const quiet = () => {};
 
+/** Integrity of the tarball `entry(name)` wrote, as the registry would report it. */
+const integrityOf = (name) => sha512Integrity(readFileSync(join(dir, `${name}-1.0.0.tgz`)));
+
+/**
+ * Fake registry + clock: `answers[name]` is a list of responses served in
+ * order (the last repeats); `sleeps` records requested waits without waiting.
+ */
+function fakeNet(answers = {}) {
+  const urls = [];
+  const sleeps = [];
+  const served = {};
+  const fetchFn = async (url, init) => {
+    urls.push({ url, init });
+    const name = decodeURIComponent(url.replace('https://registry.npmjs.org/', '').split('/')[0]);
+    const list = answers[name] ?? [{ status: 200, integrity: integrityOf(name) }];
+    const index = Math.min(served[name] ?? 0, list.length - 1);
+    served[name] = (served[name] ?? 0) + 1;
+    const { status, integrity } = list[index];
+    return { status, json: async () => ({ dist: { integrity } }) };
+  };
+  const sleep = async (ms) => {
+    sleeps.push(ms);
+  };
+  return { fetchFn, sleep, urls, sleeps };
+}
+/** Default network for tests that do not care: every package visible, matching. */
+const net = () => {
+  const { fetchFn, sleep } = fakeNet();
+  return { fetchFn, sleep };
+};
+
 describe('publishAll', () => {
-  it('publishes each entry with its access and tag', () => {
+  it('publishes each entry with its access and tag', async () => {
     writeManifest([entry('a'), entry('b', { tag: 'next' })]);
     const { run, calls } = fakeRun();
-    const result = publishAll({ directory: dir, run, log: quiet });
+    const result = await publishAll({ directory: dir, ...net(), run, log: quiet });
     assert.deepEqual(result.failures, []);
     assert.deepEqual(publishCalls(calls), [
       [
@@ -106,104 +146,129 @@ describe('publishAll', () => {
     }
   });
 
-  it('refuses a SHA-256 mismatch before publishing anything', () => {
+  it('refuses a SHA-256 mismatch before publishing anything', async () => {
     const good = entry('a');
     const bad = entry('b', { sha256: sha('something else') });
     writeManifest([good, bad]);
     const { run, calls } = fakeRun();
-    assert.throws(() => publishAll({ directory: dir, run, log: quiet }), /SHA-256.*does not match/);
+    await assert.rejects(
+      publishAll({ directory: dir, ...net(), run, log: quiet }),
+      /SHA-256.*does not match/
+    );
     assert.equal(publishCalls(calls).length, 0);
   });
 
-  it('refuses a tarball path that escapes the directory', () => {
+  it('refuses a tarball path that escapes the directory', async () => {
     mkdirSync(join(dir, 'out'));
     writeFileSync(join(dir, 'outside.tgz'), 'x');
     const escaping = { ...entry('a'), file: '../outside.tgz', sha256: sha('x') };
     const outDir = join(dir, 'out');
     writeFileSync(join(outDir, 'manifest.json'), JSON.stringify([escaping]));
     const { run, calls } = fakeRun();
-    assert.throws(
-      () => publishAll({ directory: outDir, run, log: quiet }),
+    await assert.rejects(
+      publishAll({ directory: outDir, ...net(), run, log: quiet }),
       /escapes the directory/
     );
     assert.equal(publishCalls(calls).length, 0);
   });
 
-  it('refuses a missing tarball', () => {
+  it('refuses a missing tarball', async () => {
     writeManifest([entry('a', { file: 'nope.tgz' })]);
     const { run, calls } = fakeRun();
-    assert.throws(() => publishAll({ directory: dir, run, log: quiet }), /is missing/);
+    await assert.rejects(publishAll({ directory: dir, ...net(), run, log: quiet }), /is missing/);
     assert.equal(publishCalls(calls).length, 0);
   });
 
-  it('refuses a tarball whose package.json sets another registry, publishing nothing', () => {
+  it('refuses a tarball whose package.json sets another registry, publishing nothing', async () => {
     for (const publishConfig of [
       { registry: 'https://other.test/' },
       { '@scope:registry': 'https://other.test/' }
     ]) {
       writeManifest([entry('a'), entry('b', {}, { publishConfig })]);
       const { run, calls } = fakeRun();
-      assert.throws(() => publishAll({ directory: dir, run, log: quiet }), /registry other than/);
+      await assert.rejects(
+        publishAll({ directory: dir, ...net(), run, log: quiet }),
+        /registry other than/
+      );
       assert.equal(publishCalls(calls).length, 0);
     }
   });
 
-  it('accepts a tarball whose publishConfig names npmjs', () => {
+  it('accepts a tarball whose publishConfig names npmjs', async () => {
     writeManifest([entry('a', {}, { publishConfig: { registry: 'https://registry.npmjs.org' } })]);
     const { run } = fakeRun();
-    assert.deepEqual(publishAll({ directory: dir, run, log: quiet }).failures, []);
+    assert.deepEqual(
+      (await publishAll({ directory: dir, ...net(), run, log: quiet })).failures,
+      []
+    );
   });
 
-  it('skips a version that is already on the registry', () => {
+  it('skips a version that is already on the registry', async () => {
     writeManifest([entry('a'), entry('b')]);
     const { run, calls } = fakeRun({
       views: { 'a@1.0.0': { status: 0, stdout: '"1.0.0"\n', stderr: '' } }
     });
-    const result = publishAll({ directory: dir, run, log: quiet });
+    const result = await publishAll({ directory: dir, ...net(), run, log: quiet });
     assert.deepEqual(result.skipped, ['a@1.0.0']);
     assert.deepEqual(result.published, ['b@1.0.0']);
     assert.equal(publishCalls(calls).length, 1);
   });
 
-  it('fails a package whose registry lookup fails for a reason other than 404', () => {
+  it('skips a version already on the registry with different contents as a failure', async () => {
+    writeManifest([entry('a')]);
+    const { run, calls } = fakeRun({
+      views: { 'a@1.0.0': { status: 0, stdout: '"1.0.0"\n', stderr: '' } }
+    });
+    const network = fakeNet({ a: [{ status: 200, integrity: 'sha512-BBBB' }] });
+    const lines = [];
+    const result = await publishAll({ directory: dir, run, log: (l) => lines.push(l), ...network });
+    assert.deepEqual(result.failures, ['a@1.0.0']);
+    assert.deepEqual(result.skipped, []);
+    assert.equal(publishCalls(calls).length, 0);
+    assert.match(lines.join('\n'), /a@1\.0\.0.*integrity \(sha512-BBBB\) does not match/);
+  });
+
+  it('fails a package whose registry lookup fails for a reason other than 404', async () => {
     writeManifest([entry('a'), entry('b')]);
     const { run, calls } = fakeRun({
       views: { 'a@1.0.0': { status: 1, stdout: '', stderr: 'npm error code ECONNRESET' } }
     });
-    const result = publishAll({ directory: dir, run, log: quiet });
+    const result = await publishAll({ directory: dir, ...net(), run, log: quiet });
     assert.deepEqual(result.failures, ['a@1.0.0']);
     assert.deepEqual(result.published, ['b@1.0.0']);
     assert.equal(publishCalls(calls).length, 1);
   });
 
-  it('continues past a failed publish and reports the failure', () => {
+  it('continues past a failed publish and reports the failure', async () => {
     writeManifest([entry('a'), entry('b')]);
     const { run, calls } = fakeRun({ publishes: { a: { status: 1, stdout: '', stderr: 'boom' } } });
-    const result = publishAll({ directory: dir, run, log: quiet });
+    const result = await publishAll({ directory: dir, ...net(), run, log: quiet });
     assert.deepEqual(result.failures, ['a@1.0.0']);
     assert.deepEqual(result.published, ['b@1.0.0']);
     assert.equal(publishCalls(calls).length, 2);
   });
 
-  it('does not read a 404 inside a version string as a missing package', () => {
+  it('does not read a 404 inside a version string as a missing package', async () => {
     writeManifest([entry('a')]);
     const { run, calls } = fakeRun({
       views: { 'a@1.0.0': { status: 1, stdout: '', stderr: 'npm error a@1.404.0 request failed' } }
     });
-    const result = publishAll({ directory: dir, run, log: quiet });
+    const result = await publishAll({ directory: dir, ...net(), run, log: quiet });
     assert.deepEqual(result.failures, ['a@1.0.0']);
     assert.equal(publishCalls(calls).length, 0);
   });
 
-  it('reads the E404 error code in JSON output as a missing package', () => {
+  it('reads the E404 error code in JSON output as a missing package', async () => {
     writeManifest([entry('a')]);
     const { run } = fakeRun({
       views: { 'a@1.0.0': { status: 1, stdout: '{"error":{"code":"E404"}}', stderr: '' } }
     });
-    assert.deepEqual(publishAll({ directory: dir, run, log: quiet }).published, ['a@1.0.0']);
+    assert.deepEqual((await publishAll({ directory: dir, ...net(), run, log: quiet })).published, [
+      'a@1.0.0'
+    ]);
   });
 
-  it('refuses a malformed manifest entry before publishing anything', () => {
+  it('refuses a malformed manifest entry before publishing anything', async () => {
     const bad = [
       { access: 'restricted' },
       { tag: '--otp=1' },
@@ -216,49 +281,194 @@ describe('publishAll', () => {
     for (const override of bad) {
       writeManifest([entry('a'), entry('b', override)]);
       const { run, calls } = fakeRun();
-      assert.throws(() => publishAll({ directory: dir, run, log: quiet }), /is invalid|missing/);
+      await assert.rejects(
+        publishAll({ directory: dir, ...net(), run, log: quiet }),
+        /is invalid|missing/
+      );
       assert.equal(publishCalls(calls).length, 0);
     }
   });
 
-  it('refuses a tarball whose own package.json differs from the manifest entry', () => {
+  it('refuses a tarball whose own package.json differs from the manifest entry', async () => {
     const swapped = entry('a');
     writeManifest([{ ...swapped, name: 'other' }]);
     const { run, calls } = fakeRun();
-    assert.throws(
-      () => publishAll({ directory: dir, run, log: quiet }),
+    await assert.rejects(
+      publishAll({ directory: dir, ...net(), run, log: quiet }),
       /holds a@1\.0\.0, which does not match/
     );
     assert.equal(publishCalls(calls).length, 0);
     const wrongVersion = entry('c');
     writeManifest([{ ...wrongVersion, version: '2.0.0' }]);
-    assert.throws(() => publishAll({ directory: dir, run, log: quiet }), /does not match/);
+    await assert.rejects(
+      publishAll({ directory: dir, ...net(), run, log: quiet }),
+      /does not match/
+    );
   });
 
-  it('fails before any publish when npm is too old', () => {
+  it('fails before any publish when npm is too old', async () => {
     writeManifest([entry('a')]);
     const { run, calls } = fakeRun({ npmVersion: '11.5.0' });
-    assert.throws(() => publishAll({ directory: dir, run, log: quiet }), /11\.5\.1 or later/);
+    await assert.rejects(
+      publishAll({ directory: dir, ...net(), run, log: quiet }),
+      /11\.5\.1 or later/
+    );
     assert.equal(publishCalls(calls).length, 0);
   });
 });
 
+describe('read-back after publish', () => {
+  it('passes when the version is visible with the integrity of the published tarball', async () => {
+    writeManifest([entry('a')]);
+    const { run } = fakeRun();
+    const network = fakeNet();
+    const lines = [];
+    const result = await publishAll({
+      directory: dir,
+      run,
+      log: (l) => lines.push(l),
+      fetchFn: network.fetchFn,
+      sleep: network.sleep
+    });
+    assert.deepEqual(result.published, ['a@1.0.0']);
+    assert.deepEqual(result.failures, []);
+    assert.equal(network.urls.length, 1);
+    assert.equal(network.urls[0].url, 'https://registry.npmjs.org/a/1.0.0');
+    assert.deepEqual(Object.keys(network.urls[0].init.headers), ['accept']);
+    assert.match(lines.join('\n'), /read back from the registry/);
+  });
+
+  it('encodes a scoped name and carries no credential', () => {
+    assert.equal(
+      versionDocumentUrl({ name: '@scope/pkg', version: '1.0.0-rc.1' }),
+      'https://registry.npmjs.org/%40scope%2Fpkg/1.0.0-rc.1'
+    );
+  });
+
+  it('passes after the version appears following two 404s', async () => {
+    writeManifest([entry('a')]);
+    const { run } = fakeRun();
+    const network = fakeNet({
+      a: [{ status: 404 }, { status: 404 }, { status: 200, integrity: integrityOf('a') }]
+    });
+    const result = await publishAll({ directory: dir, run, log: quiet, ...network });
+    assert.deepEqual(result.published, ['a@1.0.0']);
+    assert.deepEqual(network.sleeps, [15000, 30000]);
+  });
+
+  it('passes when the version is listed only after about three minutes of 404s', async () => {
+    writeManifest([entry('a')]);
+    const { run } = fakeRun();
+    const network = fakeNet({
+      a: [...Array(7).fill({ status: 404 }), { status: 200, integrity: integrityOf('a') }]
+    });
+    const lines = [];
+    const result = await publishAll({ directory: dir, run, log: (l) => lines.push(l), ...network });
+    assert.deepEqual(result.published, ['a@1.0.0']);
+    assert.equal(
+      network.sleeps.reduce((sum, ms) => sum + ms, 0),
+      15000 + 30000 * 6
+    );
+    assert.match(lines.join('\n'), /attempt 3, 45s elapsed, registry answered 404/);
+  });
+
+  it('keeps polling for the full default window before giving up', async () => {
+    writeManifest([entry('a')]);
+    const { run } = fakeRun();
+    const network = fakeNet({ a: [{ status: 404 }] });
+    const result = await publishAll({ directory: dir, run, log: quiet, ...network });
+    assert.deepEqual(result.failures, ['a@1.0.0']);
+    const total = network.sleeps.reduce((sum, ms) => sum + ms, 0);
+    assert.ok(total >= 9 * 60 * 1000 && total <= READ_BACK_WINDOW_MS);
+  });
+
+  it('fails when the version never becomes visible (including npm rejecting it after its scan), within a bounded wait', async () => {
+    writeManifest([entry('a'), entry('b')]);
+    const { run } = fakeRun();
+    const network = fakeNet({ a: [{ status: 404 }] });
+    const lines = [];
+    const result = await publishAll({
+      directory: dir,
+      run,
+      log: (l) => lines.push(l),
+      ...network,
+      windowMs: 60000
+    });
+    assert.deepEqual(result.failures, ['a@1.0.0']);
+    assert.deepEqual(result.published, ['b@1.0.0']);
+    assert.deepEqual(network.sleeps, [15000, 30000]);
+    assert.match(lines.join('\n'), /a@1\.0\.0 was not visible on the registry/);
+  });
+
+  it('fails when the registry integrity differs from the published tarball', async () => {
+    writeManifest([entry('a')]);
+    const { run } = fakeRun();
+    const network = fakeNet({ a: [{ status: 200, integrity: 'sha512-AAAA' }] });
+    const lines = [];
+    const result = await publishAll({ directory: dir, run, log: (l) => lines.push(l), ...network });
+    assert.deepEqual(result.failures, ['a@1.0.0']);
+    assert.deepEqual(network.sleeps, []);
+    assert.match(lines.join('\n'), /integrity \(sha512-AAAA\) does not match/);
+  });
+
+  it('fails on staged publish output without waiting on the registry', async () => {
+    for (const out of [
+      { stdout: '+ a@1.0.0 (staged)\n', stderr: '' },
+      { stdout: '+ a@1.0.0 (staged with id abc123)\n', stderr: '' },
+      { stdout: '', stderr: 'npm notice package a@1.0.0 has been staged with tag latest' }
+    ]) {
+      writeManifest([entry('a')]);
+      const { run } = fakeRun({ publishes: { a: { status: 0, ...out } } });
+      const network = fakeNet({ a: [{ status: 404 }] });
+      const lines = [];
+      const result = await publishAll({
+        directory: dir,
+        run,
+        log: (l) => lines.push(l),
+        ...network
+      });
+      assert.deepEqual(result.failures, ['a@1.0.0']);
+      assert.equal(network.urls.length, 0);
+      assert.match(lines.join('\n'), /does not support staged publishing/);
+    }
+  });
+
+  it('prints npm output for each publish and does not flag ordinary output as staged', async () => {
+    writeManifest([entry('a')]);
+    const { run } = fakeRun({
+      publishes: { a: { status: 0, stdout: '+ a@1.0.0\n', stderr: 'npm notice published' } }
+    });
+    const lines = [];
+    const result = await publishAll({ directory: dir, run, log: (l) => lines.push(l), ...net() });
+    assert.deepEqual(result.published, ['a@1.0.0']);
+    assert.ok(lines.includes('+ a@1.0.0'));
+    assert.ok(lines.includes('npm notice published'));
+    assert.equal(isStagedOutput('+ a@1.0.0'), false);
+  });
+});
+
 describe('main', () => {
-  it('exits non-zero listing the failed packages', () => {
+  it('exits non-zero listing the failed packages', async () => {
     writeManifest([entry('a')]);
     const { run } = fakeRun({ publishes: { a: { status: 1, stdout: '', stderr: 'boom' } } });
     const lines = [];
-    const code = main({ env: { TARBALL_DIRECTORY: dir }, run, log: (l) => lines.push(l) });
+    const code = await main({
+      env: { TARBALL_DIRECTORY: dir },
+      ...net(),
+      run,
+      log: (l) => lines.push(l)
+    });
     assert.equal(code, 1);
     assert.match(lines.join('\n'), /Failed to publish: a@1\.0\.0/);
   });
 
-  it('exits zero when everything publishes and never logs the environment', () => {
+  it('exits zero when everything publishes and never logs the environment', async () => {
     writeManifest([entry('a')]);
     const { run } = fakeRun();
     const lines = [];
-    const code = main({
+    const code = await main({
       env: { TARBALL_DIRECTORY: dir, SOME_SECRET: 'hunter2' },
+      ...net(),
       run,
       log: (l) => lines.push(l)
     });
@@ -268,7 +478,7 @@ describe('main', () => {
 });
 
 describe('meetsMinimum', () => {
-  it('compares versions numerically', () => {
+  it('compares versions numerically', async () => {
     assert.equal(meetsMinimum('11.5.1', '11.5.1'), true);
     assert.equal(meetsMinimum('11.10.0', '11.5.1'), true);
     assert.equal(meetsMinimum('10.9.9', '11.5.1'), false);

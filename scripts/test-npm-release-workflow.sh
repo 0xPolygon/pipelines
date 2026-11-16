@@ -193,6 +193,16 @@ for (const [name, want] of Object.entries(expectedNeeds)) {
   check(`${name} needs: [${want.join(', ')}]`, json(have) === json(want), json(have));
 }
 
+// finalize (tag + GitHub Release) must be unreachable once publish failed,
+// including a failed registry read-back. The only publish outcomes its
+// condition may accept are success, or skipped when the build packed nothing.
+const finalIf = norm(jobs.finalize?.if);
+const publishTests = [...finalIf.matchAll(/needs\.publish\.result\s*(==|!=)\s*'([a-z]+)'/g)].map((m) => `${m[1]} ${m[2]}`).sort();
+check('finalize if: tests publish only for == success and == skipped', json(publishTests) === json(['== skipped', '== success']), publishTests.join(', '));
+check('finalize if: publish skipped is accepted only with has_tarballs == false', /needs\.publish\.result == 'skipped' && needs\.build\.outputs\.has_tarballs == 'false'/.test(finalIf));
+check('publish timeout-minutes covers the registry read-back window (>= 20)', Number(jobs.publish?.['timeout-minutes']) >= 20, String(jobs.publish?.['timeout-minutes']));
+check('finalize needs publish', [].concat(jobs.finalize?.needs ?? []).includes('publish'));
+
 // Nothing may continue past a failure.
 const coe = [];
 for (const [name, j] of Object.entries(jobs)) {
