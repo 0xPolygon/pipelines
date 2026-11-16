@@ -1,0 +1,19 @@
+name: Probe concurrency queue (called)
+
+# Throwaway: checks that a job-level `concurrency.queue` key is accepted inside
+# a reusable (workflow_call) workflow. This pull request is closed without merging.
+
+on:
+  workflow_call:
+
+permissions: {}
+
+jobs:
+  probe:
+    runs-on: ubuntu-latest
+    concurrency:
+      group: npm-publish-${{ github.repository }}-${{ github.ref }}
+      cancel-in-progress: false
+      queue: max
+    steps:
+      - run: echo "job-level concurrency queue accepted in workflow_call"

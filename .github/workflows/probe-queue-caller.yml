@@ -1,0 +1,12 @@
+name: Probe concurrency queue (caller)
+
+# Throwaway: calls probe-queue-callee.yml. This pull request is closed without merging.
+
+on:
+  pull_request:
+
+permissions: {}
+
+jobs:
+  call:
+    uses: ./.github/workflows/probe-queue-callee.yml
