@@ -57,7 +57,7 @@ system state automatically.
 | `actions/check-workspace-protocol` | Fail when a workspace package depends on a sibling through a plain version range instead of `workspace:` | No — dependency-free Node script |
 | `actions/docker-test` | Resolve service from tag, build image, start container, run tests, stop | No — pure shell |
 | `actions/npm-pack` | Pack every public workspace package whose version is not on npm into tarballs and write `manifest.json`; holds no publish credential | No — dependency-free Node script |
-| `actions/npm-publish-tarballs` | Publish the tarballs listed in `manifest.json` after checking each file's SHA-256 and the npm client version; needs no checkout or install | No — dependency-free Node script |
+| `actions/npm-publish-tarballs` | Publish the tarballs listed in `manifest.json` after checking each file's SHA-256 and the npm client version, then verify every publish by reading all versions back from the registry (staged publishing is not supported yet), so tags and GitHub Releases are created only after the version is readable from the registry; needs no checkout or install | No — dependency-free Node script |
 | `actions/check-changesets-cli` | Fail unless the repository's resolved `@changesets/cli` is 2.x | No — dependency-free Node script |
 | `actions/check-version-script` | When the version hook is enabled, fail unless the root `package.json` defines `ci:version` | No — dependency-free Node script |
 | `actions/release-guard` | Fail unless the run is a push to the repository's default branch | No — dependency-free Node script |
