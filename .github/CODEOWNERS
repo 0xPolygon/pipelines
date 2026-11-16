@@ -19,6 +19,9 @@
 
 /.github/workflows/ai-platform-*.yml           @0xPolygon/ai-platform
 
+/.github/workflows/security-*.yml              @0xPolygon/devops
+/.github/dependabot.yml                        @0xPolygon/devops
+
 /.github/workflows/slack-pr-merged*.yml        @0xPolygon/devops
 /.github/actions/slack-pr-merged/              @0xPolygon/devops
 
