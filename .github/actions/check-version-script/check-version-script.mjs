@@ -3,9 +3,37 @@
 // a confusing "Missing script" error inside changesets/action, after the app
 // token was minted. The file is parsed, never executed.
 
-import { readFileSync } from 'node:fs';
+import { closeSync, constants, fstatSync, openSync, readFileSync } from 'node:fs';
 import { resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
+
+// A real package.json is a few KB; the cap stops a huge or endless file from
+// stalling the step.
+export const MAX_PACKAGE_JSON_BYTES = 1024 * 1024;
+
+// Workflow commands are line-based and use % escapes; untrusted text echoed
+// into `::error::` must not be able to start a new command.
+export const escapeCommandData = (text) =>
+  String(text).replace(/%/g, '%25').replace(/\r/g, '%0D').replace(/\n/g, '%0A');
+
+// Opens with O_NOFOLLOW and checks the same descriptor it reads, so there is
+// no window between the check and the read.
+const readPackageJson = (path) => {
+  const fd = openSync(path, constants.O_RDONLY | constants.O_NOFOLLOW);
+  try {
+    const stat = fstatSync(fd);
+    if (!stat.isFile()) throw new Error('package.json is not a regular file');
+    if (stat.size > MAX_PACKAGE_JSON_BYTES) {
+      throw new Error(`package.json is larger than ${MAX_PACKAGE_JSON_BYTES} bytes`);
+    }
+    return readFileSync(fd, 'utf8');
+  } finally {
+    closeSync(fd);
+  }
+};
+
+const ownValue = (obj, key) =>
+  obj !== null && typeof obj === 'object' && Object.hasOwn(obj, key) ? obj[key] : undefined;
 
 export function main({ env = process.env, cwd = process.cwd(), log = console.log } = {}) {
   if (env.ENABLED !== 'true') {
@@ -15,15 +43,16 @@ export function main({ env = process.env, cwd = process.cwd(), log = console.log
 
   let pkg;
   try {
-    pkg = JSON.parse(readFileSync(resolve(cwd, 'package.json'), 'utf8'));
+    pkg = JSON.parse(readPackageJson(resolve(cwd, 'package.json')));
   } catch (err) {
     log(
-      `::error::The version hook is enabled but the root package.json cannot be read: ${err.message}`
+      `::error::The version hook is enabled but the root package.json cannot be read: ${escapeCommandData(err.message)}`
     );
     return 1;
   }
 
-  const script = pkg?.scripts?.['ci:version'];
+  const scripts = ownValue(pkg, 'scripts');
+  const script = ownValue(Array.isArray(scripts) ? undefined : scripts, 'ci:version');
   if (typeof script !== 'string' || script.trim() === '') {
     log(
       '::error::The version hook is enabled (version_script: true) but the root package.json ' +

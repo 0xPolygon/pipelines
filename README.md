@@ -238,7 +238,8 @@ skips `publish` and is tagged by `finalize` without any approval.
   version`. `ci:version` is release-path code that runs with the release app
   token, like changesets' configured plugins, and is reviewed like the
   workflow. Only the `version` job runs it; that job has no `id-token`
-  permission.
+  permission. The `snapshot` job does not run the hook; it uses plain
+  `changeset version --snapshot`.
 - **Trigger permissions.** Copy `apps-npm-release-trigger.yml`; its top-level
   `permissions` must cover every scope the called jobs request.
 

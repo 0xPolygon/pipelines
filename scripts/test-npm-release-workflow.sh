@@ -278,6 +278,10 @@ const vact = vsteps.findIndex((st) => stepUses(st) === 'changesets/action');
 check('version job: hook check comes after release-guard and before changesets/action', vguard >= 0 && vcheck > vguard && vact > vcheck, 'guard ' + vguard + ' check ' + vcheck + ' action ' + vact);
 check('version job: hook check runs only when version_script is true', norm(vsteps[vcheck]?.if) === 'inputs.version_script' && vsteps[vcheck]?.with?.enabled === 'true', norm(vsteps[vcheck]?.if));
 const vhook = norm(vsteps[vact]?.with?.version);
+// Counted over the parsed jobs, so comments and the input's prose description
+// (documentation, never executed) are not occurrences.
+const hookCount = (json(jobs).match(/ci:version/g) ?? []).length;
+check('ci:version appears exactly once in the jobs, as the conditional version input of the version job changesets step', hookCount === 1 && json(vsteps[vact]).includes('ci:version') && /ci:version/.test(String(vsteps[vact]?.with?.version)), 'occurrences ' + hookCount);
 check('version job: changesets/action version is pnpm run ci:version only under version_script', vhook === "${{ inputs.version_script && 'pnpm run ci:version' || '' }}", vhook);
 const vact_keys = Object.keys(vsteps[vact]?.with ?? {}).sort().join(' ');
 check('version job: changesets/action inputs are only title commit commitMode version publish', vact_keys === 'commit commitMode publish title version', vact_keys);
