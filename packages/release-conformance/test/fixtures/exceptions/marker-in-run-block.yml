@@ -1,0 +1,12 @@
+name: example
+on:
+  push:
+    branches: [main]
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - run: |
+          # release-conformance-exception: publisher/no-cache until 2027-01-31 not a comment
+          echo hello
+      - run: echo "# release-conformance-exception: publisher/no-cache until 2027-01-31 quoted"
