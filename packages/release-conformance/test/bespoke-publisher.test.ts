@@ -16,6 +16,7 @@ import {
   runsRepositoryCode
 } from '../src/rules/bespoke-publisher.ts';
 import { parseWorkflow } from '../src/workflow-model.ts';
+import { materialiseFixtureRepo } from './helpers/fixture-repo.ts';
 
 const suite = (name: string, body: () => void): void => {
   void describe(name, body);
@@ -80,7 +81,7 @@ const failsOnly = (name: string, ruleId: string): void => {
 };
 
 const checkRepoPublisher = (repo: string, file: string): Finding[] => {
-  const scan = scanRepo({ root: join(dir, 'repos', repo) });
+  const scan = scanRepo({ root: materialiseFixtureRepo(join(dir, 'repos', repo)) });
   const found = scan.files.find((candidate) => candidate.model.file.endsWith(file));
   assert.ok(found, `${file} not scanned`);
   assert.equal(found.class, 'bespoke-publisher');
