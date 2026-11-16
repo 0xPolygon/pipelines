@@ -1,0 +1,19 @@
+name: Probe concurrency queue
+
+# Throwaway: checks that the runner accepts a job-level `concurrency.queue`
+# key. This pull request is closed without merging.
+
+on:
+  pull_request:
+
+permissions: {}
+
+jobs:
+  probe:
+    runs-on: ubuntu-latest
+    concurrency:
+      group: npm-publish-${{ github.repository }}-${{ github.ref }}
+      cancel-in-progress: false
+      queue: max
+    steps:
+      - run: echo "job-level concurrency queue accepted"
