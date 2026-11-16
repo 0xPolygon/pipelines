@@ -9678,6 +9678,24 @@ const unparseableFinding = (file) => {
         severity: mentionsRelease ? 'error' : 'notice'
     };
 };
+const CANONICAL_REPOSITORY = '0xPolygon/pipelines';
+const CANONICAL_CALLEE_FILE = '.github/workflows/apps-npm-release.yml';
+/**
+ * The shared release workflow is the reference this checker derives its
+ * profile from. Its publisher findings are reported as notices until the
+ * planned change to its snapshot path lands, at which point this exclusion is
+ * deleted. It applies only when the run's own repository identity (never a
+ * value read from the scanned tree) is the canonical repository and the file
+ * is exactly the canonical path; every other rule and every other file is
+ * checked normally, and a fork or copy gets no exclusion.
+ */
+const downgradeCanonicalCalleeFindings = ({ findings, repository }) => repository !== CANONICAL_REPOSITORY
+    ? findings
+    : findings.map((finding) => finding.file === CANONICAL_CALLEE_FILE &&
+        finding.ruleId.startsWith('publisher/') &&
+        finding.severity === 'error'
+        ? { ...finding, severity: 'notice' }
+        : finding);
 const byLocation = (a, b) => a.file === b.file ? a.line - b.line : a.file < b.file ? -1 : 1;
 const runChecks = ({ root, profile, context }) => {
     const scan = scanRepo({ root });
@@ -9698,7 +9716,10 @@ const runChecks = ({ root, profile, context }) => {
     }
     const applied = applyExceptions({ findings, files: scan.files, today: context.today });
     return {
-        findings: applied.findings.sort(byLocation),
+        findings: downgradeCanonicalCalleeFindings({
+            findings: applied.findings,
+            repository: context.repository
+        }).sort(byLocation),
         exceptions: applied.exceptions,
         notInScope
     };

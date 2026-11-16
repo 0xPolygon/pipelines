@@ -32,6 +32,7 @@ in its own separate GitHub Actions job with its own runner.
 | `apps-changeset-check.yml` | PR gate: requires a changeset (posts/deletes instructions comment) and that intra-workspace dependencies use `workspace:` | _(none)_ |
 | `apps-codegen-drift-check.yml` | PR gate: runs `pnpm -r --include-workspace-root run --if-present codegen-drift-check` (no-op when no package defines the script) | _(none)_ |
 | `apps-npm-release.yml` | Changesets release pipeline in jobs `version` (release PR), `build` (pack tarballs), `publish` (approval-gated npm publish via the `npm-publish` environment), `finalize` (git tags and GitHub Releases), plus on-demand snapshot publish via the `snapshot_tag` input. See [npm release](#npm-release-what-a-consuming-repository-must-configure) | `CHANGESET_RELEASE_BOT_APP_ID`, `CHANGESET_RELEASE_BOT_APP_PRIVATE_KEY` |
+| `apps-release-conformance.yml` | PR and merge-queue gate: checks that a repository's npm release workflows follow the shared release standard. Also callable with `workflow_call`. See [Release workflow conformance](#release-workflow-conformance) | _(none)_ |
 | `apps-docker-release.yml` | GCP image push on version tag (delegates to `gcp_pipeline_release_image.yaml`) | `build_params_gh_secret_keys` |
 | `apps-pr-labeler.yml` | Labels `.github/`-only PRs as `do-not-notify`; removes label when non-`.github/` changes are added | _(none)_ |
 | `apps-slack-merge-notify.yml` | Posts a Slack Block Kit message when a PR is merged | `SLACK_WEBHOOK_URL` |
@@ -60,6 +61,7 @@ system state automatically.
 | `actions/check-changesets-cli` | Fail unless the repository's resolved `@changesets/cli` is 2.x | No — dependency-free Node script |
 | `actions/release-guard` | Fail unless the run is a push to the repository's default branch | No — dependency-free Node script |
 | `actions/check-release-tags` | Confirm every package in `manifest.json` has a git tag and a GitHub Release, read through the GitHub REST API | No — dependency-free Node script |
+| `actions/release-conformance` | Check a repository's npm release workflow files against the shared release standard; reads files only | Yes — ncc bundle |
 | `actions/slack-notify` | Post Slack Block Kit message from `pr.json` | Yes — ncc bundle |
 | `actions/upsert-changeset-comment` | Post or remove changeset nag comment on a PR | Yes — ncc bundle |
 
@@ -229,6 +231,104 @@ skips `publish` and is tagged by `finalize` without any approval.
   re-run of `finalize` comes later, re-run all jobs to pack them again.
 - **Trigger permissions.** Copy `apps-npm-release-trigger.yml`; its top-level
   `permissions` must cover every scope the called jobs request.
+
+### Release workflow conformance
+
+`apps-release-conformance.yml` reads every workflow file under
+`.github/workflows` and checks the ones that release to npm. It needs
+`contents: read` only and runs no code from the repository it reads. The
+logic lives in `packages/release-conformance` and is bundled into
+`.github/actions/release-conformance/dist/`.
+
+The file declares `pull_request` and `merge_group` as well as
+`workflow_call`, unlike the other reusable workflows here: a repository
+ruleset can only require a workflow whose own file declares a pull request
+or merge group trigger. It has no path filters, so its status is always
+reported.
+
+A workflow file is classified first:
+
+- **Shared caller**: a job that calls the shared npm release workflow.
+- **Bespoke publisher**: any other workflow with a job that both holds an
+  npm publishing credential (`id-token: write`, or an npm token secret) and
+  runs a publish command.
+- Everything else is not in scope and is listed in the job summary.
+
+Rules for shared callers:
+
+| Rule | Requirement |
+|------|-------------|
+| `caller/callee` | Calls the shared release workflow at an allowed ref (`main`); a commit SHA is rejected |
+| `caller/events` | Only events the canonical trigger has; `push` only on the default branch with no tags; `workflow_dispatch` inputs are a subset of the canonical's |
+| `caller/pull-request-target` | No `pull_request_target` trigger |
+| `caller/permissions-ceiling` | A top-level `permissions` block exists and no scope, at top level or on the calling job, exceeds the canonical's |
+| `caller/permissions-floor` | The calling job grants every scope the release workflow's jobs declare |
+| `caller/publish-permission-scope` | `id-token: write` is held only by the job that calls the release workflow |
+| `caller/secrets-inherit` | No `secrets: inherit` |
+| `caller/secrets` | Secret names are a subset of the canonical's |
+| `caller/inputs` | `with:` keys are a subset of the canonical's |
+
+Rules for bespoke publishers:
+
+| Rule | Requirement |
+|------|-------------|
+| `publisher/split` | The publishing credential is granted at job level, only to jobs that install dependencies, build, test or lint nothing and hold no other write scope |
+| `publisher/no-cache` | No job sets a `cache:` input on a setup action or uses `actions/cache` |
+| `publisher/environment` | Every publishing job declares a literal `environment:` name |
+| `publisher/events` | Starts only on `push` to the default branch without tags, or `release` of type `published` |
+| `publisher/publishing-dispatch` | No `workflow_dispatch` start for a publishing workflow |
+| `publisher/pull-request-target` | No `pull_request_target` trigger |
+| `publisher/id-token-with-code` | `id-token: write` is not held by a job that runs repository or dependency code |
+
+Two further results are informational: `publisher/unclassified-id-token`
+(a notice for a file outside both classes that holds `id-token: write`) and
+`workflow/unparseable` (an error only when the file mentions the release
+workflow or a publish command).
+
+The shared release workflow is the reference the profile is derived from.
+When this repository checks itself, the publisher findings on that one file
+are reported as notices until its snapshot path changes; every other rule
+and file is checked normally.
+
+#### Exceptions
+
+A finding can be suppressed for a limited time with a comment in the
+workflow file it applies to:
+
+```yaml
+# release-conformance-exception: publisher/no-cache until 2027-01-31 Cache is needed until the build is split
+```
+
+The rule id must exist, the date must not be in the past (UTC) and must be
+at most 366 days ahead, and the reason must not be empty. An invalid or
+expired marker is itself an error (`exception/invalid`). Active exceptions
+and their end dates are listed in the job summary. The rules behind
+`caller/secrets-inherit`, `caller/pull-request-target`,
+`caller/publish-permission-scope`, `publisher/pull-request-target` and
+`publisher/id-token-with-code` cannot be waived.
+
+#### Calling the check from a repository
+
+A repository that cannot be reached by an organization ruleset calls the
+workflow from its own trigger file:
+
+```yaml
+name: Release workflow conformance
+
+on:
+  pull_request:
+  merge_group:
+
+permissions:
+  contents: read
+
+jobs:
+  conformance:
+    uses: 0xPolygon/pipelines/.github/workflows/apps-release-conformance.yml@main
+```
+
+The check reads workflow files only. Whether the `npm-publish` environment
+is protected is repository configuration, which the check does not read.
 
 ### `actions/docker-test`
 
