@@ -31,7 +31,8 @@
     "test:publish-environment": "bash scripts/test-check-publish-environment.sh",
     "test:npm-release-workflow": "bash scripts/test-npm-release-workflow.sh",
     "test:release-conformance": "node --test \"packages/release-conformance/test/**/*.test.ts\"",
-    "test": "pnpm run test:slack-pr-merged && pnpm run test:actions && pnpm run test:publish-environment && pnpm run test:npm-release-workflow && pnpm run test:release-conformance"
+    "test:release-conformance-workflow": "bash scripts/test-release-conformance-workflow.sh",
+    "test": "pnpm run test:slack-pr-merged && pnpm run test:actions && pnpm run test:publish-environment && pnpm run test:npm-release-workflow && pnpm run test:release-conformance && pnpm run test:release-conformance-workflow"
   },
   "devDependencies": {
     "@changesets/cli": "^2.30.0",

@@ -1,0 +1,23 @@
+# release-conformance-exception: publisher/no-cache until 2027-01-31 the cache is reviewed and bounded
+name: cache on a setup step
+on:
+  push:
+    branches: [main]
+permissions: {}
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 24
+          cache: pnpm
+  publish:
+    runs-on: ubuntu-latest
+    environment: npm-publish
+    permissions:
+      id-token: write
+    steps:
+      - run: npm publish
