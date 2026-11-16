@@ -251,7 +251,12 @@ skips `publish` and is tagged by `finalize` without any approval.
   out of order do not move `latest` backwards, except in one narrow case: the
   registry's package document can lag a fresh publish, so a publish straight
   after another may read a stale `latest`. A failed read is tried three times
-  (with a short wait) before that package fails closed. A stable version
+  (with a short wait) before that package fails closed; only a network error,
+  a timeout or a 5xx is retried, so a 403 or 429 fails at once. When the
+  registry hangs, each attempt can run to its 30 s timeout, so a package can
+  wait about 96 s (3 × 30 s plus the 2 s and 4 s waits) before its publish,
+  and a release of a dozen or more packages could reach the publish job's
+  20-minute limit; that fails closed, and a re-run skips what was published. A stable version
   above `latest` (or any stable version while `latest` is a prerelease), or a
   package's first publish, gets `latest`. An older (or
   equal) stable version gets `previous`; `previous` always names the most recently
@@ -273,8 +278,10 @@ skips `publish` and is tagged by `finalize` without any approval.
   highest stable tag that has a Release (falling down the tags past any
   without one), else it is left unset. A Latest whose tag is not a version tag
   is left alone. A re-run of a `finalize` whose correction failed creates no
-  new Release, so it does not run the correction again; the decision uses
-  current state, so the next release's `finalize` repairs a wrong Latest,
+  new Release, so it does not run the correction again and goes green with
+  Latest still wrong; a wrong Latest can be set by hand, or waits for the next
+  release. The decision uses current state, so the next release's `finalize`
+  repairs a wrong Latest,
   including the rare case where two `finalize` runs overlap tightly and leave
   an older Release as Latest. Git tags are not changed.
 - **Artifact retention.** The tarballs are kept for 7 days. If approval or a

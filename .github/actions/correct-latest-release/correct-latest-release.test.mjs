@@ -60,6 +60,11 @@ describe('parseTag and isHighestStable', () => {
     assert.deepEqual(parseTag('1.2.3-rc.1'), { pkg: '', version: '1.2.3-rc.1' });
     assert.equal(parseTag('release-2026'), null);
   });
+  it('does not take a doubled or misplaced v as a version tag', () => {
+    for (const tag of ['vv1.2.3', 'name@v1.2.3', '@s/a@v1.2.3', 'v', 'name@']) {
+      assert.equal(parseTag(tag), null, tag);
+    }
+  });
   it('orders the semver 2.0 specification example', () => {
     const ordered = [
       '1.0.0-alpha',

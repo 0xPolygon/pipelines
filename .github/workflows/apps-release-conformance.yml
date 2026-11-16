@@ -35,7 +35,7 @@ jobs:
       contents: read
     steps:
       - name: Check out the repository under review
-        uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4.3.1
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           path: target
           # Workflow files and the local actions they use, plus every package.json:
@@ -53,7 +53,7 @@ jobs:
       # the repository under review has another (`target`), so no file of the
       # reviewed repository can share a path with the action checkout.
       - name: Check out the conformance action
-        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           repository: ${{ job.workflow_repository }}
           ref: ${{ job.workflow_sha }}

@@ -258,6 +258,25 @@ for (const [name, j] of Object.entries(jobs)) {
 }
 check('no cache restore: no actions/cache, cache:, or package-manager-cache other than false', cacheHits.length === 0, cacheHits.join(' '));
 
+// setup-node v5 and later caches on its own when package.json names a package
+// manager, so every setup-node step needs either a pre-v5 pin or an explicit
+// opt-out, and never a cache: input. The version is the trailing `# vX.Y.Z`
+// comment of the `uses:` line, so this reads the raw text.
+const rawLines = fs.readFileSync(relPath, 'utf8').split('\n');
+const nodeSteps = Object.entries(jobs).flatMap(([name, j]) => (j.steps ?? []).filter((st) => stepUses(st) === 'actions/setup-node').map((st) => ({ name, st })));
+const rawNodeLines = rawLines.filter((l) => /^\s*-?\s*uses:\s*actions\/setup-node@/.test(l));
+check('every setup-node step is found in the raw text and the parsed jobs', nodeSteps.length > 0 && nodeSteps.length === rawNodeLines.length, `parsed ${nodeSteps.length}, raw ${rawNodeLines.length}`);
+const nodeBad = rawNodeLines.flatMap((line, i) => {
+  const major = Number((/#\s*v(\d+)\.\d+\.\d+\s*$/.exec(line) ?? [])[1]);
+  const w = nodeSteps[i]?.st.with ?? {};
+  const why = [];
+  if (!Number.isInteger(major)) why.push('no version comment');
+  if ('cache' in w) why.push('cache input');
+  if (!(major < 5) && w['package-manager-cache'] !== false) why.push('v5+ without package-manager-cache: false');
+  return why.length ? [`${nodeSteps[i]?.name}: ${why.join(', ')}`] : [];
+});
+check('every setup-node step has no cache: input and is pre-v5 or sets package-manager-cache: false', nodeBad.length === 0, nodeBad.join('; '));
+
 // Pack: the workflow checkout must be gone before `pnpm pack` runs.
 const packAction = fs.readFileSync(path.join(repoRoot, '.github/actions/npm-pack/action.yml'), 'utf8');
 const packRun = YAML.parse(packAction).runs.steps.map((st) => st.run ?? '').join('\n');
@@ -293,6 +312,12 @@ check('the Latest record step is unconditional', !('if' in fin[rec]));
 check('the Latest correction runs only when changesets/action created a Release', fin[fix]?.if === "steps.changesets.outputs.published == 'true'" && fin[act]?.id === 'changesets', json(fin[fix]?.if));
 const tagCheck = fin.findIndex((st) => stepUses(st)?.endsWith('/check-release-tags'));
 check('finalize checks release tags before the Latest correction', tagCheck > act && tagCheck < fix, `check-release-tags at ${tagCheck}, correction at ${fix}`);
+// The checkout the correction loads its script from is unconditional (a
+// release with nothing public skips publish, and the correction still runs)
+// and must carry both actions' files.
+const shared = fin.map((st, i) => ({ st, i })).filter(({ st, i }) => stepUses(st) === 'actions/checkout' && st.with?.path === '.pipelines' && i > act && i < fix).pop();
+const sparse = String(shared?.st.with?.['sparse-checkout'] ?? '').split('\n').map((l) => l.trim());
+check('finalize: the .pipelines checkout before the correction has no if and lists check-release-tags and correct-latest-release', shared !== undefined && !('if' in shared.st) && sparse.includes('.github/actions/check-release-tags') && sparse.includes('.github/actions/correct-latest-release'), json(shared?.st));
 check('finalize permissions stay contents: write only', json(jobs.finalize?.permissions) === json({ contents: 'write' }), json(jobs.finalize?.permissions));
 
 const art = Object.values(jobs.build?.steps ?? []).find((st) => stepUses(st) === 'actions/upload-artifact');
@@ -310,10 +335,26 @@ const vact = vsteps.findIndex((st) => stepUses(st) === 'changesets/action');
 check('version job: hook check comes after release-guard and before changesets/action', vguard >= 0 && vcheck > vguard && vact > vcheck, 'guard ' + vguard + ' check ' + vcheck + ' action ' + vact);
 check('version job: hook check runs only when version_script is true', norm(vsteps[vcheck]?.if) === 'inputs.version_script' && vsteps[vcheck]?.with?.enabled === 'true', norm(vsteps[vcheck]?.if));
 const vhook = norm(vsteps[vact]?.with?.version);
-// Counted over the parsed jobs, so comments and the input's prose description
-// (documentation, never executed) are not occurrences.
-const hookCount = (json(jobs).match(/ci:version/g) ?? []).length;
-check('ci:version appears exactly once in the jobs, as the conditional version input of the version job changesets step', hookCount === 1 && json(vsteps[vact]).includes('ci:version') && /ci:version/.test(String(vsteps[vact]?.with?.version)), 'occurrences ' + hookCount);
+// The version job's steps are an allowlist, in order, so a step that reaches
+// the hook script by any spelling (quoting, a variable, a script indirection)
+// is a step that is not on the list. A `run` step is identified by its text.
+const vsig = (st) => (typeof st.run === 'string' ? `run:${norm(st.run)}` : stepUses(st));
+const vwant = [
+  'actions/checkout',
+  './.pipelines-guard/.github/actions/release-guard',
+  'actions/checkout',
+  'pnpm/action-setup',
+  'actions/setup-node',
+  'actions/checkout',
+  './.pipelines/.github/actions/check-workspace-protocol',
+  './.pipelines/.github/actions/check-version-script',
+  'run:rm -rf .pipelines .pipelines-guard',
+  'run:pnpm install --frozen-lockfile --ignore-scripts',
+  'actions/create-github-app-token',
+  'changesets/action'
+];
+const vhave = vsteps.map(vsig);
+check('version steps are exactly the allowlist, in order', json(vhave) === json(vwant), json(vhave));
 check('version job: changesets/action version is pnpm run ci:version only under version_script', vhook === "${{ inputs.version_script && 'pnpm run ci:version' || '' }}", vhook);
 const vact_keys = Object.keys(vsteps[vact]?.with ?? {}).sort().join(' ');
 check('version job: changesets/action inputs are only title commit commitMode version publish', vact_keys === 'commit commitMode publish title version', vact_keys);

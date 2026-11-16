@@ -59,13 +59,17 @@ function compareSemver(a, b) {
  * package ''). Null for a tag that is neither.
  */
 function parseTag(tag) {
+  // The version inside a tag is bare: only a root tag may carry one `v`
+  // prefix, which is stripped first. parseSemver itself tolerates a `v` (for
+  // registry and Release versions), so a second one is refused here.
+  const isVersion = (version) => !version.startsWith('v') && parseSemver(version) !== null;
   const at = tag.lastIndexOf('@');
   if (at > 0) {
     const version = tag.slice(at + 1);
-    return parseSemver(version) ? { pkg: tag.slice(0, at), version } : null;
+    return isVersion(version) ? { pkg: tag.slice(0, at), version } : null;
   }
   const version = tag.startsWith('v') ? tag.slice(1) : tag;
-  return parseSemver(version) ? { pkg: '', version } : null;
+  return isVersion(version) ? { pkg: '', version } : null;
 }
 
 const isStable = (version) => parseSemver(version).pre.length === 0;
