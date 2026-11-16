@@ -1,0 +1,37 @@
+name: Go modules
+
+# PR gate: go.sum matches the checksum database and go.mod/go.sum are tidy.
+# Callers run it on every PR without a path filter: a code-only change can drop
+# the last import of a module, which `go mod tidy -diff` then reports.
+on:
+  workflow_call:
+    inputs:
+      working-directory:
+        description: Directory holding the go.mod to check.
+        type: string
+        required: false
+        default: .
+
+permissions: {}
+
+jobs:
+  verify:
+    name: go mod verify / tidy
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    permissions:
+      contents: read
+    env:
+      GOFLAGS: -mod=readonly
+    defaults:
+      run:
+        working-directory: ${{ inputs.working-directory }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
+        with:
+          go-version-file: ${{ inputs.working-directory }}/go.mod
+      - run: go mod verify
+      - run: go mod tidy -diff

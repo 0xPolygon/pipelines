@@ -1,0 +1,20 @@
+name: Dependency review trigger
+
+# Canonical trigger for security-dependency-review.yml. In a consuming repo,
+# call it by full commit SHA instead of the local path:
+#
+#   uses: 0xPolygon/pipelines/.github/workflows/security-dependency-review.yml@<sha> # <date or tag>
+#   with:
+#     allow-dependencies-licenses: >-
+#       pkg:npm/@img/sharp-libvips-linux-x64
+on:
+  pull_request:
+
+permissions: {}
+
+jobs:
+  dependency-review:
+    permissions:
+      contents: read
+      pull-requests: write
+    uses: ./.github/workflows/security-dependency-review.yml

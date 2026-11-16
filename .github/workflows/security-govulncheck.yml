@@ -1,0 +1,46 @@
+name: govulncheck
+
+# Reports Go vulnerabilities reachable from the caller's code. Callers run it
+# weekly and on PRs that change go.mod/go.sum (see the README for a trigger).
+on:
+  workflow_call:
+    inputs:
+      working-directory:
+        description: Directory holding the go.mod to scan.
+        type: string
+        required: false
+        default: .
+      packages:
+        type: string
+        required: false
+        default: ./...
+
+permissions: {}
+
+jobs:
+  govulncheck:
+    name: govulncheck
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    permissions:
+      contents: read
+    env:
+      GOFLAGS: -mod=readonly
+    defaults:
+      run:
+        working-directory: ${{ inputs.working-directory }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
+        with:
+          go-version-file: ${{ inputs.working-directory }}/go.mod
+      - name: Install govulncheck (pinned; the Go checksum database verifies it)
+        env:
+          GOFLAGS: ''
+        run: go install golang.org/x/vuln/cmd/govulncheck@v1.9.0
+      - name: govulncheck
+        env:
+          PACKAGES: ${{ inputs.packages }}
+        run: govulncheck $PACKAGES
