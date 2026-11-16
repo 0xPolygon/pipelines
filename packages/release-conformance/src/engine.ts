@@ -3,7 +3,7 @@ import type { CheckResult, Finding, Profile, RuleContext, ScannedFile } from './
 import { CALLEE_PATH } from './canonical.ts';
 import { applyExceptions } from './exceptions.ts';
 import { runsPublishText, scanRepo } from './repo-scan.ts';
-import { checkBespokePublisher } from './rules/bespoke-publisher.ts';
+import { checkBespokePublisher, checkUnclassifiedIdToken } from './rules/bespoke-publisher.ts';
 import { checkSharedCaller } from './rules/shared-caller.ts';
 
 /** An unreadable file is only a failure when it could be a release workflow; otherwise it is a notice. */
@@ -40,7 +40,10 @@ export const runChecks = ({
     if (file.class === 'unparseable') findings.push(unparseableFinding(file));
     else if (file.class === 'shared-caller') findings.push(...checkSharedCaller(params));
     else if (file.class === 'bespoke-publisher') findings.push(...checkBespokePublisher(params));
-    else notInScope.push(file.model.file);
+    else {
+      notInScope.push(file.model.file);
+      findings.push(...checkUnclassifiedIdToken(params));
+    }
   }
 
   const applied = applyExceptions({ findings, files: scan.files, today: context.today });

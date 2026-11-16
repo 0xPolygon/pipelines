@@ -344,8 +344,11 @@ suite('engine', () => {
     assert.deepEqual(result.exceptions, []);
   });
 
-  test('runs the rule stubs over in-scope files without reporting anything yet', () => {
+  test('runs the rules over the local call graph without reporting an error', () => {
     const result = runChecks({ root: join(modelDir, 'repos', 'local-graph'), profile, context });
-    assert.deepEqual(result.findings, []);
+    assert.deepEqual(
+      result.findings.filter((f) => f.severity === 'error'),
+      []
+    );
   });
 });
