@@ -1,8 +1,9 @@
 name: Dependency review
 
 # PR gate: fails when the PR adds a dependency with a known vulnerability at or
-# above `fail-on-severity`, or one whose licence is outside the shared allowlist
-# below. Changing that list here changes it for every caller.
+# above `fail-on-severity` in any of `fail-on-scopes`, or one whose licence is
+# outside the shared allowlist below. Changing that list here changes it for
+# every caller.
 #
 # Callers trigger it on `pull_request` (see security-dependency-review-trigger.yml).
 # Needs the dependency graph: public repos, or private repos with GitHub Code Security.
@@ -14,6 +15,13 @@ on:
         type: string
         required: false
         default: high
+      fail-on-scopes:
+        description: >-
+          Dependency scopes whose advisories fail the check. Includes development by
+          default: dev and tooling packages run in CI too.
+        type: string
+        required: false
+        default: runtime, development, unknown
       allow-dependencies-licenses:
         description: >-
           Packages exempt from the licence check, as comma-separated purls without a
@@ -39,6 +47,7 @@ jobs:
       - uses: actions/dependency-review-action@a1d282b36b6f3519aa1f3fc636f609c47dddb294 # v5.0.0
         with:
           fail-on-severity: ${{ inputs.fail-on-severity }}
+          fail-on-scopes: ${{ inputs.fail-on-scopes }}
           # Permissive licences GitHub reports across the npm and Go trees of the
           # repos that adopted this gate. Copyleft and unparsed licence data stay out.
           allow-licenses: >-

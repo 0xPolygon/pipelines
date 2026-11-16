@@ -1,8 +1,11 @@
 name: Workflow lint
 
 # Lints the caller's GitHub Actions workflows, composite actions and Dependabot
-# config with zizmor. Findings go to code scanning when `advanced-security` is
-# true; otherwise the job fails on any finding at or above the thresholds.
+# config with zizmor. With `advanced-security: true` (the default) findings go
+# to code scanning and the job passes: blocking a PR on the findings it
+# introduces needs a "Require code scanning results" ruleset rule (see the
+# README). With `false` the job fails on any finding at or above the
+# thresholds, including ones already on the default branch.
 #
 # Callers trigger it on every `pull_request` plus a weekly `schedule` (see
 # security-zizmor-trigger.yml). No path filter on purpose: a required check
