@@ -396,12 +396,10 @@ See [Adding a new composite action with compiled dist](#adding-a-new-composite-a
 
 ## Pinning callers
 
-Reusable workflows in this repository may be called at `@main` from a job-level
-`uses:`. This repository is review-gated, and a fix then reaches every caller on
-its next run. A composite action called from a step is different: pin it to a
+A composite action called from a step runs inside the caller's job: pin it to a
 full commit SHA with a trailing comment, and let Dependabot's `github-actions`
-updates move the pin. A reusable workflow called at any ref runs this
-repository's composite actions from the same commit as itself.
+updates move the pin. A reusable workflow runs this repository's composite
+actions from the same commit as itself.
 
 ```yaml
 steps:
@@ -413,19 +411,17 @@ steps:
   composite action called from a step.
 - The `# main` comment names the branch the pinned commit came from; Dependabot
   keeps the SHA current.
-- **A release tag** (`@vX.Y.Z`) is acceptable only for a job-level reusable
-  workflow call, and only when it is protected against re-pointing. Tags are only
-  as immutable as the repo's tag protection. A step-level composite action is
-  always pinned to a full commit SHA.
+- **A release tag** (`@vX.Y.Z`) is only as immutable as the repo's tag
+  protection. A step-level composite action is always pinned to a full commit
+  SHA.
 - A reusable workflow checks out `${{ job.workflow_repository }}` at
   `${{ job.workflow_sha }}` into `.pipelines/` and calls
   `./.pipelines/.github/actions/<name>`, never `@main`. (`job.workflow_*` is
   not available on GitHub Enterprise Server.)
 
 > **Status:** this repo does not publish release tags that contain the current
-> `apps-*` workflows (the existing `v1`–`v3` tags predate them). Reusable
-> workflows are called at `@main`; step-level composite actions are pinned to a
-> commit SHA of this repo.
+> `apps-*` workflows (the existing `v1`–`v3` tags predate them), so step-level
+> composite actions are pinned to a commit SHA of this repo.
 
 ---
 
