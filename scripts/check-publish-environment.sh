@@ -96,4 +96,8 @@ if [ "$failures" -ne 0 ]; then
   echo "$failures condition(s) failed for $OWNER_REPO"
   exit 1
 fi
-echo "all conditions passed for $OWNER_REPO"
+# A repository-scoped token cannot read either of these, so they are reported
+# as unknown rather than folded into a success message.
+echo "UNKNOWN required reviewers hold no npm publish rights for the package (needs a human check)"
+echo "UNKNOWN only organisation admins can edit the environment's protection rules (needs a human check)"
+echo "checkable conditions passed for $OWNER_REPO; two need a human check"

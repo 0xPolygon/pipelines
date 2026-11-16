@@ -9,7 +9,7 @@ const { compareSemver, correctLatest, isHighestStable, parseTag, recordLatest } 
 const context = { repo: { owner: 'o', repo: 'r' } };
 
 /** Fake Octokit: `latest` is the Latest Release now (or null), `tags` the repo's tags. */
-function fakeGithub({ latest, tags = [], releaseIds = {} }) {
+function fakeGithub({ latest, tags = [], releaseIds = {}, noRelease = [] }) {
   const updates = [];
   const github = {
     paginate: async (fn, params) => {
@@ -24,7 +24,10 @@ function fakeGithub({ latest, tags = [], releaseIds = {} }) {
           return { data: { id: latest.id, tag_name: latest.tag } };
         },
         listTags: () => {},
-        getReleaseByTag: async ({ tag }) => ({ data: { id: releaseIds[tag] ?? 99 } }),
+        getReleaseByTag: async ({ tag }) => {
+          if (noRelease.includes(tag)) throw Object.assign(new Error('Not Found'), { status: 404 });
+          return { data: { id: releaseIds[tag] ?? 99 } };
+        },
         updateRelease: async (params) => {
           updates.push(params);
         }
@@ -37,8 +40,8 @@ const fakeCore = () => {
   const outputs = {};
   return { outputs, core: { setOutput: (k, v) => (outputs[k] = v), info: () => {} } };
 };
-const run = async ({ latest, tags, previous, releaseIds }) => {
-  const { github, updates } = fakeGithub({ latest, tags, releaseIds });
+const run = async ({ latest, tags, previous, releaseIds, noRelease }) => {
+  const { github, updates } = fakeGithub({ latest, tags, releaseIds, noRelease });
   const { core } = fakeCore();
   const result = await correctLatest({
     github,
@@ -183,5 +186,77 @@ describe('correctLatest', () => {
     const { result, updates } = await run({ latest: null, tags: [], previous: null });
     assert.equal(result, 'unchanged');
     assert.deepEqual(updates, []);
+  });
+  // Review findings on the first version of the helper, each a separate input.
+  it('F1: never restores a stale recorded holder that is no longer its package highest', async () => {
+    // Run B recorded v3.9.0; run A then released v4.0.0; B created v3.9.1.
+    const { result, updates } = await run({
+      latest: { id: 3, tag: 'v3.9.1' },
+      tags: ['v3.9.0', 'v4.0.0', 'v3.9.1'],
+      releaseIds: { 'v4.0.0': 2 },
+      previous: { id: 1, tag: 'v3.9.0' }
+    });
+    assert.equal(result, 'promoted');
+    assert.deepEqual(updates, [{ owner: 'o', repo: 'r', release_id: 2, make_latest: 'true' }]);
+  });
+
+  it('F2: a re-run after a failed correction still fixes a wrong Latest', async () => {
+    // The re-run records the already-wrong Latest as the previous holder.
+    const { result, updates } = await run({
+      latest: { id: 3, tag: 'v3.9.1' },
+      tags: ['v3.9.0', 'v4.0.0', 'v3.9.1'],
+      releaseIds: { 'v4.0.0': 2 },
+      previous: { id: 3, tag: 'v3.9.1' }
+    });
+    assert.equal(result, 'promoted');
+    assert.deepEqual(updates, [{ owner: 'o', repo: 'r', release_id: 2, make_latest: 'true' }]);
+  });
+
+  it('F3: falls down the stable tags past one with no Release instead of failing', async () => {
+    const { result, updates } = await run({
+      latest: { id: 5, tag: 'v2.0.1' },
+      tags: ['v2.0.0', 'v3.0.0', 'v4.0.0', 'v2.0.1'],
+      releaseIds: { 'v3.0.0': 30 },
+      noRelease: ['v4.0.0'],
+      previous: null
+    });
+    assert.equal(result, 'promoted');
+    assert.deepEqual(updates, [{ owner: 'o', repo: 'r', release_id: 30, make_latest: 'true' }]);
+  });
+
+  it('F3: keeps the current stable Latest when every higher tag has no Release', async () => {
+    const { result, updates } = await run({
+      latest: { id: 5, tag: 'v2.0.1' },
+      tags: ['v2.0.0', 'v3.0.0', 'v2.0.1'],
+      noRelease: ['v3.0.0'],
+      previous: null
+    });
+    assert.equal(result, 'kept');
+    assert.deepEqual(updates, []);
+  });
+
+  it('F3: clears a prerelease Latest when no stable tag has a Release', async () => {
+    const { result, updates } = await run({
+      latest: { id: 5, tag: 'a@2.0.0-rc.1' },
+      tags: ['a@1.0.0', 'a@2.0.0-rc.1'],
+      noRelease: ['a@1.0.0'],
+      previous: null
+    });
+    assert.equal(result, 'cleared');
+    assert.deepEqual(updates, [{ owner: 'o', repo: 'r', release_id: 5, make_latest: 'false' }]);
+  });
+
+  it('does not swallow non-404 errors from the Release lookup', async () => {
+    const { github } = fakeGithub({
+      latest: { id: 2, tag: 'a@1.9.1' },
+      tags: ['a@2.0.0', 'a@1.9.1']
+    });
+    github.rest.repos.getReleaseByTag = async () => {
+      throw Object.assign(new Error('boom'), { status: 500 });
+    };
+    await assert.rejects(
+      correctLatest({ github, context, core: fakeCore().core, previousId: '', previousTag: '' }),
+      /boom/
+    );
   });
 });

@@ -3,9 +3,13 @@
 // GitHub marks the Release it creates as Latest by default, so when releases
 // are approved out of order an older version created last would become Latest.
 // finalize records the Latest Release before changesets/action creates
-// Releases (recordLatest), then restores it afterwards when the new Latest is
-// not the highest stable version of its own package (correctLatest). A repo
-// has one Latest Release but may hold several packages, so "highest" is
+// Releases (recordLatest), then judges the CURRENT Latest afterwards
+// (correctLatest): if it is not the highest stable version of its own package,
+// Latest is moved to a better Release. The recorded holder is only a hint,
+// used when it is still the highest stable of its package; decisions never
+// rest on it alone, because finalize runs are not serialized and a record can
+// be stale, and a re-run after a failure records an already-wrong Latest. A
+// repo has one Latest Release but may hold several packages, so "highest" is
 // judged per package, using that package's git tags.
 //
 // Loaded with require() from actions/github-script, which is why this is CommonJS.
@@ -66,17 +70,6 @@ function parseTag(tag) {
 
 const isStable = (version) => parseSemver(version).pre.length === 0;
 
-/** The highest stable tag of a package, or null when it has none. */
-function highestStableTag({ pkg, allTags }) {
-  let best = null;
-  for (const tag of allTags) {
-    const parsed = parseTag(tag);
-    if (parsed === null || parsed.pkg !== pkg || !isStable(parsed.version)) continue;
-    if (best === null || compareSemver(parsed.version, parseTag(best).version) > 0) best = tag;
-  }
-  return best;
-}
-
 /** True when `tag` is a stable version with no higher stable tag for the same package. */
 function isHighestStable({ tag, allTags }) {
   const parsed = parseTag(tag);
@@ -111,53 +104,89 @@ async function recordLatest({ github, context, core }) {
   core.info(latest ? `Latest Release before this run: ${latest.tag}` : 'No Latest Release yet');
 }
 
+/** The Release for a tag, or null when the tag has none (404). */
+async function getReleaseByTag({ github, owner, repo, tag }) {
+  try {
+    const { data } = await github.rest.repos.getReleaseByTag({ owner, repo, tag });
+    return data;
+  } catch (err) {
+    if (err.status === 404) return null;
+    throw err;
+  }
+}
+
+/** The package's stable tags, highest first. */
+function stableTagsDescending({ pkg, allTags }) {
+  return allTags
+    .map((tag) => ({ tag, parsed: parseTag(tag) }))
+    .filter(({ parsed }) => parsed !== null && parsed.pkg === pkg && isStable(parsed.version))
+    .sort((a, b) => compareSemver(b.parsed.version, a.parsed.version))
+    .map(({ tag }) => tag);
+}
+
 /**
- * After Releases were created: when the Latest Release is no longer the
- * recorded one and is not the highest stable version of its package, puts
- * Latest back with make_latest. `previousId` is recorded by recordLatest ('' for none).
+ * After Releases were created: judges the CURRENT Latest Release from current
+ * state. When it is its package's highest stable version it stays. Otherwise
+ * Latest moves to, in order:
+ *   1. the recorded holder, only if that is still the highest stable version
+ *      of its own package (`previousId`/`previousTag` come from recordLatest,
+ *      '' for none; a hint that may be stale);
+ *   2. the highest stable tag of the wrong Latest's package that has a Release
+ *      (falling down the tags past any without one);
+ *   3. nothing: make_latest 'false' on the wrong one, when no stable Release exists.
  * Returns what it did: 'unchanged' | 'kept' | 'restored' | 'promoted' | 'cleared'.
  */
 async function correctLatest({ github, context, core, previousId, previousTag }) {
   const { owner, repo } = context.repo;
   const current = await getLatestRelease({ github, owner, repo });
   if (current === null) return 'unchanged';
-  if (previousId !== '' && String(current.id) === String(previousId)) return 'unchanged';
 
   const tags = (
     await github.paginate(github.rest.repos.listTags, { owner, repo, per_page: 100 })
   ).map((t) => t.name);
   if (isHighestStable({ tag: current.tag, allTags: tags })) {
+    if (previousId !== '' && String(current.id) === String(previousId)) return 'unchanged';
     core.info(`${current.tag} is the highest stable version of its package; keeping it as Latest`);
     return 'kept';
   }
 
-  if (previousId !== '') {
-    await github.rest.repos.updateRelease({
+  const setLatest = (releaseId) =>
+    github.rest.repos.updateRelease({
       owner,
       repo,
-      release_id: Number(previousId),
+      release_id: releaseId,
       make_latest: 'true'
     });
+
+  if (
+    previousId !== '' &&
+    String(current.id) !== String(previousId) &&
+    isHighestStable({ tag: previousTag, allTags: tags })
+  ) {
+    await setLatest(Number(previousId));
     core.info(
       `${current.tag} is not the highest stable version of its package; restored Latest to ${previousTag}`
     );
     return 'restored';
   }
-  // No earlier Latest to return to. Name one explicitly rather than leave
-  // GitHub to choose: the package's highest stable Release when it has one,
-  // otherwise (only prereleases so far) just stop the new Release being Latest.
+
+  // The recorded holder is gone, stale or absent: choose from current tags.
   const parsed = parseTag(current.tag);
-  const best = parsed === null ? null : highestStableTag({ pkg: parsed.pkg, allTags: tags });
-  if (best !== null) {
-    const { data } = await github.rest.repos.getReleaseByTag({ owner, repo, tag: best });
-    await github.rest.repos.updateRelease({
-      owner,
-      repo,
-      release_id: data.id,
-      make_latest: 'true'
-    });
+  const candidates =
+    parsed === null ? [] : stableTagsDescending({ pkg: parsed.pkg, allTags: tags });
+  for (const tag of candidates) {
+    if (tag === current.tag) {
+      core.info(`${current.tag} is the best stable Release its package has; keeping it as Latest`);
+      return 'kept';
+    }
+    const release = await getReleaseByTag({ github, owner, repo, tag });
+    if (release === null) {
+      core.info(`${tag} has no Release; trying the next highest stable version`);
+      continue;
+    }
+    await setLatest(release.id);
     core.info(
-      `${current.tag} is not the highest stable version of its package; set Latest to ${best}`
+      `${current.tag} is not the highest stable version of its package; set Latest to ${tag}`
     );
     return 'promoted';
   }
@@ -168,7 +197,7 @@ async function correctLatest({ github, context, core, previousId, previousTag })
     make_latest: 'false'
   });
   core.info(
-    `${current.tag} is not the highest stable version of its package and none exists; cleared it as Latest`
+    `${current.tag} is not the highest stable version of its package and no stable Release exists; cleared it as Latest`
   );
   return 'cleared';
 }

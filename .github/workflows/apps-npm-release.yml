@@ -266,18 +266,21 @@ jobs:
     # configs pin it). A release with nothing public skips this job and asks
     # no approval.
     environment: npm-publish
-    # One publish at a time per repository and ref, in the order the runs
-    # started waiting. A run awaiting approval holds the group, so approvals
-    # given out of order still publish one after another, and each publish
-    # reads the registry's current `latest` when its turn comes. `queue: max`
-    # keeps up to 100 waiting publishes in first-in, first-out order; without
-    # it a third run would cancel the pending one and its version would stay
-    # unpublished. cancel-in-progress stays false (`queue: max` is invalid with
+    # One publish at a time per repository and ref, normally in the order the
+    # runs started waiting (GitHub documents that queue ordering "is not
+    # guaranteed", so the dist-tag choice, not the order, is what protects
+    # `latest`). Each publish reads the registry's current `latest` when its
+    # turn comes. A run awaiting environment approval is expected to hold its
+    # place in the group, but GitHub does not document that; it will be
+    # confirmed on a real run. `queue: max` keeps up to 100 waiting publishes;
+    # without it a third run would cancel the pending one and its version
+    # would stay unpublished. cancel-in-progress stays false (`queue: max` is invalid with
     # true) so a running publish is never cut off. The lock is on this job only:
     # the version job and releases with nothing public to publish (a
     # service-only tag release) must not wait behind an approval. finalize
-    # needs no lock because its Latest Release correction reads current state
-    # and gives the same result in any order.
+    # takes no lock: its Latest Release correction judges the current Latest
+    # from current state after changesets/action runs, so overlapping or
+    # re-run finalizes converge on the same answer.
     concurrency:
       group: npm-publish-${{ github.repository }}-${{ github.ref }}
       cancel-in-progress: false
@@ -378,11 +381,14 @@ jobs:
       - uses: ./.pipelines/.github/actions/check-changesets-cli
 
       # GitHub marks each Release it creates as Latest. Record which Release
-      # holds Latest now, before changesets/action creates any, so it can be
-      # put back if an older version's Release takes it.
+      # holds Latest now, before changesets/action creates any, as a hint for
+      # the correction below (it is never trusted without a check). Retries
+      # cover transient API errors, which would otherwise fail finalize
+      # before any tag or Release exists.
       - uses: actions/github-script@ed597411d8f924073f98dfc5c65a23a2325f34cd # v8.0.0
         id: previous-latest
         with:
+          retries: 3
           script: |
             const { recordLatest } = require('./.pipelines/.github/actions/correct-latest-release/correct-latest-release.cjs');
             await recordLatest({ github, context, core });
@@ -414,10 +420,11 @@ jobs:
           GITHUB_TOKEN: ${{ steps.app-token.outputs.token }}
 
       # A Release is never left as Latest unless it is the highest stable
-      # version of its own package: when this run's Releases took Latest from
-      # the recorded holder and the new Latest is older, or a prerelease,
-      # Latest goes back to the recorded Release. Reads current state only,
-      # so it needs no lock and gives the same result in any run order.
+      # version of its own package. Judged from the current Latest and the
+      # package's tags, whatever this run recorded: a wrong Latest goes to
+      # the recorded holder if that is still its package's highest stable
+      # version, else to the package's highest stable tag that has a Release,
+      # else it is cleared. Needs no lock, and a re-run repairs a failed run.
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
         with:
           repository: ${{ job.workflow_repository }}
@@ -431,6 +438,7 @@ jobs:
           PREVIOUS_LATEST_ID: ${{ steps.previous-latest.outputs.previous-id }}
           PREVIOUS_LATEST_TAG: ${{ steps.previous-latest.outputs.previous-tag }}
         with:
+          retries: 3
           script: |
             const { correctLatest } = require('./.pipelines/.github/actions/correct-latest-release/correct-latest-release.cjs');
             await correctLatest({

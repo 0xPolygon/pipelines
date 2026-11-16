@@ -22,8 +22,7 @@
 // Each publish picks its dist-tag at publish time from the registry's current
 // `latest` (resolvePublishTag), so releases approved out of order never move
 // `latest` backwards: a stable version above `latest` takes `latest`, an older
-// or equal stable takes `previous`, and a prerelease never takes `latest` over
-// an existing one. A registry answer that cannot be read fails that package
+// or equal stable takes `previous`, and a prerelease never takes `latest`. A registry answer that cannot be read fails that package
 // closed, before `npm publish`.
 //
 // No token is read or passed on: npm authenticates with the runner's OIDC

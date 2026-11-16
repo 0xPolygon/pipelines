@@ -228,12 +228,17 @@ skips `publish` and is tagged by `finalize` without any approval.
   while a release waits for approval, a second approval request can appear
   for the same versions; the second run finds them already published and
   skips them.
-- **Publishes run one at a time, in arrival order.** The `publish` job (only
-  that job) shares one concurrency group per repository and ref with
-  `queue: max` and `cancel-in-progress: false`. A run waiting for approval
-  holds the group; later publishes queue behind it, and GitHub keeps up to 100
-  pending publishes in order of arrival. The `version` job and releases with
-  nothing public to publish never wait on it.
+- **Publishes run one at a time, normally in arrival order.** The `publish`
+  job (only that job) shares one concurrency group per repository and ref with
+  `queue: max` and `cancel-in-progress: false`; GitHub keeps up to 100 pending
+  publishes. GitHub says queue ordering "is not guaranteed", so the dist-tag
+  choice below, not the order, is what protects `latest`. A run waiting for
+  approval is expected to keep its place in the group, but GitHub does not
+  document this; it will be confirmed on a real run. The `version` job and
+  releases with nothing public to publish never wait on it. Runs on different
+  refs are not serialized, and the registry's package document can lag a
+  fresh publish, so a publish that starts immediately after another may still
+  read a stale `latest`.
 - **Dist-tags are chosen at publish time.** Just before each `npm publish`
   the registry's current `latest` is read (unauthenticated), and the tag is
   passed with `--tag`; no dist-tag is changed afterwards. A stable version
@@ -241,22 +246,24 @@ skips `publish` and is tagged by `finalize` without any approval.
   package's first publish, gets `latest`. An older (or
   equal) stable version gets `previous`, so approving releases out of order
   never moves `latest` backwards; `previous` always names the most recently
-  published older stable version. A prerelease never takes `latest` from an
-  existing one: it keeps the tag recorded at pack time (changesets' pre tag; when only
+  published older stable version. A prerelease never gets `latest`: it keeps the tag recorded at pack time (changesets' pre tag; when only
   prereleases have been published so far, the manifest's `preTag` from
-  `.changeset/pre.json` is used instead), and fails if neither is available. An explicit `dist-tag` input passed to `npm-pack` is kept as is. If
+  `.changeset/pre.json` is used instead), and fails if neither is available. A recorded tag other than `latest` is kept; an
+  explicit `latest` cannot be told from the default, so an older stable version
+  still gets `previous`, and a prerelease fails. If
   the registry cannot be read, nothing is published for that package. The
   read-back checks the version document and its integrity, so a version
   published under `previous` passes it like any other.
-- **A non-highest Release is never left as Latest.** `finalize` records the
-  repository's Latest Release before changesets creates Releases. Afterwards,
-  if the Latest Release is a new one that is not the highest stable version of
-  its own package (per package, so multi-package repositories need no primary
-  package) it is an older stable version or a prerelease, and Latest is
-  restored to the Release that held it before (with none before, Latest goes
-  to that package's highest stable Release, or is left unset when it has only
-  prereleases). A Release that is its package's
-  highest stable version keeps GitHub's default. Git tags are not changed.
+- **A non-highest Release is never left as Latest.** After changesets creates
+  Releases, `finalize` judges the current Latest Release from current state:
+  if it is its package's highest stable version (from the package's tags;
+  per package, so multi-package repositories need no primary package) it
+  stays. Otherwise Latest goes to the Release recorded before the run if that
+  is still its package's highest stable version, else to that package's
+  highest stable tag that has a Release (falling down the tags past any
+  without one), else it is left unset. Because the decision uses current
+  state, overlapping `finalize` runs and a re-run after a failure converge on
+  the right Release. Git tags are not changed.
 - **Artifact retention.** The tarballs are kept for 7 days. If approval or a
   re-run of `finalize` comes later, re-run all jobs to pack them again.
 - **Version hook (`version_script`, default `false`).** Set the input to
