@@ -11,11 +11,11 @@
 set -uo pipefail
 
 # --- Expected shape. Change these in one place when jobs are added. ---
-EXPECTED_JOBS="version build publish finalize snapshot"
+EXPECTED_JOBS="version build attest publish finalize snapshot"
 # Jobs that may hold `id-token: write`, sorted, space separated.
-EXPECTED_ID_TOKEN_JOBS="publish snapshot"
+EXPECTED_ID_TOKEN_JOBS="attest publish snapshot"
 # Jobs that must run release-guard, and jobs that must not.
-GUARDED_JOBS="version publish finalize"
+GUARDED_JOBS="version attest publish finalize"
 UNGUARDED_JOBS="snapshot"
 
 REPO_ROOT="$(cd "$(dirname "$0")/.." && pwd)"
@@ -104,6 +104,27 @@ check "publish setup-node uses an exact x.y.z node-version" $?
 grep -qE '^[[:space:]]+check-latest: false$' "$PUB"
 check "publish setup-node has check-latest: false" $?
 
+# --- attest job: no caller code, no install, publish waits for it ---
+ATT="$WORK/attest.yml"
+job_block attest >"$ATT"
+! grep -qE 'pnpm/action-setup|pnpm install|actions/setup-node' "$ATT"
+check "attest does not set up pnpm or node, or install" $?
+awk '
+  function flush() { if (inco && !(own && dst)) bad=1; inco=0; own=0; dst=0 }
+  /^      - /{ flush(); if ($0 ~ /actions\/checkout@/) inco=1 }
+  inco && /job\.workflow_repository/ { own=1 }
+  inco && /^[[:space:]]+path: \.pipelines$/ { dst=1 }
+  END { flush(); exit bad }' "$ATT"
+check "attest checks out only the workflow's own repository into .pipelines" $?
+grep -qE '^[[:space:]]+subject-path: .*\.tgz$' "$ATT"
+check "attest subject-path is the tarballs only" $?
+grep -qE '^    needs: \[version, build\]$' "$ATT"
+check "attest needs [version, build]" $?
+grep -qE '^    needs: \[version, build, attest\]$' "$PUB"
+check "publish needs [version, build, attest]" $?
+grep -qE '^      attestations: read' "$PUB"
+check "publish has attestations: read" $?
+
 # --- finalize tags services-only releases without approval (publish skipped) ---
 job_block finalize | awk '/^    if:/{f=1;next} f&&/^    [a-z-]+:/{f=0} f' >"$WORK/final-if"
 grep -qF "needs.publish.result == 'skipped'" "$WORK/final-if"
@@ -172,7 +193,7 @@ const idTokenJobs = Object.entries(jobs)
   .map(([n]) => n)
   .sort()
   .join(' ');
-check('id-token permission only in: publish snapshot', idTokenJobs === 'publish snapshot', idTokenJobs);
+check('id-token permission only in: attest publish snapshot', idTokenJobs === 'attest publish snapshot', idTokenJobs);
 check('no job requests id-token other than write', Object.values(jobs).every((j) => !isMap(j.permissions) || !('id-token' in j.permissions) || j.permissions['id-token'] === 'write'));
 
 // Exact job conditions and needs.
@@ -180,14 +201,15 @@ const expectedIf = {
   version: "inputs.snapshot_tag == ''",
   build: "inputs.snapshot_tag == '' && needs.version.outputs.has_changesets == 'false'",
   publish: "inputs.snapshot_tag == '' && needs.build.outputs.has_tarballs == 'true'",
+  attest: "inputs.snapshot_tag == '' && needs.build.outputs.has_tarballs == 'true'",
   finalize:
-    "always() && inputs.snapshot_tag == '' && needs.version.outputs.has_changesets == 'false' && needs.build.result == 'success' && (needs.publish.result == 'success' || (needs.publish.result == 'skipped' && needs.build.outputs.has_tarballs == 'false'))",
+    "always() && inputs.snapshot_tag == '' && needs.version.outputs.has_changesets == 'false' && needs.build.result == 'success' && ((needs.build.outputs.has_tarballs == 'true' && needs.attest.result == 'success' && needs.publish.result == 'success') || (needs.build.outputs.has_tarballs == 'false' && needs.attest.result == 'skipped' && needs.publish.result == 'skipped'))",
   snapshot: "inputs.snapshot_tag != ''"
 };
 for (const [name, want] of Object.entries(expectedIf)) {
   check(`${name} if: is exactly the expected condition`, norm(jobs[name]?.if) === want, norm(jobs[name]?.if));
 }
-const expectedNeeds = { version: [], build: ['version'], publish: ['version', 'build'], finalize: ['version', 'build', 'publish'], snapshot: [] };
+const expectedNeeds = { version: [], build: ['version'], attest: ['version', 'build'], publish: ['version', 'build', 'attest'], finalize: ['version', 'build', 'attest', 'publish'], snapshot: [] };
 for (const [name, want] of Object.entries(expectedNeeds)) {
   const have = [].concat(jobs[name]?.needs ?? []);
   check(`${name} needs: [${want.join(', ')}]`, json(have) === json(want), json(have));
@@ -238,6 +260,23 @@ check('publish downloads before it publishes', dl >= 0 && pb > dl);
 const sn = pubSteps[0]?.with ?? {};
 check('publish setup-node: exact node-version, check-latest false, no cache keys', /^\d+\.\d+\.\d+$/.test(String(sn['node-version'])) && sn['check-latest'] === false && !('cache' in sn) && !('package-manager-cache' in sn));
 
+// Attest: holds id-token, so it runs no caller code. Allowlist of steps, in order.
+const attSteps = jobs.attest?.steps ?? [];
+const attWant = ['actions/checkout', './.pipelines/.github/actions/release-guard', 'actions/download-artifact', 'actions/attest-build-provenance'];
+const attHave = attSteps.map(stepUses);
+check('attest steps are exactly the allowlist, in order', json(attHave) === json(attWant), json(attHave));
+const attKeys = attSteps.flatMap((st, i) => Object.keys(st).filter((k) => !['uses', 'with', 'name', 'id'].includes(k)).map((k) => `step${i}.${k}`));
+check('attest steps carry only uses/with/name/id (no run, if, env, shell, continue-on-error)', attKeys.length === 0, attKeys.join(' '));
+check('attest release-guard step is unconditional and takes no inputs', attSteps[1] !== undefined && !('if' in attSteps[1]) && !('with' in attSteps[1]) && !('env' in attSteps[1]));
+const attCheckout = attSteps[0]?.with ?? {};
+check('attest checkout is the workflow\'s own repo and commit, sparse, into .pipelines', attCheckout.repository === '${{ job.workflow_repository }}' && attCheckout.ref === '${{ job.workflow_sha }}' && attCheckout.path === '.pipelines' && attCheckout['sparse-checkout'] === '.github/actions/release-guard');
+check('attest downloads npm-tarballs into the tarball directory', attSteps[2]?.with?.name === 'npm-tarballs' && attSteps[2]?.with?.path === '${{ runner.temp }}/npm-tarballs');
+check('attest subject-path is exactly the tarballs', attSteps[3]?.with?.['subject-path'] === '${{ runner.temp }}/npm-tarballs/*.tgz', String(attSteps[3]?.with?.['subject-path']));
+const attJobKeys = Object.keys(jobs.attest ?? {}).filter((k) => !['needs', 'if', 'runs-on', 'timeout-minutes', 'permissions', 'steps'].includes(k));
+check('attest job carries only the expected keys', attJobKeys.length === 0, attJobKeys.join(' '));
+const verifyWith = pubSteps[pb]?.with ?? {};
+check('publish verifies attestations: signer workflow from job.workflow_repository, digest from job.workflow_sha', verifyWith['signer-workflow'] === '${{ job.workflow_repository }}/.github/workflows/apps-npm-release.yml' && verifyWith['signer-digest'] === '${{ job.workflow_sha }}', json(verifyWith));
+
 // No dependency cache anywhere (including setup-node's package-manager-cache).
 const cacheHits = [];
 for (const [name, j] of Object.entries(jobs)) {
@@ -274,6 +313,47 @@ NODE
       case "$line" in PASS:*) pass "${line#PASS: }" ;; FAIL:*) fail "${line#FAIL: }" ;; esac
     done <"$WORK/parsed.out"
   fi
+fi
+
+# --- Mutants: each weakening of the workflow must make this test fail. ---
+# Skipped inside a mutant run (MUTANT_RUN) so it does not recurse.
+if [ -z "${MUTANT_RUN:-}" ] && [ -f "$YAML_DIR/package.json" ]; then
+  mutate() { # mutate NAME JOB REGEX REPLACEMENT : rewrites one match inside one job
+    node - "$REL" "$WORK/mutant.yml" "$2" "$3" "$4" <<'NODE'
+const fs = require('node:fs');
+const [src, dst, job, pattern, replacement] = process.argv.slice(2);
+const text = fs.readFileSync(src, 'utf8');
+const start = text.search(new RegExp(`^  ${job}:$`, 'm'));
+if (start < 0) process.exit(2);
+const rest = text.slice(start + 1);
+const next = rest.search(/^  [a-z][a-z0-9_-]*:$/m);
+const end = next < 0 ? text.length : start + 1 + next;
+const block = text.slice(start, end);
+const re = new RegExp(pattern);
+if (!re.test(block)) process.exit(3);
+fs.writeFileSync(dst, text.slice(0, start) + block.replace(re, replacement) + text.slice(end));
+NODE
+  }
+  expect_mutant_fails() { # expect_mutant_fails NAME JOB REGEX REPLACEMENT
+    if ! mutate "$@"; then fail "mutant applies: $1"; return; fi
+    MUTANT_RUN=1 bash "$0" "$WORK/mutant.yml" "$TRIG" >/dev/null 2>&1
+    [ $? -ne 0 ]
+    check "mutant fails the test: $1" $?
+  }
+  expect_mutant_fails "finalize drops attest from needs" finalize 'needs: \[version, build, attest, publish\]' 'needs: [version, build, publish]'
+  expect_mutant_fails "finalize accepts skipped publish with tarballs" finalize "needs\.build\.outputs\.has_tarballs == 'true'\s+&& needs\.attest\.result == 'success'\s+&& needs\.publish\.result == 'success'\)" "needs.publish.result == 'success')"
+  expect_mutant_fails "finalize accepts a failed attest with tarballs" finalize "needs\.attest\.result == 'success'" "needs.attest.result != 'cancelled'"
+  expect_mutant_fails "attest gains a run step" attest '      - uses: actions/attest-build-provenance' '      - run: echo hi
+      - uses: actions/attest-build-provenance'
+  expect_mutant_fails "attest installs with pnpm" attest '      - uses: actions/attest-build-provenance' '      - uses: pnpm/action-setup@41ff72655975bd51cab0327fa583b6e92b6d3061 # v4.2.0
+      - uses: actions/attest-build-provenance'
+  expect_mutant_fails "attest guard is conditional" attest '(      - uses: \./\.pipelines/\.github/actions/release-guard)' '$1
+        if: false'
+  expect_mutant_fails "attest step continues on error" attest '(uses: actions/attest-build-provenance@[^\n]*)' '$1
+        continue-on-error: true'
+  expect_mutant_fails "attest subject-path is widened" attest 'npm-tarballs/\*\.tgz' 'npm-tarballs/*'
+  expect_mutant_fails "publish hard-codes the signer workflow" publish 'signer-workflow: [^\n]*' 'signer-workflow: 0xPolygon/pipelines/.github/workflows/apps-npm-release.yml'
+  expect_mutant_fails "publish drops the signer digest" publish '\n          signer-digest: [^\n]*' ''
 fi
 
 echo ""
