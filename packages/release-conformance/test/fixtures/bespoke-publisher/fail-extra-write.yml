@@ -1,0 +1,14 @@
+name: publisher with another write scope
+on:
+  push:
+    branches: [main]
+permissions: {}
+jobs:
+  publish:
+    runs-on: ubuntu-latest
+    environment: npm-publish
+    permissions:
+      id-token: write
+      contents: write
+    steps:
+      - run: npm publish

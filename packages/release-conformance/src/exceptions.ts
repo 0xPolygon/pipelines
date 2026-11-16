@@ -18,7 +18,10 @@ export const WAIVABLE_RULE_IDS: readonly string[] = [
   'publisher/split',
   'publisher/no-cache',
   'publisher/environment',
-  'publisher/events'
+  'publisher/events',
+  // Waivable for now: whether a publishing workflow_dispatch may ever be waived follows the
+  // snapshot-release decision.
+  'publisher/publishing-dispatch'
 ];
 
 /**
@@ -31,7 +34,6 @@ export const NEVER_WAIVABLE_RULE_IDS: readonly string[] = [
   'caller/secrets-inherit',
   'caller/pull-request-target',
   'caller/publish-permission-scope',
-  'publisher/publishing-dispatch',
   'publisher/pull-request-target',
   'publisher/id-token-with-code'
 ];

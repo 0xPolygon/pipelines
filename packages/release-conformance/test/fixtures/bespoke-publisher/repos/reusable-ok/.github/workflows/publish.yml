@@ -1,0 +1,12 @@
+name: reusable publisher
+on:
+  workflow_call:
+permissions: {}
+jobs:
+  publish:
+    runs-on: ubuntu-latest
+    environment: npm-publish
+    permissions:
+      id-token: write
+    steps:
+      - run: npm publish

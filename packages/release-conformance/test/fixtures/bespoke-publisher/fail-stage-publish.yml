@@ -1,0 +1,12 @@
+name: stage-only publishing without an environment
+on:
+  push:
+    branches: [main]
+permissions: {}
+jobs:
+  publish:
+    runs-on: ubuntu-latest
+    permissions:
+      id-token: write
+    steps:
+      - run: npm stage publish

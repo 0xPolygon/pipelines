@@ -1,4 +1,4 @@
-# release-conformance-exception: publisher/publishing-dispatch until 2027-01-31 trying to waive a protected rule
+# release-conformance-exception: publisher/id-token-with-code until 2027-01-31 trying to waive a protected rule
 name: example
 on:
   push:

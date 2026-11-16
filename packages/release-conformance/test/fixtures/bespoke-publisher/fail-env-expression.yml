@@ -1,0 +1,13 @@
+name: environment as an expression
+on:
+  push:
+    branches: [main]
+permissions: {}
+jobs:
+  publish:
+    runs-on: ubuntu-latest
+    environment: ${{ vars.TARGET }}
+    permissions:
+      id-token: write
+    steps:
+      - run: npm publish

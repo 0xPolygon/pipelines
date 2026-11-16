@@ -1,0 +1,11 @@
+name: trigger
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+permissions: {}
+jobs:
+  call:
+    permissions:
+      id-token: write
+    uses: ./.github/workflows/publish.yml

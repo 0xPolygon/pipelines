@@ -162,7 +162,7 @@ suite('exception markers', () => {
 
   test('a rule that cannot be waived ignores the marker and reports it refused', () => {
     const file = fromFixture('marker-never-waivable.yml');
-    const target = finding({ ruleId: 'publisher/publishing-dispatch', file: file.model.file });
+    const target = finding({ ruleId: 'publisher/id-token-with-code', file: file.model.file });
     const result = run({ files: [file], findings: [target] });
     assert.ok(result.findings.includes(target));
     assert.deepEqual(result.exceptions, []);
