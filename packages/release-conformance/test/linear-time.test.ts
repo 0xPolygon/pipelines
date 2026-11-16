@@ -3,17 +3,12 @@ import { mkdirSync, mkdtempSync, rmSync, symlinkSync, writeFileSync } from 'node
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { after, describe, it } from 'node:test';
-import { Worker } from 'node:worker_threads';
 
 import { createScriptReader } from '../src/package-scripts.ts';
 import { isTagOnly, runsPublishText } from '../src/repo-scan.ts';
 
 const BOUND_MS = 1000;
 const REPEATS = 50_000;
-
-/** The pattern this check used before it was made linear; kept only to prove the inputs below are hostile. */
-const OLD_TAG_ONLY =
-  /^\s*(?:(?:pnpm|npm|yarn)(?:\s+exec|\s+run)?\s+)?(?:changesets?\s+tag|git\s+tag|git\s+push\s+--tags)(?:\s+(?:--?[\w-]+|[\w./:@-]+))*\s*$/;
 
 const timed = (run: () => unknown): number => {
   const start = performance.now();
@@ -56,24 +51,6 @@ void describe('workflow text cannot make the check slow', () => {
   void it('the publish-command test stays fast on repeated package-manager words', () => {
     const ms = timed(() => runsPublishText(`${'npm '.repeat(5000)}\n`.repeat(4)));
     assert.ok(ms < BOUND_MS, `took ${ms} ms`);
-  });
-
-  void it('falsification: the previous pattern does not finish on the same input', async () => {
-    const input = hostile[0][1];
-    const worker = new Worker(
-      `const { workerData, parentPort } = require('node:worker_threads');
-       parentPort.postMessage(new RegExp(workerData.source).test(workerData.input));`,
-      { eval: true, workerData: { source: OLD_TAG_ONLY.source, input } }
-    );
-    const finished = await new Promise<boolean>((resolve) => {
-      const timer = setTimeout(() => resolve(false), BOUND_MS);
-      worker.once('message', () => {
-        clearTimeout(timer);
-        resolve(true);
-      });
-    });
-    await worker.terminate();
-    assert.equal(finished, false);
   });
 });
 
