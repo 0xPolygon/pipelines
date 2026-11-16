@@ -1,12 +1,37 @@
-# Apps Team owns the workflows, actions, and tooling they migrated here
-# from 0xPolygon/apps-team-workflows. Other paths remain unowned by this
-# file — existing pipelines workflows keep their implicit ownership.
+# Ownership is assigned per path; when several patterns match a file, the
+# LAST matching pattern wins, so the catch-all comes first and the most
+# specific, team-owned entries come after it.
+#
+# A code owner needs write access to this repository. Any path without its
+# own entry below falls through to the catch-all.
 
+*                                              @0xPolygon/devops
+
+/.github/CODEOWNERS                            @0xPolygon/devops @0xPolygon/product-applications
+/README.md                                     @0xPolygon/devops @0xPolygon/product-applications
+
+/.github/workflows/codeql.yml                  @0xPolygon/devops
+/.github/workflows/gcp_pipeline_release_image.yaml   @0xPolygon/devops
+/.github/workflows/generate_version.yaml       @0xPolygon/devops
+/.github/workflows/ecs_deploy_docker_taskdef.yaml    @0xPolygon/devops
+/.github/workflows/npm_build_deploy_default.yaml     @0xPolygon/devops
+/Support/                                      @0xPolygon/devops
+
+/.github/workflows/ai-platform-*.yml           @0xPolygon/ai-platform
+
+# Apps Team owns the workflows, actions, and tooling it migrated here
+# from 0xPolygon/apps-team-workflows. Last, so it wins over the catch-all.
 /.github/workflows/apps-*                      @0xPolygon/product-applications
 /.github/actions/ci/                           @0xPolygon/product-applications
+/.github/actions/check-changesets-cli/         @0xPolygon/product-applications
+/.github/actions/check-dockerfile/             @0xPolygon/product-applications
+/.github/actions/check-release-tags/           @0xPolygon/product-applications
+/.github/actions/check-workspace-protocol/     @0xPolygon/product-applications
 /.github/actions/docker-test/                  @0xPolygon/product-applications
-/.github/actions/npm-release/                  @0xPolygon/product-applications
+/.github/actions/npm-pack/                     @0xPolygon/product-applications
+/.github/actions/npm-publish-tarballs/         @0xPolygon/product-applications
 /.github/actions/release-conformance/         @0xPolygon/product-applications
+/.github/actions/release-guard/                @0xPolygon/product-applications
 /.github/actions/slack-notify/                 @0xPolygon/product-applications
 /.github/actions/upsert-changeset-comment/     @0xPolygon/product-applications
 /.github/scripts/                              @0xPolygon/product-applications
