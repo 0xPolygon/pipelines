@@ -265,6 +265,28 @@ const act = fin.findIndex((st) => stepUses(st) === 'changesets/action');
 check('finalize checks @changesets/cli before changesets/action, unconditionally', cli >= 0 && act > cli && !('if' in fin[cli]));
 const art = Object.values(jobs.build?.steps ?? []).find((st) => stepUses(st) === 'actions/upload-artifact');
 check('artifact retention is 7 days', art?.with?.['retention-days'] === 7, String(art?.with?.['retention-days']));
+// Version hook: opt-in input, confined to the version job, after the guard,
+// with the job's permissions unchanged and no id-token.
+const vin = wf.on?.workflow_call?.inputs?.version_script;
+check('version_script input exists, boolean, default false, not required', isMap(vin) && vin.type === 'boolean' && vin.default === false && vin.required === false, json(vin));
+const hookJobs = Object.entries(jobs).filter(([, j]) => /ci:version|check-version-script/.test(json(j))).map(([n]) => n).join(' ');
+check('ci:version and check-version-script appear only in the version job', hookJobs === 'version', hookJobs);
+const vsteps = jobs.version?.steps ?? [];
+const vguard = vsteps.findIndex((st) => stepUses(st)?.endsWith('/release-guard'));
+const vcheck = vsteps.findIndex((st) => stepUses(st)?.endsWith('/check-version-script'));
+const vact = vsteps.findIndex((st) => stepUses(st) === 'changesets/action');
+check('version job: hook check comes after release-guard and before changesets/action', vguard >= 0 && vcheck > vguard && vact > vcheck, 'guard ' + vguard + ' check ' + vcheck + ' action ' + vact);
+check('version job: hook check runs only when version_script is true', norm(vsteps[vcheck]?.if) === 'inputs.version_script' && vsteps[vcheck]?.with?.enabled === 'true', norm(vsteps[vcheck]?.if));
+const vhook = norm(vsteps[vact]?.with?.version);
+// Counted over the parsed jobs, so comments and the input's prose description
+// (documentation, never executed) are not occurrences.
+const hookCount = (json(jobs).match(/ci:version/g) ?? []).length;
+check('ci:version appears exactly once in the jobs, as the conditional version input of the version job changesets step', hookCount === 1 && json(vsteps[vact]).includes('ci:version') && /ci:version/.test(String(vsteps[vact]?.with?.version)), 'occurrences ' + hookCount);
+check('version job: changesets/action version is pnpm run ci:version only under version_script', vhook === "${{ inputs.version_script && 'pnpm run ci:version' || '' }}", vhook);
+const vact_keys = Object.keys(vsteps[vact]?.with ?? {}).sort().join(' ');
+check('version job: changesets/action inputs are only title commit commitMode version publish', vact_keys === 'commit commitMode publish title version', vact_keys);
+check('version job: no id-token permission', isMap(jobs.version?.permissions) && !('id-token' in jobs.version.permissions));
+check('version job: permissions are exactly contents: write and pull-requests: write', json(jobs.version?.permissions) === json({ contents: 'write', 'pull-requests': 'write' }), json(jobs.version?.permissions));
 console.log(out.join('\n'));
 NODE
   if [ $? -ne 0 ]; then

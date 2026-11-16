@@ -1,0 +1,23 @@
+name: Check version script
+description: >
+  When opted in, fails unless the root package.json defines a `ci:version`
+  script. Reads the file only; nothing from the repository is executed. Run it
+  from the repository root, before the step that runs the script.
+
+inputs:
+  enabled:
+    description: "'true' to require the script; any other value skips the check."
+    required: false
+    default: 'false'
+
+runs:
+  using: composite
+  steps:
+    - name: Check the root package.json defines ci:version
+      shell: bash
+      env:
+        # Assign context values to env vars before shell use to prevent
+        # expression injection.
+        ACTION_PATH: ${{ github.action_path }}
+        ENABLED: ${{ inputs.enabled }}
+      run: node "$ACTION_PATH/check-version-script.mjs"
