@@ -396,36 +396,33 @@ See [Adding a new composite action with compiled dist](#adding-a-new-composite-a
 
 ## Pinning callers
 
-The examples above use `@main` for brevity. `@main` is a moving target: every
-merge here is picked up by every caller on its next run, including workflows
-that receive secrets and run with `id-token`/`contents: write`. Callers should
-pin to an immutable ref instead, for both reusable workflows and composite
-actions:
+Reusable workflows in this repository may be called at `@main` from a job-level
+`uses:`. This repository is review-gated, and a fix then reaches every caller on
+its next run. A composite action called from a step is different: pin it to a
+full commit SHA with a trailing comment, and let Dependabot's `github-actions`
+updates move the pin. A reusable workflow called at any ref runs this
+repository's composite actions from the same commit as itself.
 
 ```yaml
-jobs:
-  check:
-    # Prefer a full commit SHA; keep a human-readable comment with the version
-    uses: 0xPolygon/pipelines/.github/workflows/apps-ci.yml@<full-40-char-sha> # <tag or date>
+steps:
+  # Full commit SHA, with a human-readable comment
+  - uses: 0xPolygon/pipelines/.github/actions/<name>@<40-hex-sha> # <date>
 ```
 
-- **Full commit SHA** is the only ref that cannot be moved. Prefer it.
+- **Full commit SHA** is the only ref that cannot be moved. Use it for every
+  composite action called from a step.
 - **A release tag** (`@vX.Y.Z`) is acceptable when it is protected against
   re-pointing. Tags are only as immutable as the repo's tag protection.
-- Bump the pin deliberately (Dependabot's `github-actions` ecosystem or
-  Renovate can open the PRs) rather than tracking `@main`.
-- Pin the `uses:` of every job and step in the trigger file. A pinned
-  reusable workflow runs this repo's composite actions from the same commit:
-  each reusable workflow checks out `${{ job.workflow_repository }}` at
+- A reusable workflow checks out `${{ job.workflow_repository }}` at
   `${{ job.workflow_sha }}` into `.pipelines/` and calls
-  `./.pipelines/.github/actions/<name>`, never `@main`. Composite actions
-  you call directly from a trigger file are pinned by your own `uses:` ref.
-  (`job.workflow_*` is not available on GitHub Enterprise Server.)
+  `./.pipelines/.github/actions/<name>`, never `@main`. (`job.workflow_*` is
+  not available on GitHub Enterprise Server.)
 
 > **Status:** this repo does not yet publish release tags that contain the
 > current `apps-*` workflows (the existing `v1`–`v3` tags predate them), so the
-> trigger templates in this repo still show `@main`. Until a tag is cut,
-> callers should pin to a commit SHA of this repo.
+> trigger templates in this repo still show `@main` for reusable workflows.
+> Until a tag is cut, pin step-level composite actions to a commit SHA of
+> this repo.
 
 ---
 
