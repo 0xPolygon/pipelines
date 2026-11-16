@@ -10,10 +10,10 @@
 // the run then exits non-zero listing the failures.
 //
 // `npm publish` exiting 0 does not prove the version is installable: a
-// publish can be held for approval, or the registry can lag. So after each
-// publish the version document is read back from the public registry,
-// unauthenticated, and must show the sha512 integrity of the tarball this run
-// published. A version that never appears, or appears with different bytes,
+// publish can be held for approval, or the registry can lag. So once every
+// package is published, each version document is read back from the public
+// registry, unauthenticated, against one shared deadline, and must show the
+// sha512 integrity of the tarball this run published. A version that never appears, or appears with different bytes,
 // fails the step, which keeps the release's tag and GitHub Release from being
 // created for a version consumers cannot install. Output showing a staged
 // publish also fails: staged publishing is not supported.
@@ -50,12 +50,19 @@ export function foreignRegistryKeys(publishConfig) {
 }
 
 // Read-back schedule: npm validates a new version before listing it, which
-// can take minutes. Wait 15 s first, then 30 s between attempts, until the
-// total wait would pass the window. The publish job's timeout-minutes must
+// can take minutes. Wait 15 s first, then 30 s between rounds, until the
+// elapsed time would pass the window (shared by all packages). The publish job's timeout-minutes must
 // stay comfortably above this window.
 export const READ_BACK_WINDOW_MS = 10 * 60 * 1000;
 export const READ_BACK_INITIAL_DELAY_MS = 15 * 1000;
 export const READ_BACK_MAX_DELAY_MS = 30 * 1000;
+// Per-request cap so a stalled connection counts as "not visible yet" instead
+// of eating the window.
+export const READ_BACK_REQUEST_TIMEOUT_MS = 30 * 1000;
+
+// npm refuses to publish a version the registry already holds, in the client
+// (lib/commands/publish.js) and, with the same text, from the registry.
+const ALREADY_PUBLISHED_PATTERN = /cannot publish over the previously published versions/i;
 
 // What npm prints for a staged publish: "+ <id> (staged)" or
 // "+ <id> (staged with id <id>)", and "package <id> has been staged with tag
@@ -222,67 +229,110 @@ export const versionDocumentUrl = ({ name, version }) =>
   `${NPM_REGISTRY}${encodeURIComponent(name)}/${encodeURIComponent(version)}`;
 
 /**
- * Reads name@version back from the public registry (no credentials) until it
- * is visible, then compares its integrity with the tarball's. Throws when it
- * is not visible within the window or the integrity differs.
+ * One look at the public registry (no credentials). Returns
+ * { state: 'ok' }, { state: 'mismatch', seen }, or { state: 'pending', detail }.
+ * A network error, timeout, non-200, unparseable body or a document without
+ * dist.integrity is "pending": never a pass, retried while the window lasts.
  */
-export async function readBack({
-  entry,
-  integrity,
+export async function checkVersion({ entry, integrity, fetchFn, timeoutMs }) {
+  try {
+    const response = await fetchFn(versionDocumentUrl(entry), {
+      headers: { accept: 'application/json' },
+      signal: AbortSignal.timeout(timeoutMs)
+    });
+    if (response.status !== 200) {
+      return { state: 'pending', detail: `registry answered ${response.status}` };
+    }
+    const seen = (await response.json())?.dist?.integrity;
+    if (typeof seen !== 'string' || seen === '') {
+      return { state: 'pending', detail: 'registry document has no dist.integrity' };
+    }
+    return seen === integrity ? { state: 'ok' } : { state: 'mismatch', seen };
+  } catch (err) {
+    return { state: 'pending', detail: `registry lookup failed: ${err?.message ?? err}` };
+  }
+}
+
+/**
+ * Reads every pending { entry, integrity } back from the public registry
+ * against ONE shared deadline, polling the not-yet-confirmed set each round.
+ * A different integrity fails that package at once. Returns { confirmed, failed }
+ * where failed maps id -> message; the total wait never exceeds the window.
+ */
+export async function readBackAll({
+  pending,
   fetchFn = fetch,
   sleep = defaultSleep,
+  now = Date.now,
   windowMs = READ_BACK_WINDOW_MS,
   initialDelayMs = READ_BACK_INITIAL_DELAY_MS,
   maxDelayMs = READ_BACK_MAX_DELAY_MS,
+  timeoutMs = READ_BACK_REQUEST_TIMEOUT_MS,
   log = console.log
 }) {
-  const id = `${entry.name}@${entry.version}`;
-  const url = versionDocumentUrl(entry);
-  let waited = 0;
+  const start = now();
+  const confirmed = [];
+  const failed = new Map();
+  const last = new Map();
+  let open = pending;
   let delay = initialDelayMs;
-  let last = 'no response';
-  for (let attempt = 1; ; attempt++) {
-    try {
-      const response = await fetchFn(url, { headers: { accept: 'application/json' } });
-      if (response.status === 200) {
-        const document = await response.json();
-        const seen = document?.dist?.integrity;
-        if (seen === integrity) return;
-        throw new Error(
-          `${id} is on the registry but its integrity (${seen ?? 'none'}) does not match ` +
-            `the tarball this run built (${integrity}): the published bytes differ from this run's tarball`
+  for (let round = 1; open.length > 0; round++) {
+    // Requests in one round run together so a stalled one costs one timeout,
+    // not one per package.
+    const results = await Promise.all(
+      open.map((item) => checkVersion({ ...item, fetchFn, timeoutMs }))
+    );
+    const next = [];
+    open.forEach((item, i) => {
+      const id = `${item.entry.name}@${item.entry.version}`;
+      const result = results[i];
+      if (result.state === 'ok') confirmed.push(id);
+      else if (result.state === 'mismatch') {
+        failed.set(
+          id,
+          `${id} is on the registry but its integrity (${result.seen}) does not match ` +
+            `the tarball this run built (${item.integrity}): the published bytes differ from this run's tarball`
         );
+      } else {
+        last.set(id, result.detail);
+        next.push(item);
       }
-      last = `registry answered ${response.status}`;
-    } catch (err) {
-      if (/is on the registry but its integrity/.test(err.message)) throw err;
-      last = `registry lookup failed: ${err.message}`;
-    }
-    if (waited + delay > windowMs) break;
+    });
+    open = next;
+    if (open.length === 0) break;
+    const elapsed = now() - start;
+    if (elapsed + delay > windowMs) break;
     log(
-      `${id} not visible yet: attempt ${attempt}, ${Math.round(waited / 1000)}s elapsed, ${last}; ` +
+      `${open.length} version(s) not visible yet: round ${round}, ${Math.round(elapsed / 1000)}s elapsed; ` +
         `retrying in ${delay / 1000}s`
     );
     await sleep(delay);
-    waited += delay;
     delay = Math.min(delay * 2, maxDelayMs);
   }
-  throw new Error(
-    `${id} was not visible on the registry within ${Math.round(waited / 1000)}s of waiting ` +
-      `(${last}); it may be held rather than published`
-  );
+  const waited = Math.round((now() - start) / 1000);
+  for (const { entry } of open) {
+    const id = `${entry.name}@${entry.version}`;
+    failed.set(
+      id,
+      `${id} was not visible on the registry within ${waited}s of waiting ` +
+        `(${last.get(id)}); it may be held rather than published`
+    );
+  }
+  return { confirmed, failed };
 }
 
-/** Verifies and publishes every entry. Returns { published, skipped, failures }. */
+/** Publishes every entry, then reads them all back. Returns { published, skipped, failures }. */
 export async function publishAll({
   directory,
   run = defaultRun,
   log = console.log,
   fetchFn,
   sleep,
+  now,
   windowMs,
   initialDelayMs,
-  maxDelayMs
+  maxDelayMs,
+  timeoutMs
 }) {
   checkNpmVersion({ run });
   const manifest = readManifest(directory);
@@ -290,27 +340,18 @@ export async function publishAll({
   const paths = manifest.map((entry) => verifyEntry({ directory, entry }));
   manifest.forEach((entry, index) => verifyTarballIdentity({ path: paths[index], entry, run }));
 
-  const published = [];
-  const skipped = [];
+  // Phase 1: publish everything. Phase 2: verify everything against one
+  // shared deadline, so total waiting is one window however many packages.
+  const pending = [];
   const failures = [];
   for (const [index, entry] of manifest.entries()) {
     const id = `${entry.name}@${entry.version}`;
     try {
+      const integrity = sha512Integrity(readFileSync(paths[index]));
       if (isPublished({ name: entry.name, version: entry.version, run })) {
         // A re-run after a read-back timed out may find the publish landed
         // later: skip only when the registry holds this run's exact bytes.
-        await readBack({
-          entry,
-          integrity: sha512Integrity(readFileSync(paths[index])),
-          fetchFn,
-          sleep,
-          windowMs,
-          initialDelayMs,
-          maxDelayMs,
-          log
-        });
-        log(`::notice::${id} is already on the registry with the same contents; skipping`);
-        skipped.push(id);
+        pending.push({ entry, integrity, kind: 'skipped' });
         continue;
       }
       const result = run('npm', [
@@ -330,6 +371,14 @@ export async function publishAll({
         if (text.trim() !== '') log(text.trimEnd());
       }
       if (result.status !== 0) {
+        // Inside the registry's validation window a re-run does not see the
+        // version yet and publishes again; npm refuses that. Let the
+        // read-back's integrity comparison decide instead of failing outright.
+        if (ALREADY_PUBLISHED_PATTERN.test(`${result.stdout}\n${result.stderr}`)) {
+          log(`::notice::${id} was already published; checking the registry's copy`);
+          pending.push({ entry, integrity, kind: 'skipped' });
+          continue;
+        }
         throw new Error(`npm publish exited with code ${result.status}\n${result.stderr.trim()}`);
       }
       if (isStagedOutput(`${result.stdout}\n${result.stderr}`)) {
@@ -337,21 +386,39 @@ export async function publishAll({
           'npm reports a staged publish; the shared workflow does not support staged publishing yet'
         );
       }
-      await readBack({
-        entry,
-        integrity: sha512Integrity(readFileSync(paths[index])),
-        fetchFn,
-        sleep,
-        windowMs,
-        initialDelayMs,
-        maxDelayMs,
-        log
-      });
-      log(`Published ${id} with tag ${entry.tag}; read back from the registry`);
-      published.push(id);
+      pending.push({ entry, integrity, kind: 'published' });
     } catch (err) {
       log(`::error::${id}: ${err.message}`);
       failures.push(id);
+    }
+  }
+
+  const { confirmed, failed } = await readBackAll({
+    pending,
+    fetchFn,
+    sleep,
+    now,
+    windowMs,
+    initialDelayMs,
+    maxDelayMs,
+    timeoutMs,
+    log
+  });
+  const published = [];
+  const skipped = [];
+  for (const { entry, kind } of pending) {
+    const id = `${entry.name}@${entry.version}`;
+    if (failed.has(id)) {
+      log(`::error::${failed.get(id)}`);
+      failures.push(id);
+    } else if (confirmed.includes(id)) {
+      if (kind === 'skipped') {
+        log(`::notice::${id} is already on the registry with the same contents; skipping`);
+        skipped.push(id);
+      } else {
+        log(`Published ${id} with tag ${entry.tag}; read back from the registry`);
+        published.push(id);
+      }
     }
   }
   return { published, skipped, failures };

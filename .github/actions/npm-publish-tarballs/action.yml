@@ -3,12 +3,12 @@ description: >
   Publishes the tarballs listed in `<directory>/manifest.json` with the npm
   client on the runner's PATH. Before any publish it checks that every
   tarball exists inside the directory and matches its recorded SHA-256, and
-  that the npm client is new enough for OIDC trusted publishing. A version
-  A failed package does not stop the
-  others; the step exits non-zero and lists the failures. After each publish
-  the version is read back from the public registry and must show the
-  integrity of the tarball that was published, so a version that never
-  appears (or appears with different contents) fails the step. A version
+  that the npm client is new enough for OIDC trusted publishing. A failed
+  package does not stop the others; the step exits non-zero and lists the
+  failures. Once every package is published, all versions are read back from
+  the public registry within one shared wait and must show the integrity of
+  the tarball that was published, so a version that never appears (or appears
+  with different contents) fails the step. A version
   already on the registry is skipped only when its integrity matches. Staged
   publishing is not supported yet and fails. Needs no checkout
   and no install, and handles no token: authentication is the runner's OIDC

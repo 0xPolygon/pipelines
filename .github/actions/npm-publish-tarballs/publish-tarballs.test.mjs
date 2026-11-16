@@ -12,6 +12,7 @@ import {
   main,
   meetsMinimum,
   publishAll,
+  READ_BACK_REQUEST_TIMEOUT_MS,
   READ_BACK_WINDOW_MS,
   sha512Integrity,
   versionDocumentUrl
@@ -95,18 +96,29 @@ function fakeNet(answers = {}) {
     const list = answers[name] ?? [{ status: 200, integrity: integrityOf(name) }];
     const index = Math.min(served[name] ?? 0, list.length - 1);
     served[name] = (served[name] ?? 0) + 1;
-    const { status, integrity } = list[index];
-    return { status, json: async () => ({ dist: { integrity } }) };
+    const { status, integrity, fail, body, noIntegrity } = list[index];
+    if (fail) throw fail;
+    return {
+      status,
+      json: async () => {
+        if (body !== undefined) return JSON.parse(body);
+        return noIntegrity ? { name } : { dist: { integrity } };
+      }
+    };
   };
+  // A fake clock that only sleeping advances, so the shared deadline is testable.
+  let clock = 0;
+  const now = () => clock;
   const sleep = async (ms) => {
     sleeps.push(ms);
+    clock += ms;
   };
-  return { fetchFn, sleep, urls, sleeps };
+  return { fetchFn, sleep, now, urls, sleeps };
 }
 /** Default network for tests that do not care: every package visible, matching. */
 const net = () => {
-  const { fetchFn, sleep } = fakeNet();
-  return { fetchFn, sleep };
+  const { fetchFn, sleep, now } = fakeNet();
+  return { fetchFn, sleep, now };
 };
 
 describe('publishAll', () => {
@@ -328,7 +340,8 @@ describe('read-back after publish', () => {
       run,
       log: (l) => lines.push(l),
       fetchFn: network.fetchFn,
-      sleep: network.sleep
+      sleep: network.sleep,
+      now: network.now
     });
     assert.deepEqual(result.published, ['a@1.0.0']);
     assert.deepEqual(result.failures, []);
@@ -369,7 +382,7 @@ describe('read-back after publish', () => {
       network.sleeps.reduce((sum, ms) => sum + ms, 0),
       15000 + 30000 * 6
     );
-    assert.match(lines.join('\n'), /attempt 3, 45s elapsed, registry answered 404/);
+    assert.match(lines.join('\n'), /round 3, 45s elapsed/);
   });
 
   it('keeps polling for the full default window before giving up', async () => {
@@ -379,7 +392,8 @@ describe('read-back after publish', () => {
     const result = await publishAll({ directory: dir, run, log: quiet, ...network });
     assert.deepEqual(result.failures, ['a@1.0.0']);
     const total = network.sleeps.reduce((sum, ms) => sum + ms, 0);
-    assert.ok(total >= 9 * 60 * 1000 && total <= READ_BACK_WINDOW_MS);
+    assert.ok(total >= 9 * 60 * 1000 && total <= 15 * 60 * 1000, `total wait ${total}`);
+    assert.ok(READ_BACK_WINDOW_MS <= 15 * 60 * 1000);
   });
 
   it('fails when the version never becomes visible (including npm rejecting it after its scan), within a bounded wait', async () => {
@@ -444,6 +458,191 @@ describe('read-back after publish', () => {
     assert.ok(lines.includes('+ a@1.0.0'));
     assert.ok(lines.includes('npm notice published'));
     assert.equal(isStagedOutput('+ a@1.0.0'), false);
+  });
+});
+
+describe('shared read-back deadline', () => {
+  it('publishes every package before the first registry read', async () => {
+    writeManifest([entry('a'), entry('b'), entry('c')]);
+    const order = [];
+    const { run } = fakeRun();
+    const network = fakeNet();
+    const result = await publishAll({
+      directory: dir,
+      log: quiet,
+      run: (command, args) => {
+        order.push(args[0]);
+        return run(command, args);
+      },
+      fetchFn: (...a) => {
+        order.push('fetch');
+        return network.fetchFn(...a);
+      },
+      sleep: network.sleep,
+      now: network.now
+    });
+    assert.equal(result.published.length, 3);
+    const firstFetch = order.indexOf('fetch');
+    assert.equal(order.slice(firstFetch).includes('publish'), false);
+  });
+
+  it('waits one window in total for six packages that each list after about three minutes', async () => {
+    const names = ['a', 'b', 'c', 'd', 'e', 'f'];
+    writeManifest(names.map((n) => entry(n)));
+    const { run } = fakeRun();
+    const answers = Object.fromEntries(
+      names.map((n) => [
+        n,
+        [...Array(7).fill({ status: 404 }), { status: 200, integrity: integrityOf(n) }]
+      ])
+    );
+    const network = fakeNet(answers);
+    const result = await publishAll({ directory: dir, run, log: quiet, ...network });
+    assert.equal(result.published.length, 6);
+    assert.equal(
+      network.sleeps.reduce((sum, ms) => sum + ms, 0),
+      15000 + 30000 * 6
+    );
+  });
+
+  it('prints the failure list within one window when no package ever appears', async () => {
+    writeManifest([entry('a'), entry('b'), entry('c')]);
+    const { run } = fakeRun();
+    const network = fakeNet({ a: [{ status: 404 }], b: [{ status: 404 }], c: [{ status: 404 }] });
+    const lines = [];
+    const code = await main({
+      env: { TARBALL_DIRECTORY: dir },
+      run,
+      log: (l) => lines.push(l),
+      ...network
+    });
+    assert.equal(code, 1);
+    assert.ok(network.sleeps.reduce((sum, ms) => sum + ms, 0) <= 10 * 60 * 1000);
+    assert.match(lines.join('\n'), /Failed to publish: a@1\.0\.0, b@1\.0\.0, c@1\.0\.0/);
+  });
+
+  it('confirms the packages that appear and fails only those that do not', async () => {
+    writeManifest([entry('a'), entry('b')]);
+    const { run } = fakeRun();
+    const network = fakeNet({ b: [{ status: 404 }] });
+    const result = await publishAll({
+      directory: dir,
+      run,
+      log: quiet,
+      ...network,
+      windowMs: 60000
+    });
+    assert.deepEqual(result.published, ['a@1.0.0']);
+    assert.deepEqual(result.failures, ['b@1.0.0']);
+  });
+});
+
+describe('integrity algorithm', () => {
+  it('matches a known sha512 vector for fixed bytes', () => {
+    // printf 'polygon' | openssl dgst -sha512 -binary | base64, computed outside this module.
+    assert.equal(
+      sha512Integrity(Buffer.from('polygon')),
+      'sha512-89aYp8gm4YQzhK+q631nPqYz7PI0bc1iWJUUOdkYgzhlskj1bnlyaREPmz223HK97zva/d32xCkIsbs4GUPY+Q=='
+    );
+  });
+});
+
+describe('registry failure modes', () => {
+  const never = (extra) => [extra];
+  const cases = {
+    'a network error': never({ fail: new TypeError('fetch failed') }),
+    'a request timeout': never({
+      fail: Object.assign(new Error('timed out'), { name: 'TimeoutError' })
+    }),
+    'a 5xx answer': never({ status: 503 }),
+    'a non-JSON body': never({ status: 200, body: '<html>oops' }),
+    'a document without dist.integrity': never({ status: 200, noIntegrity: true })
+  };
+  for (const [label, answers] of Object.entries(cases)) {
+    it(`retries through the window and never passes on ${label}`, async () => {
+      writeManifest([entry('a')]);
+      const { run } = fakeRun();
+      const network = fakeNet({ a: answers });
+      const result = await publishAll({ directory: dir, run, log: quiet, ...network });
+      assert.deepEqual(result.published, []);
+      assert.deepEqual(result.failures, ['a@1.0.0']);
+      assert.ok(network.sleeps.length > 10);
+      assert.ok(network.sleeps.reduce((sum, ms) => sum + ms, 0) <= 10 * 60 * 1000);
+    });
+  }
+
+  it('recovers when a failing answer is followed by a good one', async () => {
+    writeManifest([entry('a')]);
+    const { run } = fakeRun();
+    const network = fakeNet({
+      a: [
+        { fail: new TypeError('fetch failed') },
+        { status: 200, body: 'x' },
+        { status: 200, integrity: integrityOf('a') }
+      ]
+    });
+    const result = await publishAll({ directory: dir, run, log: quiet, ...network });
+    assert.deepEqual(result.published, ['a@1.0.0']);
+  });
+
+  it('gives every request an abort signal bounded by the per-request timeout', async () => {
+    writeManifest([entry('a')]);
+    const { run } = fakeRun();
+    const network = fakeNet();
+    await publishAll({ directory: dir, run, log: quiet, ...network });
+    const { signal } = network.urls[0].init;
+    assert.ok(signal instanceof AbortSignal);
+    assert.ok(READ_BACK_REQUEST_TIMEOUT_MS <= 60 * 1000);
+    // A fetch that honours the signal rejects once it fires.
+    const stalled = AbortSignal.timeout(5);
+    await assert.rejects(
+      new Promise((_, reject) => stalled.addEventListener('abort', () => reject(stalled.reason))),
+      (err) => err.name === 'TimeoutError'
+    );
+  });
+});
+
+describe('re-run inside the registry validation window', () => {
+  const refusal = {
+    status: 1,
+    stdout: '',
+    stderr:
+      'npm error code E403\nnpm error 403 403 Forbidden - PUT https://registry.npmjs.org/a - You cannot publish over the previously published versions: 1.0.0.'
+  };
+
+  it('treats an already-published refusal as a read-back, passing when integrity matches', async () => {
+    writeManifest([entry('a')]);
+    const { run } = fakeRun({ publishes: { a: refusal } });
+    const result = await publishAll({ directory: dir, ...net(), run, log: quiet });
+    assert.deepEqual(result.skipped, ['a@1.0.0']);
+    assert.deepEqual(result.failures, []);
+  });
+
+  it('fails the refusal when the registry copy has different contents', async () => {
+    writeManifest([entry('a')]);
+    const { run } = fakeRun({ publishes: { a: refusal } });
+    const network = fakeNet({ a: [{ status: 200, integrity: 'sha512-BBBB' }] });
+    const result = await publishAll({ directory: dir, run, log: quiet, ...network });
+    assert.deepEqual(result.failures, ['a@1.0.0']);
+  });
+
+  it('waits for the version to list after the refusal', async () => {
+    writeManifest([entry('a')]);
+    const { run } = fakeRun({ publishes: { a: refusal } });
+    const network = fakeNet({ a: [{ status: 404 }, { status: 200, integrity: integrityOf('a') }] });
+    const result = await publishAll({ directory: dir, run, log: quiet, ...network });
+    assert.deepEqual(result.skipped, ['a@1.0.0']);
+  });
+
+  it('still fails an unrelated publish error', async () => {
+    writeManifest([entry('a')]);
+    const { run } = fakeRun({
+      publishes: {
+        a: { status: 1, stdout: '', stderr: 'npm error code E403\nForbidden - bad token' }
+      }
+    });
+    const result = await publishAll({ directory: dir, ...net(), run, log: quiet });
+    assert.deepEqual(result.failures, ['a@1.0.0']);
   });
 });
 
