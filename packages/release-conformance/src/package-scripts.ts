@@ -1,7 +1,9 @@
-import { lstatSync, readFileSync, readdirSync } from 'node:fs';
+import { readdirSync } from 'node:fs';
 import { join, posix } from 'node:path';
 
 import type { ScriptRef } from './shell-commands.ts';
+
+import { readRegularFile } from './safe-read.ts';
 
 const MAX_PACKAGE_JSON_BYTES = 1_000_000;
 const MAX_WALK_DEPTH = 5;
@@ -39,9 +41,9 @@ export const createScriptReader = (root: string): ScriptReader => {
     let scripts: Record<string, string> | undefined;
     try {
       const path = join(root, dir, 'package.json');
-      const info = lstatSync(path);
-      if (info.isFile() && info.size <= MAX_PACKAGE_JSON_BYTES) {
-        const doc: unknown = JSON.parse(readFileSync(path, 'utf8'));
+      const read = readRegularFile({ path, maxBytes: MAX_PACKAGE_JSON_BYTES });
+      if (read.kind === 'text') {
+        const doc: unknown = JSON.parse(read.text);
         if (typeof doc === 'object' && doc !== null && 'scripts' in doc) {
           const raw = doc.scripts;
           if (typeof raw === 'object' && raw !== null) {
@@ -99,6 +101,7 @@ export const createScriptReader = (root: string): ScriptReader => {
       const scripts = readScripts(dir);
       if (scripts === undefined) continue;
       for (const key of [ref.name, `pre${ref.name}`, `post${ref.name}`]) {
+        if (!Object.hasOwn(scripts, key)) continue;
         const body = scripts[key];
         if (body === undefined) continue;
         bodies.push(body);

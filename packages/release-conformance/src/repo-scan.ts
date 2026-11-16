@@ -1,4 +1,4 @@
-import { existsSync, lstatSync, readFileSync, readdirSync } from 'node:fs';
+import { existsSync, readdirSync } from 'node:fs';
 import { join, posix } from 'node:path';
 
 import { parse } from 'yaml';
@@ -22,8 +22,10 @@ import {
   sameRepository
 } from './canonical.ts';
 import { createScriptReader } from './package-scripts.ts';
+import { readRegularFile } from './safe-read.ts';
 import { analyzeShell, normalizeShell, stripShellComments } from './shell-commands.ts';
 import {
+  MAX_WORKFLOW_BYTES,
   NPM_TOKEN_KEYS,
   parseWorkflow,
   secretReferences,
@@ -44,23 +46,65 @@ const CALLEE_CHECKOUT_PREFIX = '.pipelines/';
 /** The action of the shared release workflow that publishes tarballs with the npm client; its script is not shell. */
 const CALLEE_PUBLISH_ACTION = '.github/actions/npm-publish-tarballs';
 
-/** Loose publish-command test for text that did not parse as a workflow; errs towards seeing a publish. */
-const PUBLISH_COMMAND =
-  /(?:^|[\s;&|(])(?:(?:npm|pnpm|yarn|lerna|bun)\b[^\n;&|]*?(?<![\w-])publish(?![\w-])|changesets?\s+publish(?![\w-]))/m;
-/** A `publish` input whose every line only creates tags does not publish a package. */
-const TAG_ONLY =
-  /^\s*(?:(?:pnpm|npm|yarn)(?:\s+exec|\s+run)?\s+)?(?:changesets?\s+tag|git\s+tag|git\s+push\s+--tags)(?:\s+(?:--?[\w-]+|[\w./:@-]+))*\s*$/;
+/** Characters that may sit just before a command word: whitespace, quotes and shell openers. */
+const BEFORE_COMMAND = String.raw`(?:^|[\s("'\`{])`;
+const MANAGER_WORD = new RegExp(`${BEFORE_COMMAND}(?:npm|pnpm|yarn|lerna|bun)\\b`);
+const CHANGESET_PUBLISH = new RegExp(
+  `${BEFORE_COMMAND}(?:@changesets/cli(?:@\\S*)?|changesets?)\\s+publish(?![\\w:-])`
+);
+/** The word `publish` itself, not a script such as `docs:publish` or `publish:docs`. */
+const PUBLISH_WORD = /(?<![\w:./-])publish(?![\w:-])/;
+
+/**
+ * Loose publish-command test for text the parser may not understand (wrappers
+ * such as `xargs` or `bash -c`); errs towards seeing a publish. It works one
+ * command at a time and does one pass over each, so its cost is linear in the
+ * text however the text is built.
+ */
+/** Subcommands that run some other tool; the parser reads the tool, so the loose test leaves them alone. */
+const RUNS_OTHER_TOOL = /^\s+(?:exec|dlx|x|run|run-script)(?![\w-])/;
+
+const looseRunsPublish = (text: string): boolean =>
+  CHANGESET_PUBLISH.test(text) ||
+  text.split(/[\n;&|]/).some((segment) => {
+    const manager = MANAGER_WORD.exec(segment);
+    if (manager === null) return false;
+    const rest = segment.slice(manager.index + manager[0].length);
+    return !RUNS_OTHER_TOOL.test(rest) && PUBLISH_WORD.test(rest);
+  });
+
+/** Arguments of a tag-only command: plain words and flags, with no quoting or shell syntax. */
+const TAG_ARGUMENT = /^[\w./:@-]+$/;
+const PACKAGE_MANAGERS = new Set(['pnpm', 'npm', 'yarn']);
 const NPM_TOKEN_NAME = /npm/i;
 
-export const runsPublishText = (text: string): boolean =>
-  PUBLISH_COMMAND.test(normalizeShell(text));
+export const runsPublishText = (text: string): boolean => looseRunsPublish(normalizeShell(text));
 
-const isTagOnly = (command: string): boolean =>
+/**
+ * Tokenised rather than one pattern with nested repetition, so the cost stays
+ * linear in the length of a line whatever the workflow text holds.
+ */
+const isTagOnlyLine = (line: string): boolean => {
+  const tokens = line.split(/\s+/);
+  let at = 0;
+  if (PACKAGE_MANAGERS.has(tokens[0] ?? '')) {
+    at = tokens[1] === 'exec' || tokens[1] === 'run' ? 2 : 1;
+  }
+  const [command, second, third] = [tokens[at], tokens[at + 1], tokens[at + 2]];
+  if ((command === 'changeset' || command === 'changesets') && second === 'tag') at += 2;
+  else if (command === 'git' && second === 'tag') at += 2;
+  else if (command === 'git' && second === 'push' && third === '--tags') at += 3;
+  else return false;
+  return tokens.slice(at).every((token) => TAG_ARGUMENT.test(token));
+};
+
+/** A `publish` input whose every line only creates tags does not publish a package. */
+export const isTagOnly = (command: string): boolean =>
   command
     .split('\n')
     .map((line) => line.trim())
     .filter((line) => line !== '')
-    .every((line) => TAG_ONLY.test(line));
+    .every(isTagOnlyLine);
 
 /** A secret whose name mentions npm, or any value under the variable names the npm client reads. */
 const mentionsNpmSecret = (text: string): boolean =>
@@ -114,8 +158,9 @@ const readLocalAction = ({
     const file = join(root, relative, name);
     let text: string;
     try {
-      if (!lstatSync(file).isFile()) continue;
-      text = readFileSync(file, 'utf8');
+      const read = readRegularFile({ path: file, maxBytes: MAX_WORKFLOW_BYTES });
+      if (read.kind !== 'text') continue;
+      text = read.text;
     } catch {
       continue;
     }
@@ -211,13 +256,14 @@ const scanJob = ({ job, env }: { job: JobModel; env: ScanEnvironment }): JobScan
       baseDirs,
       ...(actionPathVars === undefined ? {} : { actionPathVars })
     });
-    if (facts.publishes) publishes = true;
+    if (facts.publishes || runsPublishText(text)) publishes = true;
     if (facts.runsCode) runsCode = true;
     for (const ref of facts.scripts) {
       const found = env.reader.lookup(ref);
-      if (!found.defined) unresolved.add(ref.name);
+      if (!found.defined && ref.optional !== true) unresolved.add(ref.name);
       // One level only: the script body itself must hold an explicit publish command.
-      for (const body of found.bodies) if (analyzeShell({ text: body }).publishes) publishes = true;
+      for (const body of found.bodies)
+        if (analyzeShell({ text: body }).publishes || runsPublishText(body)) publishes = true;
     }
   };
 
@@ -312,12 +358,15 @@ const readWorkflow = ({
   file: string;
 }): WorkflowModel | undefined => {
   const path = join(root, file);
-  const info = lstatSync(path);
-  if (info.isDirectory()) return undefined;
-  if (!info.isFile()) {
+  const read = readRegularFile({ path, maxBytes: MAX_WORKFLOW_BYTES });
+  if (read.kind === 'directory') return undefined;
+  if (read.kind === 'missing' || read.kind === 'not-regular') {
     return unreadableWorkflow({ file, reason: 'the entry is not a regular file and was not read' });
   }
-  return parseWorkflow({ file, text: readFileSync(path, 'utf8') });
+  if (read.kind === 'too-large') {
+    return unreadableWorkflow({ file, reason: `file is larger than ${MAX_WORKFLOW_BYTES} bytes` });
+  }
+  return parseWorkflow({ file, text: read.text });
 };
 
 /**

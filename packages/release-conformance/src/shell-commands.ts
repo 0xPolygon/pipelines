@@ -57,6 +57,8 @@ export const normalizeShell = (text: string): string =>
 /** A package script a command runs by name, with the directories it was pointed at. */
 export interface ScriptRef {
   name: string;
+  /** A hook-style lookup (`npm test` reaches `test` if the package defines it): a missing script is not worth a notice. */
+  optional?: boolean;
   /** Directories named by `cd`, a working directory or a directory flag; empty means the repository root. */
   dirs: string[];
   /** True when the command runs in several workspace packages (`-r`, `--filter`, `--workspaces`). */
@@ -227,10 +229,12 @@ const classify = ({ words, dirs }: { words: string[]; dirs: string[] }): ShellFa
   const name = basename(first);
   if (PACKAGE_MANAGERS.has(name)) return classifyManager({ manager: name, rest, dirs });
   if (BINARY_RUNNERS.has(name)) return classifyExec({ rest, dirs });
-  if (name === 'changeset' || name === 'changesets') {
+  if (name === 'changeset' || name === 'changesets' || CHANGESETS_CLI.test(first)) {
     return { ...noFacts(), publishes: firstWord(rest) === 'publish' };
   }
-  if (name === 'node') return { ...noFacts(), runsCode: !runsOwnActionScript(rest) };
+  if (name === 'node') {
+    return { ...noFacts(), runsCode: !runsOwnActionScript(rest) && !onlyReportsVersion(rest) };
+  }
   if (name === 'make') return { ...noFacts(), runsCode: true };
   return noFacts();
 };
@@ -248,6 +252,16 @@ const runsOwnActionScript = (rest: string[]): boolean => {
   const script = firstWord(rest);
   return script !== undefined && script.startsWith(ACTION_PATH_MARK) && !script.includes('..');
 };
+
+const CHANGESETS_CLI = /^@changesets\/cli(?:@\S*)?$/;
+
+/** `node --version` and the like print a string and run no repository code. */
+const onlyReportsVersion = (rest: string[]): boolean =>
+  rest.length === 1 && ['--version', '-v', '--help', '-h'].includes(rest[0] ?? '');
+
+/** Install-style subcommands that add to the repository's dependencies, so their lifecycle hooks can run. */
+const INSTALL_SUBCOMMANDS = new Set(['install', 'i', 'ci', 'add', 'install-test', 'it']);
+const TEST_SUBCOMMANDS = new Set(['test', 't', 'install-test', 'it']);
 
 const firstWord = (tokens: string[]): string | undefined => tokens.find((t) => !t.startsWith('-'));
 
@@ -282,6 +296,7 @@ const classifyManager = ({
   const flagDirs: string[] = [];
   let wide = false;
   const words: string[] = [];
+  let global = false;
   let subIndex = -1;
   for (let index = 0; index < rest.length; index += 1) {
     const token = rest[index] ?? '';
@@ -289,6 +304,8 @@ const classifyManager = ({
       const [flag = '', inline] = token.split('=', 2);
       if (WIDE_FLAGS.has(flag) || (flag === '-w' && manager === 'npm') || flag === '--workspace')
         wide = true;
+      if (flag === '-g' || flag === '--global' || (flag === '--location' && inline === 'global'))
+        global = true;
       let value = inline;
       if (inline === undefined && flagTakesValue({ manager, flag })) {
         value = rest[index + 1];
@@ -332,13 +349,32 @@ const classifyManager = ({
   if (EXEC_SUBCOMMANDS.has(sub)) {
     return classifyExec({ rest: rest.slice(subIndex + 1), dirs: where });
   }
+  if (sub === 'global') return facts;
   if (CODE_SUBCOMMANDS.has(sub) || CODE_SCRIPTS.test(sub)) {
+    // A global install puts a tool on the machine; it does not install the repository's dependencies.
+    if (INSTALL_SUBCOMMANDS.has(sub) && global) return facts;
     facts.runsCode = true;
+    const hooks = [
+      ...(TEST_SUBCOMMANDS.has(sub) ? ['test'] : []),
+      ...(INSTALL_SUBCOMMANDS.has(sub) ? ['install', 'prepare'] : []),
+      ...(!INSTALL_SUBCOMMANDS.has(sub) && !TEST_SUBCOMMANDS.has(sub) && manager !== 'npm'
+        ? [sub]
+        : [])
+    ];
+    for (const name of hooks) facts.scripts.push({ name, optional: true, dirs: where, wide });
     return facts;
   }
-  // `pnpm <script>` and `yarn <script>` run a package script by name.
+  const known = BUILTIN_COMMANDS.has(sub) || RUN_SUBCOMMANDS.has(sub) || EXEC_SUBCOMMANDS.has(sub);
+  // A flag with a value before the subcommand (`npm --tag beta publish`) leaves the value in the
+  // subcommand's place, so `publish` among the remaining words still publishes.
+  if (!known && words.includes('publish')) {
+    facts.publishes = true;
+    return facts;
+  }
+  // `pnpm <script>` and `yarn <script>` run a package script by name, or a package binary of that name.
   if ((manager === 'pnpm' || manager === 'yarn') && !BUILTIN_COMMANDS.has(sub)) {
     facts.scripts.push({ name: sub, dirs: where, wide });
+    if (classify({ words, dirs: where }).publishes) facts.publishes = true;
   }
   return facts;
 };

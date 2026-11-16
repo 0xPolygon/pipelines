@@ -8830,7 +8830,44 @@ const applyExceptions = ({ findings, files, today }) => {
     return { findings: [...findings.filter((f) => !waived.has(f)), ...added], exceptions };
 };
 
+;// CONCATENATED MODULE: ./packages/release-conformance/src/safe-read.ts
+
+/**
+ * Reads a file through one descriptor: the type and size checks are made on the
+ * descriptor that is then read, so the path cannot be swapped between the check
+ * and the read. `O_NOFOLLOW` refuses a link as the final path component and
+ * `O_NONBLOCK` keeps the open of a pipe from waiting for a writer.
+ */
+const readRegularFile = ({ path, maxBytes }) => {
+    let fd;
+    try {
+        fd = (0,external_node_fs_namespaceObject.openSync)(path, external_node_fs_namespaceObject.constants.O_RDONLY | (external_node_fs_namespaceObject.constants.O_NOFOLLOW ?? 0) | (external_node_fs_namespaceObject.constants.O_NONBLOCK ?? 0));
+    }
+    catch (err) {
+        const code = err instanceof Error && 'code' in err ? err.code : undefined;
+        if (code === 'ENOENT' || code === 'ENOTDIR')
+            return { kind: 'missing' };
+        if (code === 'ELOOP')
+            return { kind: 'not-regular' };
+        throw err;
+    }
+    try {
+        const info = (0,external_node_fs_namespaceObject.fstatSync)(fd);
+        if (info.isDirectory())
+            return { kind: 'directory' };
+        if (!info.isFile())
+            return { kind: 'not-regular' };
+        if (info.size > maxBytes)
+            return { kind: 'too-large' };
+        return { kind: 'text', text: (0,external_node_fs_namespaceObject.readFileSync)(fd, 'utf8') };
+    }
+    finally {
+        (0,external_node_fs_namespaceObject.closeSync)(fd);
+    }
+};
+
 ;// CONCATENATED MODULE: ./packages/release-conformance/src/package-scripts.ts
+
 
 
 const MAX_PACKAGE_JSON_BYTES = 1_000_000;
@@ -8857,9 +8894,9 @@ const createScriptReader = (root) => {
         let scripts;
         try {
             const path = (0,external_node_path_namespaceObject.join)(root, dir, 'package.json');
-            const info = (0,external_node_fs_namespaceObject.lstatSync)(path);
-            if (info.isFile() && info.size <= MAX_PACKAGE_JSON_BYTES) {
-                const doc = JSON.parse((0,external_node_fs_namespaceObject.readFileSync)(path, 'utf8'));
+            const read = readRegularFile({ path, maxBytes: MAX_PACKAGE_JSON_BYTES });
+            if (read.kind === 'text') {
+                const doc = JSON.parse(read.text);
                 if (typeof doc === 'object' && doc !== null && 'scripts' in doc) {
                     const raw = doc.scripts;
                     if (typeof raw === 'object' && raw !== null) {
@@ -8929,6 +8966,8 @@ const createScriptReader = (root) => {
             if (scripts === undefined)
                 continue;
             for (const key of [ref.name, `pre${ref.name}`, `post${ref.name}`]) {
+                if (!Object.hasOwn(scripts, key))
+                    continue;
                 const body = scripts[key];
                 if (body === undefined)
                     continue;
@@ -9154,11 +9193,12 @@ const classify = ({ words, dirs }) => {
         return classifyManager({ manager: name, rest, dirs });
     if (BINARY_RUNNERS.has(name))
         return classifyExec({ rest, dirs });
-    if (name === 'changeset' || name === 'changesets') {
+    if (name === 'changeset' || name === 'changesets' || CHANGESETS_CLI.test(first)) {
         return { ...noFacts(), publishes: firstWord(rest) === 'publish' };
     }
-    if (name === 'node')
-        return { ...noFacts(), runsCode: !runsOwnActionScript(rest) };
+    if (name === 'node') {
+        return { ...noFacts(), runsCode: !runsOwnActionScript(rest) && !onlyReportsVersion(rest) };
+    }
     if (name === 'make')
         return { ...noFacts(), runsCode: true };
     return noFacts();
@@ -9175,6 +9215,12 @@ const runsOwnActionScript = (rest) => {
     const script = firstWord(rest);
     return script !== undefined && script.startsWith(ACTION_PATH_MARK) && !script.includes('..');
 };
+const CHANGESETS_CLI = /^@changesets\/cli(?:@\S*)?$/;
+/** `node --version` and the like print a string and run no repository code. */
+const onlyReportsVersion = (rest) => rest.length === 1 && ['--version', '-v', '--help', '-h'].includes(rest[0] ?? '');
+/** Install-style subcommands that add to the repository's dependencies, so their lifecycle hooks can run. */
+const INSTALL_SUBCOMMANDS = new Set(['install', 'i', 'ci', 'add', 'install-test', 'it']);
+const TEST_SUBCOMMANDS = new Set(['test', 't', 'install-test', 'it']);
 const firstWord = (tokens) => tokens.find((t) => !t.startsWith('-'));
 /** `<runner> [flags] <command ...>`: runs another command, which is repository code unless it only publishes. */
 const classifyExec = ({ rest, dirs }) => {
@@ -9200,6 +9246,7 @@ const classifyManager = ({ manager, rest, dirs }) => {
     const flagDirs = [];
     let wide = false;
     const words = [];
+    let global = false;
     let subIndex = -1;
     for (let index = 0; index < rest.length; index += 1) {
         const token = rest[index] ?? '';
@@ -9207,6 +9254,8 @@ const classifyManager = ({ manager, rest, dirs }) => {
             const [flag = '', inline] = token.split('=', 2);
             if (WIDE_FLAGS.has(flag) || (flag === '-w' && manager === 'npm') || flag === '--workspace')
                 wide = true;
+            if (flag === '-g' || flag === '--global' || (flag === '--location' && inline === 'global'))
+                global = true;
             let value = inline;
             if (inline === undefined && flagTakesValue({ manager, flag })) {
                 value = rest[index + 1];
@@ -9253,13 +9302,36 @@ const classifyManager = ({ manager, rest, dirs }) => {
     if (EXEC_SUBCOMMANDS.has(sub)) {
         return classifyExec({ rest: rest.slice(subIndex + 1), dirs: where });
     }
+    if (sub === 'global')
+        return facts;
     if (CODE_SUBCOMMANDS.has(sub) || CODE_SCRIPTS.test(sub)) {
+        // A global install puts a tool on the machine; it does not install the repository's dependencies.
+        if (INSTALL_SUBCOMMANDS.has(sub) && global)
+            return facts;
         facts.runsCode = true;
+        const hooks = [
+            ...(TEST_SUBCOMMANDS.has(sub) ? ['test'] : []),
+            ...(INSTALL_SUBCOMMANDS.has(sub) ? ['install', 'prepare'] : []),
+            ...(!INSTALL_SUBCOMMANDS.has(sub) && !TEST_SUBCOMMANDS.has(sub) && manager !== 'npm'
+                ? [sub]
+                : [])
+        ];
+        for (const name of hooks)
+            facts.scripts.push({ name, optional: true, dirs: where, wide });
         return facts;
     }
-    // `pnpm <script>` and `yarn <script>` run a package script by name.
+    const known = BUILTIN_COMMANDS.has(sub) || RUN_SUBCOMMANDS.has(sub) || EXEC_SUBCOMMANDS.has(sub);
+    // A flag with a value before the subcommand (`npm --tag beta publish`) leaves the value in the
+    // subcommand's place, so `publish` among the remaining words still publishes.
+    if (!known && words.includes('publish')) {
+        facts.publishes = true;
+        return facts;
+    }
+    // `pnpm <script>` and `yarn <script>` run a package script by name, or a package binary of that name.
     if ((manager === 'pnpm' || manager === 'yarn') && !BUILTIN_COMMANDS.has(sub)) {
         facts.scripts.push({ name: sub, dirs: where, wide });
+        if (classify({ words, dirs: where }).publishes)
+            facts.publishes = true;
     }
     return facts;
 };
@@ -9596,6 +9668,7 @@ const parseWorkflow = ({ file, text }) => {
 
 
 
+
 const WORKFLOW_DIR = '.github/workflows';
 const LOCAL_WORKFLOW_PREFIX = './.github/workflows/';
 const LOCAL_ACTION_DIR = '.github/actions/';
@@ -9607,17 +9680,60 @@ const LOCAL_ACTION_DIR = '.github/actions/';
 const CALLEE_CHECKOUT_PREFIX = '.pipelines/';
 /** The action of the shared release workflow that publishes tarballs with the npm client; its script is not shell. */
 const CALLEE_PUBLISH_ACTION = '.github/actions/npm-publish-tarballs';
-/** Loose publish-command test for text that did not parse as a workflow; errs towards seeing a publish. */
-const PUBLISH_COMMAND = /(?:^|[\s;&|(])(?:(?:npm|pnpm|yarn|lerna|bun)\b[^\n;&|]*?(?<![\w-])publish(?![\w-])|changesets?\s+publish(?![\w-]))/m;
-/** A `publish` input whose every line only creates tags does not publish a package. */
-const TAG_ONLY = /^\s*(?:(?:pnpm|npm|yarn)(?:\s+exec|\s+run)?\s+)?(?:changesets?\s+tag|git\s+tag|git\s+push\s+--tags)(?:\s+(?:--?[\w-]+|[\w./:@-]+))*\s*$/;
+/** Characters that may sit just before a command word: whitespace, quotes and shell openers. */
+const BEFORE_COMMAND = String.raw `(?:^|[\s("'\`{])`;
+const MANAGER_WORD = new RegExp(`${BEFORE_COMMAND}(?:npm|pnpm|yarn|lerna|bun)\\b`);
+const CHANGESET_PUBLISH = new RegExp(`${BEFORE_COMMAND}(?:@changesets/cli(?:@\\S*)?|changesets?)\\s+publish(?![\\w:-])`);
+/** The word `publish` itself, not a script such as `docs:publish` or `publish:docs`. */
+const PUBLISH_WORD = /(?<![\w:./-])publish(?![\w:-])/;
+/**
+ * Loose publish-command test for text the parser may not understand (wrappers
+ * such as `xargs` or `bash -c`); errs towards seeing a publish. It works one
+ * command at a time and does one pass over each, so its cost is linear in the
+ * text however the text is built.
+ */
+/** Subcommands that run some other tool; the parser reads the tool, so the loose test leaves them alone. */
+const RUNS_OTHER_TOOL = /^\s+(?:exec|dlx|x|run|run-script)(?![\w-])/;
+const looseRunsPublish = (text) => CHANGESET_PUBLISH.test(text) ||
+    text.split(/[\n;&|]/).some((segment) => {
+        const manager = MANAGER_WORD.exec(segment);
+        if (manager === null)
+            return false;
+        const rest = segment.slice(manager.index + manager[0].length);
+        return !RUNS_OTHER_TOOL.test(rest) && PUBLISH_WORD.test(rest);
+    });
+/** Arguments of a tag-only command: plain words and flags, with no quoting or shell syntax. */
+const TAG_ARGUMENT = /^[\w./:@-]+$/;
+const repo_scan_PACKAGE_MANAGERS = new Set(['pnpm', 'npm', 'yarn']);
 const NPM_TOKEN_NAME = /npm/i;
-const runsPublishText = (text) => PUBLISH_COMMAND.test(normalizeShell(text));
+const runsPublishText = (text) => looseRunsPublish(normalizeShell(text));
+/**
+ * Tokenised rather than one pattern with nested repetition, so the cost stays
+ * linear in the length of a line whatever the workflow text holds.
+ */
+const isTagOnlyLine = (line) => {
+    const tokens = line.split(/\s+/);
+    let at = 0;
+    if (repo_scan_PACKAGE_MANAGERS.has(tokens[0] ?? '')) {
+        at = tokens[1] === 'exec' || tokens[1] === 'run' ? 2 : 1;
+    }
+    const [command, second, third] = [tokens[at], tokens[at + 1], tokens[at + 2]];
+    if ((command === 'changeset' || command === 'changesets') && second === 'tag')
+        at += 2;
+    else if (command === 'git' && second === 'tag')
+        at += 2;
+    else if (command === 'git' && second === 'push' && third === '--tags')
+        at += 3;
+    else
+        return false;
+    return tokens.slice(at).every((token) => TAG_ARGUMENT.test(token));
+};
+/** A `publish` input whose every line only creates tags does not publish a package. */
 const isTagOnly = (command) => command
     .split('\n')
     .map((line) => line.trim())
     .filter((line) => line !== '')
-    .every((line) => TAG_ONLY.test(line));
+    .every(isTagOnlyLine);
 /** A secret whose name mentions npm, or any value under the variable names the npm client reads. */
 const mentionsNpmSecret = (text) => secretReferences(text).some((name) => NPM_TOKEN_NAME.test(name));
 const isNpmTokenRef = ({ key, expression }) => NPM_TOKEN_KEYS.has(key.toUpperCase()) || mentionsNpmSecret(expression);
@@ -9646,9 +9762,10 @@ const readLocalAction = ({ root, path, calleeContext }) => {
         const file = (0,external_node_path_namespaceObject.join)(root, relative, name);
         let text;
         try {
-            if (!(0,external_node_fs_namespaceObject.lstatSync)(file).isFile())
+            const read = readRegularFile({ path: file, maxBytes: MAX_WORKFLOW_BYTES });
+            if (read.kind !== 'text')
                 continue;
-            text = (0,external_node_fs_namespaceObject.readFileSync)(file, 'utf8');
+            text = read.text;
         }
         catch {
             continue;
@@ -9727,17 +9844,17 @@ const scanJob = ({ job, env }) => {
             baseDirs,
             ...(actionPathVars === undefined ? {} : { actionPathVars })
         });
-        if (facts.publishes)
+        if (facts.publishes || runsPublishText(text))
             publishes = true;
         if (facts.runsCode)
             runsCode = true;
         for (const ref of facts.scripts) {
             const found = env.reader.lookup(ref);
-            if (!found.defined)
+            if (!found.defined && ref.optional !== true)
                 unresolved.add(ref.name);
             // One level only: the script body itself must hold an explicit publish command.
             for (const body of found.bodies)
-                if (shell_commands_analyzeShell({ text: body }).publishes)
+                if (shell_commands_analyzeShell({ text: body }).publishes || runsPublishText(body))
                     publishes = true;
         }
     };
@@ -9824,13 +9941,16 @@ const listWorkflowFiles = (root) => {
  */
 const readWorkflow = ({ root, file }) => {
     const path = (0,external_node_path_namespaceObject.join)(root, file);
-    const info = (0,external_node_fs_namespaceObject.lstatSync)(path);
-    if (info.isDirectory())
+    const read = readRegularFile({ path, maxBytes: MAX_WORKFLOW_BYTES });
+    if (read.kind === 'directory')
         return undefined;
-    if (!info.isFile()) {
+    if (read.kind === 'missing' || read.kind === 'not-regular') {
         return unreadableWorkflow({ file, reason: 'the entry is not a regular file and was not read' });
     }
-    return parseWorkflow({ file, text: (0,external_node_fs_namespaceObject.readFileSync)(path, 'utf8') });
+    if (read.kind === 'too-large') {
+        return unreadableWorkflow({ file, reason: `file is larger than ${MAX_WORKFLOW_BYTES} bytes` });
+    }
+    return parseWorkflow({ file, text: read.text });
 };
 /**
  * Events that can start a workflow. A reusable workflow is started by whatever
@@ -9994,16 +10114,17 @@ const splitFindings = (params) => {
 };
 const CACHE_ACTION = /^actions\/cache(?:\/(?:restore|save))?$/i;
 const SETUP_NODE_ACTION = /^actions\/setup-node$/i;
-/** From this major version `actions/setup-node` caches npm dependencies unless told not to. */
-const SETUP_NODE_DEFAULT_CACHE_MAJOR = 6;
+/** From this major version `actions/setup-node` caches dependencies unless told not to. */
+const SETUP_NODE_DEFAULT_CACHE_MAJOR = 5;
 const actionName = (step) => step.uses && !step.uses.local
     ? `${step.uses.owner}/${step.uses.repo}${step.uses.path === '' ? '' : `/${step.uses.path}`}`
     : undefined;
 /**
- * `actions/setup-node` from v6 caches npm dependencies on its own when
- * `package.json` names npm as the package manager, and `package-manager-cache: false`
- * turns that off. The workflow file cannot show what `package.json` says, so the
- * opt-out is required whenever the action's major version is 6 or later, or
+ * `actions/setup-node` from v5 caches dependencies on its own when `package.json`
+ * has a `packageManager` field (v6 narrowed that to npm), and
+ * `package-manager-cache: false` turns that off. The workflow file cannot show
+ * what `package.json` says, so the opt-out is required whenever the action's
+ * major version is 5 or later, or
  * cannot be told (a branch, or a commit SHA with no version comment). A commit
  * SHA is pinned with the version in a trailing comment on the `uses:` line
  * (`@<sha> # v4.4.0`); that comment supplies the major version.

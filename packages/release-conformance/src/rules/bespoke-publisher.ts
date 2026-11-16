@@ -134,8 +134,8 @@ const splitFindings = (params: RuleParams): Finding[] => {
 const CACHE_ACTION = /^actions\/cache(?:\/(?:restore|save))?$/i;
 
 const SETUP_NODE_ACTION = /^actions\/setup-node$/i;
-/** From this major version `actions/setup-node` caches npm dependencies unless told not to. */
-const SETUP_NODE_DEFAULT_CACHE_MAJOR = 6;
+/** From this major version `actions/setup-node` caches dependencies unless told not to. */
+const SETUP_NODE_DEFAULT_CACHE_MAJOR = 5;
 
 const actionName = (step: StepModel): string | undefined =>
   step.uses && !step.uses.local
@@ -143,10 +143,11 @@ const actionName = (step: StepModel): string | undefined =>
     : undefined;
 
 /**
- * `actions/setup-node` from v6 caches npm dependencies on its own when
- * `package.json` names npm as the package manager, and `package-manager-cache: false`
- * turns that off. The workflow file cannot show what `package.json` says, so the
- * opt-out is required whenever the action's major version is 6 or later, or
+ * `actions/setup-node` from v5 caches dependencies on its own when `package.json`
+ * has a `packageManager` field (v6 narrowed that to npm), and
+ * `package-manager-cache: false` turns that off. The workflow file cannot show
+ * what `package.json` says, so the opt-out is required whenever the action's
+ * major version is 5 or later, or
  * cannot be told (a branch, or a commit SHA with no version comment). A commit
  * SHA is pinned with the version in a trailing comment on the `uses:` line
  * (`@<sha> # v4.4.0`); that comment supplies the major version.
