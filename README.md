@@ -256,8 +256,8 @@ skips `publish` and is tagged by `finalize` without any approval.
   registry hangs, each attempt can run to its 30 s timeout, so a package can
   wait about 96 s (3 × 30 s plus the 2 s and 4 s waits) before its publish,
   and a release of a dozen or more packages could reach the publish job's
-  20-minute limit; that fails closed, and a re-run skips what was published. A stable version
-  above `latest` (or any stable version while `latest` is a prerelease), or a
+  20-minute limit; that fails closed, and a re-run skips what was published.
+  A stable version above `latest` (or any stable version while `latest` is a prerelease), or a
   package's first publish, gets `latest`. An older (or
   equal) stable version gets `previous`; `previous` always names the most recently
   published older stable version. A prerelease never gets `latest`: it keeps the tag recorded at pack time (changesets' pre tag; when only

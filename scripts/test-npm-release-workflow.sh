@@ -246,7 +246,7 @@ const dl = pubSteps.findIndex((st) => stepUses(st) === 'actions/download-artifac
 const pb = pubSteps.findIndex((st) => stepUses(st)?.endsWith('/npm-publish-tarballs'));
 check('publish downloads before it publishes', dl >= 0 && pb > dl);
 const sn = pubSteps[0]?.with ?? {};
-check('publish setup-node: exact node-version, check-latest false, no cache keys', /^\d+\.\d+\.\d+$/.test(String(sn['node-version'])) && sn['check-latest'] === false && !('cache' in sn) && !('package-manager-cache' in sn));
+check('publish setup-node: exact node-version, check-latest false, no cache, package-manager-cache absent or false', /^\d+\.\d+\.\d+$/.test(String(sn['node-version'])) && sn['check-latest'] === false && !('cache' in sn) && (!('package-manager-cache' in sn) || sn['package-manager-cache'] === false));
 
 // No dependency cache anywhere (including setup-node's package-manager-cache).
 const cacheHits = [];
@@ -267,7 +267,7 @@ const nodeSteps = Object.entries(jobs).flatMap(([name, j]) => (j.steps ?? []).fi
 const rawNodeLines = rawLines.filter((l) => /^\s*-?\s*uses:\s*actions\/setup-node@/.test(l));
 check('every setup-node step is found in the raw text and the parsed jobs', nodeSteps.length > 0 && nodeSteps.length === rawNodeLines.length, `parsed ${nodeSteps.length}, raw ${rawNodeLines.length}`);
 const nodeBad = rawNodeLines.flatMap((line, i) => {
-  const major = Number((/#\s*v(\d+)\.\d+\.\d+\s*$/.exec(line) ?? [])[1]);
+  const major = Number((/#\s*v(\d+)\.\d+\.\d+\s*(?:#.*)?$/.exec(line) ?? [])[1]);
   const w = nodeSteps[i]?.st.with ?? {};
   const why = [];
   if (!Number.isInteger(major)) why.push('no version comment');
@@ -309,7 +309,7 @@ check('finalize corrects Latest once, after changesets/action', fix > act && fin
 check('finalize passes the recorded Latest to the correction through env, not the script text', !/steps\./.test(String(fin[fix]?.with?.script ?? '')) && /previous-latest\.outputs\.previous-id/.test(fin[fix]?.env?.PREVIOUS_LATEST_ID ?? ''));
 check('both Latest github-script steps retry transient API errors', fin[rec]?.with?.retries === 3 && fin[fix]?.with?.retries === 3, json([fin[rec]?.with?.retries, fin[fix]?.with?.retries]));
 check('the Latest record step is unconditional', !('if' in fin[rec]));
-check('the Latest correction runs only when changesets/action created a Release', fin[fix]?.if === "steps.changesets.outputs.published == 'true'" && fin[act]?.id === 'changesets', json(fin[fix]?.if));
+check('the Latest correction runs only when changesets/action reports a new tag (published)', fin[fix]?.if === "steps.changesets.outputs.published == 'true'" && fin[act]?.id === 'changesets', json(fin[fix]?.if));
 const tagCheck = fin.findIndex((st) => stepUses(st)?.endsWith('/check-release-tags'));
 check('finalize checks release tags before the Latest correction', tagCheck > act && tagCheck < fix, `check-release-tags at ${tagCheck}, correction at ${fix}`);
 // The checkout the correction loads its script from is unconditional (a
@@ -355,6 +355,12 @@ const vwant = [
 ];
 const vhave = vsteps.map(vsig);
 check('version steps are exactly the allowlist, in order', json(vhave) === json(vwant), json(vhave));
+// The allowlist does not look at a step's shell, env or with values, or at
+// job-level defaults, so the literal hook is also counted over the parsed
+// jobs (comments and the input's description are not occurrences).
+const hookCount = (json(jobs).match(/ci:version/g) ?? []).length;
+check('ci:version appears exactly once in the jobs, as the conditional version input of the version job changesets step', hookCount === 1 && /ci:version/.test(String(vsteps[vact]?.with?.version)), 'occurrences ' + hookCount);
+check('version job has no job-level defaults', !('defaults' in (jobs.version ?? {})), json(jobs.version?.defaults));
 check('version job: changesets/action version is pnpm run ci:version only under version_script', vhook === "${{ inputs.version_script && 'pnpm run ci:version' || '' }}", vhook);
 const vact_keys = Object.keys(vsteps[vact]?.with ?? {}).sort().join(' ');
 check('version job: changesets/action inputs are only title commit commitMode version publish', vact_keys === 'commit commitMode publish title version', vact_keys);
