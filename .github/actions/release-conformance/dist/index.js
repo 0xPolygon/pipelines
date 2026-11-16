@@ -9064,6 +9064,22 @@ const normalizeShell = (text) => stripShellComments(text.replace(/\\\r?\n/g, ' '
  * `publish:docs`) is not. A single anchored test, so the cost is linear in the word.
  */
 const isPublishWord = (word) => /^publish(?:[^A-Za-z0-9_:-]|$)/.test(word);
+/**
+ * npm resolves any unambiguous prefix of a command name, and `pu`, `pub`, `publ`, `publi` and `publis`
+ * all resolve to `publish` (checked with the npm command table: `p` alone is ambiguous). Other managers
+ * are not given prefixes here: none is known to accept them.
+ */
+const isNpmPublishWord = (word) => /^pu(?:b(?:l(?:i(?:s(?:h)?)?)?)?)?(?:[^A-Za-z0-9_:-]|$)/.test(word);
+/** The publish-word test for one tool: npm also accepts its abbreviations. */
+const publishWordTest = (tool) => tool === 'npm' ? isNpmPublishWord : isPublishWord;
+/**
+ * Drops an `@<version or tag>` suffix from a tool word (`npm@11` is `npm`, `@changesets/cli@3` is
+ * `@changesets/cli`), so a pinned or tagged tool is read as the tool. The scope's own leading `@` stays.
+ */
+const stripVersion = (word) => {
+    const at = word.indexOf('@', 1);
+    return at > 0 ? word.slice(0, at) : word;
+};
 const noFacts = () => ({ publishes: false, runsCode: false, scripts: [] });
 const merge = (into, from) => {
     if (from.publishes)
@@ -9376,7 +9392,7 @@ const classify = ({ words, dirs, depth = 0 }) => {
     if (depth > MAX_DEPTH)
         return tooDeepFacts();
     const [first = '', ...rest] = words;
-    const name = basename(first);
+    const name = stripVersion(basename(first));
     const inner = (next) => next.length === 0 ? noFacts() : classify({ words: next, dirs, depth: depth + 1 });
     if (PACKAGE_MANAGERS.has(name))
         return classifyManager({ manager: name, rest, dirs, depth });
@@ -9385,8 +9401,9 @@ const classify = ({ words, dirs, depth = 0 }) => {
     if (name === 'changeset' || name === 'changesets' || CHANGESETS_CLI.test(first)) {
         return { ...noFacts(), publishes: isPublishWord(firstWord(rest) ?? '') };
     }
-    if (WRAPPER_VALUE_FLAGS.has(name))
+    if (WRAPPER_VALUE_FLAGS.has(name) || name === 'corepack') {
         return inner(wrappedCommand({ name, rest }));
+    }
     if (SHELL_NAMES.has(name))
         return inner(shellCommandString(rest));
     if (name === 'find')
@@ -9471,6 +9488,7 @@ const classifyManager = ({ manager, rest, dirs, depth }) => {
     }
     const [sub, second, third] = words;
     const where = [...flagDirs, ...dirs];
+    const isPublish = publishWordTest(manager);
     if (sub === undefined) {
         // A bare `yarn` installs dependencies.
         facts.runsCode = manager === 'yarn';
@@ -9478,11 +9496,11 @@ const classifyManager = ({ manager, rest, dirs, depth }) => {
     }
     if (sub === 'foreach' || sub === 'workspaces')
         wide = true;
-    if (isPublishWord(sub)) {
+    if (isPublish(sub)) {
         facts.publishes = true;
         return facts;
     }
-    if (WRAPPING_SUBCOMMANDS.has(sub) && words.slice(1).some(isPublishWord)) {
+    if (WRAPPING_SUBCOMMANDS.has(sub) && words.slice(1).some(isPublish)) {
         facts.publishes = true;
         return facts;
     }
@@ -9523,7 +9541,7 @@ const classifyManager = ({ manager, rest, dirs, depth }) => {
     const known = BUILTIN_COMMANDS.has(sub) || RUN_SUBCOMMANDS.has(sub) || EXEC_SUBCOMMANDS.has(sub);
     // npm and lerna take no bare script or binary name, so a word before `publish` can only be the
     // value of a flag this parser does not know (`npm --tag beta publish`); `publish` still publishes.
-    if (!known && (manager === 'npm' || manager === 'lerna') && words.some(isPublishWord)) {
+    if (!known && (manager === 'npm' || manager === 'lerna') && words.some(isPublish)) {
         facts.publishes = true;
         return facts;
     }
@@ -9887,15 +9905,37 @@ const CALLEE_CHECKOUT_PREFIX = '.pipelines/';
 /** The action of the shared release workflow that publishes tarballs with the npm client; its script is not shell. */
 const CALLEE_PUBLISH_ACTION = '.github/actions/npm-publish-tarballs';
 /** The tools whose `publish` subcommand publishes a package. */
-const PUBLISH_TOOL = /^(?:npm|pnpm|yarn|lerna|bun|changesets?|@changesets\/cli(?:@[^\s]*)?)$/;
+const PUBLISH_TOOL = /^(?:npm|pnpm|yarn|lerna|bun|changesets?|@changesets\/cli)$/;
 /** Commands that only print their arguments, so a publish named in their text is not a command. */
 const PRINTERS = new Set(['echo', 'printf']);
 /** A word between the tool and `publish` that still means the tool publishes (it names another runner). */
 const RUNNER_WORD = /^(?:exec|dlx|x|run|changesets?|lerna|npm|@changesets\/cli(?:@\S*)?)$/;
 /** Anything on a line that turns printed text into something that runs, or reads it as a command. */
 const RUNS_PRINTED_TEXT = /\$\(|`|(?:^|[^\w-])(?:eval|xargs)(?![\w-])/;
-/** Output sent somewhere (`>`, `>>`, `>(…)`), but not a descriptor copy such as `2>&1`. */
-const REDIRECTS_OUTPUT = />(?!&)/;
+/**
+ * True when a line sends output somewhere with a `>` (`>`, `>>`, `>(…)`, `&>`) outside quotes, but not a
+ * descriptor copy such as `2>&1`. An arrow inside printed text (`echo "=> skipping"`) is not a redirect.
+ * One pass over the characters, so the cost is linear in the line.
+ */
+const redirectsOutput = (line) => {
+    let quote = '';
+    for (let at = 0; at < line.length; at += 1) {
+        const char = line[at];
+        if (quote !== '') {
+            if (char === '\\' && quote === '"')
+                at += 1;
+            else if (char === quote)
+                quote = '';
+        }
+        else if (char === '\\')
+            at += 1;
+        else if (char === '"' || char === "'")
+            quote = char;
+        else if (char === '>' && line[at + 1] !== '&')
+            return true;
+    }
+    return false;
+};
 const SCRIPT_RUNNERS = new Set(['pnpm', 'yarn', 'bun']);
 const LEADING_PUNCTUATION = new Set(['(', '{', '$', '"', "'", '`']);
 const TRAILING_PUNCTUATION = new Set([')', '}', '"', "'", '`']);
@@ -9909,6 +9949,8 @@ const bareWord = (token) => {
         end -= 1;
     return token.slice(start, end);
 };
+/** A word read as a tool name: shell quoting and any `@version` or `@tag` suffix removed. */
+const toolName = (token) => stripVersion(bareWord(token));
 /** The name of the command a tokenised segment runs, past variable assignments and shell keywords. */
 const segmentCommand = (tokens) => {
     const skipped = new Set([
@@ -9949,11 +9991,12 @@ const textPublishHits = (text) => {
             const tokens = (parts[at] ?? '').split(/\s+/);
             const printer = PRINTERS.has(segmentCommand(tokens));
             const piped = parts[at + 1] === '|';
-            const redirected = printer && REDIRECTS_OUTPUT.test(line);
+            const redirected = printer && redirectsOutput(line);
             for (let index = 0; index < tokens.length; index += 1) {
-                const tool = bareWord(tokens[index] ?? '');
+                const tool = toolName(tokens[index] ?? '');
                 if (!PUBLISH_TOOL.test(tool))
                     continue;
+                const isPublish = publishWordTest(tool);
                 // Flags, the values flags take, and `$VAR` words may all sit before the word that matters; the
                 // run ends at the next tool, so every token is read once.
                 let next = index + 1;
@@ -9961,7 +10004,7 @@ const textPublishHits = (text) => {
                 while (next < tokens.length) {
                     const token = tokens[next] ?? '';
                     // `publish` is never a flag's value: a flag the check does not know cannot hide it.
-                    if (isPublishWord(bareWord(token)))
+                    if (isPublish(bareWord(token)))
                         break;
                     if (token.startsWith('-'))
                         afterFlag = !token.includes('=');
@@ -9969,18 +10012,19 @@ const textPublishHits = (text) => {
                         afterFlag = false;
                     else
                         break;
-                    if (PUBLISH_TOOL.test(bareWord(token)))
+                    if (PUBLISH_TOOL.test(toolName(token)))
                         break;
                     next += 1;
                 }
                 const word = bareWord(tokens[next] ?? '');
                 let hit;
-                if (isPublishWord(word))
+                if (isPublish(word))
                     hit = 'sure';
-                else if (word !== '' && !PUBLISH_TOOL.test(word)) {
+                else if (word !== '' && !PUBLISH_TOOL.test(stripVersion(word))) {
                     let after = next + 1;
                     while ((tokens[after] ?? '').startsWith('-'))
                         after += 1;
+                    // A runner word before the publish word (`npm run pub`) names a script, so no abbreviation here.
                     if (isPublishWord(bareWord(tokens[after] ?? '')))
                         hit = RUNNER_WORD.test(word) ? 'sure' : 'word';
                 }

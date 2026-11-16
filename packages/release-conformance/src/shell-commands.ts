@@ -82,6 +82,27 @@ export interface ShellFacts {
  */
 export const isPublishWord = (word: string): boolean => /^publish(?:[^A-Za-z0-9_:-]|$)/.test(word);
 
+/**
+ * npm resolves any unambiguous prefix of a command name, and `pu`, `pub`, `publ`, `publi` and `publis`
+ * all resolve to `publish` (checked with the npm command table: `p` alone is ambiguous). Other managers
+ * are not given prefixes here: none is known to accept them.
+ */
+export const isNpmPublishWord = (word: string): boolean =>
+  /^pu(?:b(?:l(?:i(?:s(?:h)?)?)?)?)?(?:[^A-Za-z0-9_:-]|$)/.test(word);
+
+/** The publish-word test for one tool: npm also accepts its abbreviations. */
+export const publishWordTest = (tool: string): ((word: string) => boolean) =>
+  tool === 'npm' ? isNpmPublishWord : isPublishWord;
+
+/**
+ * Drops an `@<version or tag>` suffix from a tool word (`npm@11` is `npm`, `@changesets/cli@3` is
+ * `@changesets/cli`), so a pinned or tagged tool is read as the tool. The scope's own leading `@` stays.
+ */
+export const stripVersion = (word: string): string => {
+  const at = word.indexOf('@', 1);
+  return at > 0 ? word.slice(0, at) : word;
+};
+
 const noFacts = (): ShellFacts => ({ publishes: false, runsCode: false, scripts: [] });
 
 const merge = (into: ShellFacts, from: ShellFacts): void => {
@@ -407,7 +428,7 @@ const classify = ({
 }): ShellFacts => {
   if (depth > MAX_DEPTH) return tooDeepFacts();
   const [first = '', ...rest] = words;
-  const name = basename(first);
+  const name = stripVersion(basename(first));
   const inner = (next: string[]): ShellFacts =>
     next.length === 0 ? noFacts() : classify({ words: next, dirs, depth: depth + 1 });
   if (PACKAGE_MANAGERS.has(name)) return classifyManager({ manager: name, rest, dirs, depth });
@@ -415,7 +436,9 @@ const classify = ({
   if (name === 'changeset' || name === 'changesets' || CHANGESETS_CLI.test(first)) {
     return { ...noFacts(), publishes: isPublishWord(firstWord(rest) ?? '') };
   }
-  if (WRAPPER_VALUE_FLAGS.has(name)) return inner(wrappedCommand({ name, rest }));
+  if (WRAPPER_VALUE_FLAGS.has(name) || name === 'corepack') {
+    return inner(wrappedCommand({ name, rest }));
+  }
   if (SHELL_NAMES.has(name)) return inner(shellCommandString(rest));
   if (name === 'find') return inner(findExecCommand(rest));
   if (name === 'node') {
@@ -520,17 +543,18 @@ const classifyManager = ({
   }
   const [sub, second, third] = words;
   const where = [...flagDirs, ...dirs];
+  const isPublish = publishWordTest(manager);
   if (sub === undefined) {
     // A bare `yarn` installs dependencies.
     facts.runsCode = manager === 'yarn';
     return facts;
   }
   if (sub === 'foreach' || sub === 'workspaces') wide = true;
-  if (isPublishWord(sub)) {
+  if (isPublish(sub)) {
     facts.publishes = true;
     return facts;
   }
-  if (WRAPPING_SUBCOMMANDS.has(sub) && words.slice(1).some(isPublishWord)) {
+  if (WRAPPING_SUBCOMMANDS.has(sub) && words.slice(1).some(isPublish)) {
     facts.publishes = true;
     return facts;
   }
@@ -568,7 +592,7 @@ const classifyManager = ({
   const known = BUILTIN_COMMANDS.has(sub) || RUN_SUBCOMMANDS.has(sub) || EXEC_SUBCOMMANDS.has(sub);
   // npm and lerna take no bare script or binary name, so a word before `publish` can only be the
   // value of a flag this parser does not know (`npm --tag beta publish`); `publish` still publishes.
-  if (!known && (manager === 'npm' || manager === 'lerna') && words.some(isPublishWord)) {
+  if (!known && (manager === 'npm' || manager === 'lerna') && words.some(isPublish)) {
     facts.publishes = true;
     return facts;
   }

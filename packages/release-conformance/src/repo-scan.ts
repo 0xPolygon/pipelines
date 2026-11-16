@@ -26,6 +26,8 @@ import { linkedParent, readRegularFile } from './safe-read.ts';
 import {
   analyzeShell,
   isPublishWord,
+  publishWordTest,
+  stripVersion,
   normalizeShell,
   stripShellComments
 } from './shell-commands.ts';
@@ -52,15 +54,31 @@ const CALLEE_CHECKOUT_PREFIX = '.pipelines/';
 const CALLEE_PUBLISH_ACTION = '.github/actions/npm-publish-tarballs';
 
 /** The tools whose `publish` subcommand publishes a package. */
-const PUBLISH_TOOL = /^(?:npm|pnpm|yarn|lerna|bun|changesets?|@changesets\/cli(?:@[^\s]*)?)$/;
+const PUBLISH_TOOL = /^(?:npm|pnpm|yarn|lerna|bun|changesets?|@changesets\/cli)$/;
 /** Commands that only print their arguments, so a publish named in their text is not a command. */
 const PRINTERS = new Set(['echo', 'printf']);
 /** A word between the tool and `publish` that still means the tool publishes (it names another runner). */
 const RUNNER_WORD = /^(?:exec|dlx|x|run|changesets?|lerna|npm|@changesets\/cli(?:@\S*)?)$/;
 /** Anything on a line that turns printed text into something that runs, or reads it as a command. */
 const RUNS_PRINTED_TEXT = /\$\(|`|(?:^|[^\w-])(?:eval|xargs)(?![\w-])/;
-/** Output sent somewhere (`>`, `>>`, `>(…)`), but not a descriptor copy such as `2>&1`. */
-const REDIRECTS_OUTPUT = />(?!&)/;
+/**
+ * True when a line sends output somewhere with a `>` (`>`, `>>`, `>(…)`, `&>`) outside quotes, but not a
+ * descriptor copy such as `2>&1`. An arrow inside printed text (`echo "=> skipping"`) is not a redirect.
+ * One pass over the characters, so the cost is linear in the line.
+ */
+const redirectsOutput = (line: string): boolean => {
+  let quote = '';
+  for (let at = 0; at < line.length; at += 1) {
+    const char = line[at];
+    if (quote !== '') {
+      if (char === '\\' && quote === '"') at += 1;
+      else if (char === quote) quote = '';
+    } else if (char === '\\') at += 1;
+    else if (char === '"' || char === "'") quote = char;
+    else if (char === '>' && line[at + 1] !== '&') return true;
+  }
+  return false;
+};
 const SCRIPT_RUNNERS = new Set(['pnpm', 'yarn', 'bun']);
 const LEADING_PUNCTUATION = new Set(['(', '{', '$', '"', "'", '`']);
 const TRAILING_PUNCTUATION = new Set([')', '}', '"', "'", '`']);
@@ -73,6 +91,9 @@ const bareWord = (token: string): string => {
   while (end > start && TRAILING_PUNCTUATION.has(token[end - 1] ?? '')) end -= 1;
   return token.slice(start, end);
 };
+
+/** A word read as a tool name: shell quoting and any `@version` or `@tag` suffix removed. */
+const toolName = (token: string): string => stripVersion(bareWord(token));
 
 /** The name of the command a tokenised segment runs, past variable assignments and shell keywords. */
 const segmentCommand = (tokens: string[]): string => {
@@ -123,10 +144,11 @@ export const textPublishHits = (text: string): TextHits => {
       const tokens = (parts[at] ?? '').split(/\s+/);
       const printer = PRINTERS.has(segmentCommand(tokens));
       const piped = parts[at + 1] === '|';
-      const redirected = printer && REDIRECTS_OUTPUT.test(line);
+      const redirected = printer && redirectsOutput(line);
       for (let index = 0; index < tokens.length; index += 1) {
-        const tool = bareWord(tokens[index] ?? '');
+        const tool = toolName(tokens[index] ?? '');
         if (!PUBLISH_TOOL.test(tool)) continue;
+        const isPublish = publishWordTest(tool);
         // Flags, the values flags take, and `$VAR` words may all sit before the word that matters; the
         // run ends at the next tool, so every token is read once.
         let next = index + 1;
@@ -134,19 +156,20 @@ export const textPublishHits = (text: string): TextHits => {
         while (next < tokens.length) {
           const token = tokens[next] ?? '';
           // `publish` is never a flag's value: a flag the check does not know cannot hide it.
-          if (isPublishWord(bareWord(token))) break;
+          if (isPublish(bareWord(token))) break;
           if (token.startsWith('-')) afterFlag = !token.includes('=');
           else if (token.startsWith('$') || afterFlag) afterFlag = false;
           else break;
-          if (PUBLISH_TOOL.test(bareWord(token))) break;
+          if (PUBLISH_TOOL.test(toolName(token))) break;
           next += 1;
         }
         const word = bareWord(tokens[next] ?? '');
         let hit: 'sure' | 'word' | undefined;
-        if (isPublishWord(word)) hit = 'sure';
-        else if (word !== '' && !PUBLISH_TOOL.test(word)) {
+        if (isPublish(word)) hit = 'sure';
+        else if (word !== '' && !PUBLISH_TOOL.test(stripVersion(word))) {
           let after = next + 1;
           while ((tokens[after] ?? '').startsWith('-')) after += 1;
+          // A runner word before the publish word (`npm run pub`) names a script, so no abbreviation here.
           if (isPublishWord(bareWord(tokens[after] ?? '')))
             hit = RUNNER_WORD.test(word) ? 'sure' : 'word';
         }
