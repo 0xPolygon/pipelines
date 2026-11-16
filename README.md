@@ -420,8 +420,7 @@ steps:
   not available on GitHub Enterprise Server.)
 
 > **Status:** this repo does not publish release tags that contain the current
-> `apps-*` workflows (the existing `v1`–`v3` tags predate them), so step-level
-> composite actions are pinned to a commit SHA of this repo.
+> `apps-*` workflows (the existing `v1`–`v3` tags predate them).
 
 ---
 

@@ -1,5 +1,5 @@
 # A consuming repository replaces the local path below with
-# 0xPolygon/pipelines/.github/workflows/apps-changeset-check.yml@main
+# 0xPolygon/pipelines/.github/workflows/apps-changeset-check.yml
 # (the local form is used here because this file also runs in this repository).
 name: Changeset check Trigger
 
