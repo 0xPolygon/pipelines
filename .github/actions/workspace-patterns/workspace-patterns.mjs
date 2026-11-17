@@ -12,14 +12,12 @@
 //     is the only package;
 //   - `packages:` as a block list or a one-line flow list; a `!pattern` entry
 //     excludes what it matches;
-//   - a pattern is literal path segments optionally ending in `*` (one more
-//     segment) or `**` (any depth below); any other glob shape throws.
+//   - a pattern is path segments, each a literal or containing `*` (matches
+//     within that one segment, e.g. `pos-*`, `packages/app-*`, `a/*/b`),
+//     optionally ending in `**` (the directory itself and any depth below, as pnpm does); any other glob shape throws.
 
 import { readFileSync } from 'node:fs';
 import { resolve } from 'node:path';
-
-// Characters that make a pattern something other than a literal path segment.
-export const GLOB_CHARS = /[*?[\]{}()!]/;
 
 const unquote = (item) => {
   const trimmed = item.trim();
@@ -27,19 +25,38 @@ const unquote = (item) => {
   return quoted === null ? trimmed : (quoted[1] ?? quoted[2]);
 };
 
-/** Splits a pattern into its literal prefix and a trailing wildcard kind; throws on any other shape. */
+// Characters that make a pattern something other than a literal path segment.
+export const GLOB_CHARS = /[*?[\]{}()!]/;
+
+// Characters that make a segment something other than a literal or a `*` glob.
+const OTHER_GLOB_CHARS = /[?[\]{}()!]/;
+
+/**
+ * Splits a pattern into segments: a literal, a `*` glob (a `*` never crosses a
+ * `/`, so it stays inside its own segment), or a trailing `**` (any depth
+ * below). Throws on any other shape.
+ */
 export function parsePattern(pattern) {
   const segments = pattern.replace(/^\.\//, '').replace(/\/+$/, '').split('/');
-  const last = segments[segments.length - 1];
-  const wildcard = last === '*' || last === '**' ? last : undefined;
-  const prefix = wildcard === undefined ? segments : segments.slice(0, -1);
+  const deep = segments[segments.length - 1] === '**';
+  const body = (deep ? segments.slice(0, -1) : segments).filter((segment) => segment !== '.');
   if (
     pattern === '' ||
-    prefix.some((segment) => segment === '' || segment === '..' || GLOB_CHARS.test(segment))
+    segments.some((segment) => segment === '' || segment === '..') ||
+    body.some((segment) => segment.includes('**') || OTHER_GLOB_CHARS.test(segment))
   ) {
     throw new Error(`the workspace pattern ${JSON.stringify(pattern)} cannot be evaluated`);
   }
-  return { prefix: prefix.filter((segment) => segment !== '.'), wildcard };
+  // Like pnpm's glob, a wildcard never matches a segment that starts with a dot.
+  const matchers = body.map((segment) => {
+    if (!segment.includes('*')) return segment;
+    const source = segment
+      .split('*')
+      .map((part) => part.replace(/[.+^$|\\]/g, '\\$&'))
+      .join('[^/]*');
+    return new RegExp(`^${segment.startsWith('.') ? '' : '(?!\\.)'}${source}$`);
+  });
+  return { matchers, deep };
 }
 
 /**
@@ -105,10 +122,18 @@ export function readWorkspacePatterns(root) {
 }
 
 function matchesPattern({ pattern, segments }) {
-  const { prefix, wildcard } = parsePattern(pattern);
-  if (!prefix.every((segment, i) => segments[i] === segment)) return false;
-  if (wildcard === undefined) return segments.length === prefix.length;
-  return wildcard === '*' ? segments.length === prefix.length + 1 : segments.length > prefix.length;
+  const { matchers, deep } = parsePattern(pattern);
+  const matches = matchers.every((matcher, i) =>
+    typeof matcher === 'string'
+      ? segments[i] === matcher
+      : segments[i] !== undefined && matcher.test(segments[i])
+  );
+  if (!matches) return false;
+  if (!deep) return segments.length === matchers.length;
+  return (
+    segments.length >= matchers.length &&
+    segments.slice(matchers.length).every((s) => !s.startsWith('.'))
+  );
 }
 
 /** True when `directory` (relative, normalised) is a workspace package of the checkout. */

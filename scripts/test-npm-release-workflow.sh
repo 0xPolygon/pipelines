@@ -514,14 +514,22 @@ check('version job: 3.x version-script is pnpm run ci:version only under version
 check('version job: the has_changesets output reads both arms', norm(wf.jobs?.version?.outputs?.has_changesets) === "${{ steps.changesets.outputs.hasChangesets || steps.changesets3.outputs['has-changesets'] }}", norm(wf.jobs?.version?.outputs?.has_changesets));
 check('version job: no id-token permission', isMap(jobs.version?.permissions) && !('id-token' in jobs.version.permissions));
 check('version job: permissions are exactly contents: write and pull-requests: write', json(jobs.version?.permissions) === json({ contents: 'write', 'pull-requests': 'write' }), json(jobs.version?.permissions));
-// pnpm loads a repository's .pnpmfile.cjs, which is repository code, and the
-// ignore option does not hold on every pnpm major. So finalize's end-state
-// scripts (check-release-tags and the shared evaluator it imports) run no pnpm
-// at all. Only the 2.x-arm detector still runs pnpm, with the ignore flag; its
-// calls are found as `'pnpm',` argument lists read up to the closing bracket.
-const noPnpm = ['.github/actions/check-release-tags/check-release-tags.mjs', '.github/actions/workspace-patterns/workspace-patterns.mjs'];
-const pnpmFound = noPnpm.filter((f) => /['"`]pnpm['"`]|\bpnpm\s+(ls|exec|run|install)\b/.test(fs.readFileSync(path.join(repoRoot, f), 'utf8').replace(/\/\/[^\n]*/g, '').replace(/\/\*[\s\S]*?\*\//g, '')));
-check('no pnpm invocation appears in the end-state scripts finalize runs (check-release-tags and workspace-patterns)', pnpmFound.length === 0, json(pnpmFound));
+// pnpm loads a repository's .pnpmfile.cjs, which is repository code. The 2.x
+// arm is frozen: its package listing is `pnpm ls -r --depth -1 --json` with the
+// ignore option (held for `ls` on pnpm 9, 10 and 11), and it is reached only on
+// the 2.x path (no tags artifact). The 3.x path and the shared evaluator spawn
+// no package manager at all.
+const strip = (t) => t.replace(/\/\/[^\n]*/g, '').replace(/\/\*[\s\S]*?\*\//g, '');
+const crt = strip(fs.readFileSync(path.join(repoRoot, '.github/actions/check-release-tags/check-release-tags.mjs'), 'utf8'));
+const wsp = strip(fs.readFileSync(path.join(repoRoot, '.github/actions/workspace-patterns/workspace-patterns.mjs'), 'utf8'));
+const crtPnpm = [...crt.matchAll(/['"`]pnpm['"`]\s*,\s*\[([^\]]*)\]/g)].map((m) => m[1].replace(/\s+/g, ' ').trim());
+const wanted = "'ls', '-r', '--depth', '-1', '--json', '--config.ignore-pnpmfile=true'";
+check('check-release-tags: every pnpm invocation is `ls -r --depth -1 --json --config.ignore-pnpmfile=true`, and there is exactly one', crtPnpm.length === 1 && crtPnpm[0] === wanted && (crt.match(/['"`]pnpm['"`]/g) ?? []).length === 1 && !/\bpnpm\s+(exec|run|install|dlx)\b/.test(crt), json(crtPnpm));
+const callSites = [...crt.matchAll(/workspacePackages\(/g)].map((m) => m.index);
+const armStart = crt.indexOf('if (artifact === undefined) {');
+const armEnd = crt.indexOf('} else {', armStart);
+check('check-release-tags: workspacePackages is called only on the 2.x path (artifact === undefined)', callSites.length === 2 && armStart > 0 && callSites.filter((i) => i > armStart && i < armEnd).length === 1 && callSites.some((i) => crt.slice(Math.max(0, i - 30), i).includes('function ')), json(callSites));
+check('workspace-patterns spawns nothing: no child_process import, no spawn/exec, no pnpm', !/child_process|\bspawn(Sync)?\b|\bexecFile(Sync)?\b|\bexecSync\b|['"`]pnpm['"`]/.test(wsp), '');
 const pnpmBad = [];
 let pnpmCalls = 0;
 {
@@ -531,7 +539,7 @@ let pnpmCalls = 0;
     if (!m[1].includes("'--config.ignore-pnpmfile=true'")) pnpmBad.push(m[1].trim());
   }
 }
-check('every pnpm call in the 2.x-arm detector passes --config.ignore-pnpmfile=true', pnpmCalls >= 2 && pnpmBad.length === 0, json(pnpmBad));
+check('every pnpm call in the 2.x-arm detector passes --config.ignore-pnpmfile=true (best effort: the option does not hold for exec on pnpm 11, and the caller CLI runs there anyway)', pnpmCalls >= 2 && pnpmBad.length === 0, json(pnpmBad));
 console.log(out.join('\n'));
 NODE
   if [ $? -ne 0 ]; then

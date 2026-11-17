@@ -197,6 +197,7 @@ describe('check-changesets-cli: workspace layout on 3.x', () => {
       'minimumReleaseAge: 1440\n',
       "packages: ['.']\n",
       'packages: [a/*, b/**]\n',
+      "packages:\n  - 'pos-*'\n  - 'packages/app-*'\n",
       "packages:\n  - 'pkgs/**'\n  - '!pkgs/test/**'\n"
     ]) {
       assert.equal(three(withWorkspaceFile(body)).major, 3, String(body));
@@ -205,9 +206,11 @@ describe('check-changesets-cli: workspace layout on 3.x', () => {
 
   it('fails an unevaluable pattern with an actionable message and its own title', () => {
     for (const body of [
-      "packages:\n  - 'a/*/b'\n",
+      "packages:\n  - 'a/**/b'\n",
       "packages: ['a/{x,y}']\n",
       "packages:\n  - 'a/[xy]'\n",
+      "packages:\n  - '{a,b}/*'\n",
+      "packages:\n  - 'a/?'\n",
       'packages: []\n'
     ]) {
       const r = withWorkspaceFile(body);
@@ -222,7 +225,7 @@ describe('check-changesets-cli: workspace layout on 3.x', () => {
   });
 
   it('does not apply on 2.x', () => {
-    const r = withWorkspaceFile("packages:\n  - 'a/*/b'\n");
+    const r = withWorkspaceFile("packages:\n  - 'a/**/b'\n");
     assert.equal(checkChangesetsCli({ run: answer('2.30.0\n'), ...r }).major, 2);
   });
 });

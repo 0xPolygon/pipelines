@@ -266,12 +266,26 @@ describe('validate-tags', () => {
     assert.deepEqual(dirs.map(verdict), [true, false, false, true, true, true, false, false]);
   });
 
+  it('a prefix-* layout is evaluated: pos-* and packages/app-* accept their members only', () => {
+    const ws = join(scratch, 'prefix-globs');
+    writeFile(ws, 'pnpm-workspace.yaml', "packages:\n  - 'pos-*'\n  - 'packages/app-*'\n");
+    writeFile(ws, '.changeset/config.json', '{}');
+    const dirs = ['pos-a', 'pos-a/nested', 'other', 'packages/app-web', 'packages/lib-web'];
+    for (const dir of dirs) {
+      writeFile(ws, `${dir}/package.json`, JSON.stringify({ name: 'p', version: '1.0.0' }));
+    }
+    const verdict = (directory) =>
+      check({ tags: [], expected: [{ tag: 'p@1.0.0', packageName: 'p', directory }] }, { ws })
+        .errors.length === 0;
+    assert.deepEqual(dirs.map(verdict), [true, false, false, true, false]);
+  });
+
   it('a workspace pattern shape that cannot be evaluated fails closed', () => {
     for (const body of [
       "packages:\n  - 'a/{x,y}'\n",
-      "packages:\n  - 'a/*/b'\n",
+      "packages:\n  - 'a/**/b'\n",
       "packages:\n  - 'a/[xy]'\n",
-      "packages: ['a/*/b']\n",
+      "packages: ['a/**/b']\n",
       'packages: [a/*, b/{c,d}]\n',
       'packages:\n  - a/*\n  - "!a/*/b"\n  - a/**/c\n',
       'packages: []\n',

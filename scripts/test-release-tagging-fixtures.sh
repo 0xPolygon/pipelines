@@ -147,7 +147,8 @@ write_pkg() {
 }
 
 # new_workspace MAJOR LAYOUT CONFIG_JSON [NAME VERSION PRIVATE]...
-# LAYOUT: multi (members under packages/) or single (one root package).
+# LAYOUT: multi (members under packages/), prefix (members under pos-<name>,
+# listed as 'pos-*') or single (one root package).
 # Sets WS, REMOTE. Commits the tree, pushes `main` to a bare `origin`.
 new_workspace() {
   local major="$1" layout="$2" config="$3"
@@ -156,11 +157,13 @@ new_workspace() {
   WS="$WORK/ws-$CASE_N"
   REMOTE="$WORK/remote-$CASE_N.git"
   mkdir -p "$WS/.changeset"
-  if [ "$layout" = multi ]; then
+  if [ "$layout" = multi ] || [ "$layout" = prefix ]; then
     printf '{"name":"fixture-root","private":true}\n' >"$WS/package.json"
-    printf "packages:\n  - 'packages/*'\n" >"$WS/pnpm-workspace.yaml"
+    local base=packages pattern='packages/*' prefix=""
+    if [ "$layout" = prefix ]; then base=. pattern='pos-*' prefix=pos-; fi
+    printf "packages:\n  - '%s'\n" "$pattern" >"$WS/pnpm-workspace.yaml"
     while [ "$#" -ge 3 ]; do
-      write_pkg "$WS/packages/$(basename "$1")" "$1" "$2" "$3"
+      write_pkg "$WS/$base/$prefix$(basename "$1")" "$1" "$2" "$3"
       shift 3
     done
   else
@@ -261,6 +264,27 @@ expect_eq "3.x re-run: creates no tag" "$(tag_names)" ""
 expect_eq "3.x re-run: expected tags unchanged" "$(expected_names)" "@fx/priv@1.0.0,@fx/pub@1.0.0"
 check 3 "$TAGS_FILE"
 expect_rc "3.x re-run: end-state check passes" 0
+
+echo "-- 3.x: prefix-* layout"
+new_workspace 3 prefix "$(config_json '[]' "$PRIV_ON")" \
+  @fx/pub 1.0.0 false @fx/priv 1.0.0 true
+detect
+expect_rc "3.x prefix-*: detector accepts the layout" 0
+collect3
+expect_rc "3.x prefix-*: tags artifact validates entries under pos-*" 0
+expect_eq "3.x prefix-*: created tags" "$(tag_names)" "@fx/priv@1.0.0,@fx/pub@1.0.0"
+push_tags @fx/pub@1.0.0 @fx/priv@1.0.0
+check 3 "$TAGS_FILE"
+expect_rc "3.x prefix-*: end-state check passes" 0
+
+echo "-- 3.x: a pattern the evaluator cannot match exactly as pnpm does is refused before publish"
+for bad in "a/**/b" "a/{x,y}" "a/?" "a/[xy]"; do
+  new_workspace 3 multi "$(config_json '[]' "$PRIV_ON")" @fx/pub 1.0.0 false
+  printf "packages:\n  - '%s'\n" "$bad" >"$WS/pnpm-workspace.yaml"
+  detect
+  expect_rc "3.x unsupported pattern $bad: detector fails" 1
+  expect_out "3.x unsupported pattern $bad: names the pattern" "cannot be evaluated"
+done
 
 echo "-- 3.x: private only"
 new_workspace 3 multi "$(config_json '[]' "$PRIV_ON")" @fx/priv 2.0.0 true
@@ -464,6 +488,19 @@ expect_rc "2.x pub+priv: end-state check fails before the push" 1
 push_tags @fx/pub@1.0.0 @fx/priv@1.0.0
 check 2
 expect_rc "2.x pub+priv: end-state check passes after the push" 0
+
+echo "-- 2.x: prefix-* layout"
+new_workspace 2 prefix "$(config_json '[]' "$PRIV_ON")" \
+  @fx/pub 1.0.0 false @fx/priv 1.0.0 true
+detect
+expect_rc "2.x prefix-*: detector accepts" 0
+tag2
+expect_rc "2.x prefix-*: changeset tag succeeds" 0
+check 2
+expect_rc "2.x prefix-*: end-state check fails before the push" 1
+push_tags @fx/pub@1.0.0 @fx/priv@1.0.0
+check 2
+expect_rc "2.x prefix-*: end-state check passes after the push" 0
 
 echo "-- 2.x: private only"
 new_workspace 2 multi "$(config_json '[]' "$PRIV_ON")" @fx/priv 2.0.0 true
