@@ -1,5 +1,5 @@
 import { strict as assert } from 'node:assert';
-import { cpSync, mkdirSync, mkdtempSync, readFileSync, rmSync } from 'node:fs';
+import { cpSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { after, describe, it } from 'node:test';
@@ -201,6 +201,54 @@ suite('shared caller: allowed opt-in inputs', () => {
     });
     assert.deepEqual(ruleIds(findings), ['caller/inputs']);
     assert.ok(findings[0]?.message.includes('version_script'));
+  });
+
+  for (const name of [
+    'fail-opt-in-version-script-quoted-false.yml',
+    'fail-opt-in-version-script-quoted-true.yml'
+  ]) {
+    test(`${name}: a quoted string is not a boolean`, () => {
+      const findings = runRule({ dir: callerDir, name, profile: pr3 });
+      assert.deepEqual(ruleIds(findings), ['caller/inputs']);
+    });
+  }
+
+  /** The base fixture with its `version_script:` line replaced by the given YAML (one or more lines). */
+  const runValue = (yaml: string): Finding[] => {
+    const dir = mkdtempSync(join(tmpdir(), 'caller-value-'));
+    scratch.push(dir);
+    const base = readFileSync(join(callerDir, 'pass-opt-in-version-script-true.yml'), 'utf8');
+    const text = base.replace('      version_script: true\n', `${yaml}\n`);
+    assert.notEqual(text, base, 'the fixture line to replace moved');
+    writeFileSync(join(dir, 'case.yml'), text);
+    return runRule({ dir, name: 'case.yml', profile: pr3 });
+  };
+
+  const rejectedValues: [string, string][] = [
+    ['!!str true', '      version_script: !!str true'],
+    ['a trailing space inside quotes', '      version_script: "true "'],
+    ['a block scalar', '      version_script: |\n        true']
+  ];
+  for (const [label, yaml] of rejectedValues) {
+    test(`${label} is not a boolean`, () => {
+      assert.deepEqual(ruleIds(runValue(yaml)), ['caller/inputs']);
+    });
+  }
+
+  const rejectedExpressions = [
+    '${{ a }} junk ${{ b }}',
+    '${{ true }}${{ false }}',
+    '${{}}',
+    '${{ a }}}}'
+  ];
+  for (const expression of rejectedExpressions) {
+    test(`the value ${expression} is not exactly one expression`, () => {
+      assert.deepEqual(ruleIds(runValue(`      version_script: ${expression}`)), ['caller/inputs']);
+    });
+  }
+
+  test('one expression passes', () => {
+    assert.deepEqual(runValue('      version_script: ${{ inputs.x }}'), []);
   });
 
   test('an unknown key still fails and the message lists the opt-ins', () => {

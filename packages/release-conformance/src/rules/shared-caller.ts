@@ -15,8 +15,18 @@ import {
 } from '../canonical.ts';
 import { isSharedCallee } from '../repo-scan.ts';
 
-/** An opt-in input takes a boolean or an expression; any other literal is a typo GitHub would coerce silently. */
-const OPT_IN_VALUE = /^(?:true|false|\$\{\{[\s\S]*\}\})$/;
+/**
+ * Exactly one expression: no nested opener or closer, so `${{ a }} x ${{ b }}` and `${{ a }}}}` fail.
+ * Not trimmed, so padding or a block scalar's trailing newline fails too.
+ */
+const SINGLE_EXPRESSION = /^\$\{\{(?:(?!\$\{\{|\}\})[\s\S])+\}\}$/;
+
+/**
+ * An opt-in input takes a YAML boolean scalar or one expression. Decided on the YAML type, not
+ * the text: a quoted `'false'` is a string, which GitHub would not treat as the boolean `false`.
+ */
+const isOptInValue = ({ type, value }: { type: string | undefined; value: string }): boolean =>
+  type === 'boolean' || (type === 'string' && SINGLE_EXPRESSION.test(value));
 
 const levelOf = ({
   permissions,
@@ -221,11 +231,11 @@ export const checkSharedCaller: Rule = ({ model, scan, profile, context }) => {
       if (profile.withKeys.includes(key)) continue;
       if (profile.optInWithKeys.includes(key)) {
         const value = job.withValues[key] ?? '';
-        if (!OPT_IN_VALUE.test(value.trim())) {
+        if (!isOptInValue({ type: job.withTypes[key], value })) {
           add({
             ruleId: 'caller/inputs',
             line: job.line,
-            message: `\`with\` key \`${key}\` must be \`true\`, \`false\` or a \`\${{ ... }}\` expression, not \`${value}\`.`
+            message: `\`with\` key \`${key}\` must be an unquoted \`true\` or \`false\`, or one \`\${{ ... }}\` expression, not \`${value}\`.`
           });
         }
         continue;

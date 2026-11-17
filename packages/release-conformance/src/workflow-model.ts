@@ -44,6 +44,17 @@ const toStringMap = (value: unknown): Record<string, string> => {
   return out;
 };
 
+const toTypeMap = (value: unknown): Record<string, 'boolean' | 'string' | 'other'> => {
+  const out: Record<string, 'boolean' | 'string' | 'other'> = {};
+  if (isRecord(value)) {
+    for (const [key, entry] of Object.entries(value)) {
+      out[key] =
+        typeof entry === 'boolean' ? 'boolean' : typeof entry === 'string' ? 'string' : 'other';
+    }
+  }
+  return out;
+};
+
 export const emptyPermissions = (): Permissions => ({ present: false, scopes: {}, line: 0 });
 
 /**
@@ -272,6 +283,7 @@ const parseJobs = ({
       },
       withKeys: isRecord(job['with']) ? Object.keys(job['with']) : [],
       withValues: toStringMap(job['with']),
+      withTypes: toTypeMap(job['with']),
       // Workflow-level `env` reaches every job, so its secret references are held by each of them.
       envSecretRefs: [...topLevelEnv, ...envSecretRefs(job['env'])],
       steps: parseSteps({ raw: job['steps'], lines, jobId: id })

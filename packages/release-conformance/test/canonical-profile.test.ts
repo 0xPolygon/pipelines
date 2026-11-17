@@ -70,6 +70,13 @@ suite('canonical profile', () => {
     );
   });
 
+  // pr1 (no input) stays a valid shape for the fixtures, so matching alone would let the live
+  // release workflow lose `version_script` unnoticed; callers passing it would then fail.
+  test('the live release workflow still declares the version_script input', () => {
+    const live = profileFrom({ trigger: liveTrigger, release: liveRelease });
+    assert.ok(live.optInWithKeys.includes('version_script'));
+  });
+
   test('each committed profile is the one derived from its committed canonical fixtures', () => {
     for (const [name, shape] of [
       ['npm-release.pr1.json', 'pr1'],
@@ -85,11 +92,19 @@ suite('canonical profile', () => {
     }
   });
 
-  test('the two committed profiles differ only in the attestation floor', () => {
+  test('pr1 and pr2 differ only in the attestation floor', () => {
     const { floor: floor1, ...rest1 } = expected['npm-release.pr1.json'];
     const { floor: floor2, ...rest2 } = expected['npm-release.pr2.json'];
     assert.deepEqual(rest1, rest2);
     assert.deepEqual(floor2, { ...floor1, attestations: 'write' });
+  });
+
+  test('pr3 differs from pr1 only in optInWithKeys', () => {
+    const { optInWithKeys: optIn1, ...rest1 } = expected['npm-release.pr1.json'];
+    const { optInWithKeys: optIn3, ...rest3 } = expected['npm-release.pr3.json'];
+    assert.deepEqual(rest3, rest1);
+    assert.deepEqual(optIn1, []);
+    assert.deepEqual(optIn3, ['version_script']);
   });
 
   test('the live trigger passes every caller rule under its own profile', () => {

@@ -9633,6 +9633,16 @@ const toStringMap = (value) => {
     }
     return out;
 };
+const toTypeMap = (value) => {
+    const out = {};
+    if (isRecord(value)) {
+        for (const [key, entry] of Object.entries(value)) {
+            out[key] =
+                typeof entry === 'boolean' ? 'boolean' : typeof entry === 'string' ? 'string' : 'other';
+        }
+    }
+    return out;
+};
 const emptyPermissions = () => ({ present: false, scopes: {}, line: 0 });
 /**
  * GitHub resolves owner and repository names case-insensitively, so identity is
@@ -9819,6 +9829,7 @@ const parseJobs = ({ raw, topLevel, topLevelEnv, topLevelDirectory, lines }) => 
             },
             withKeys: isRecord(job['with']) ? Object.keys(job['with']) : [],
             withValues: toStringMap(job['with']),
+            withTypes: toTypeMap(job['with']),
             // Workflow-level `env` reaches every job, so its secret references are held by each of them.
             envSecretRefs: [...topLevelEnv, ...envSecretRefs(job['env'])],
             steps: parseSteps({ raw: job['steps'], lines, jobId: id })
@@ -10773,8 +10784,16 @@ const checkBespokePublisher = (params) => {
 ;// CONCATENATED MODULE: ./packages/release-conformance/src/rules/shared-caller.ts
 
 
-/** An opt-in input takes a boolean or an expression; any other literal is a typo GitHub would coerce silently. */
-const OPT_IN_VALUE = /^(?:true|false|\$\{\{[\s\S]*\}\})$/;
+/**
+ * Exactly one expression: no nested opener or closer, so `${{ a }} x ${{ b }}` and `${{ a }}}}` fail.
+ * Not trimmed, so padding or a block scalar's trailing newline fails too.
+ */
+const SINGLE_EXPRESSION = /^\$\{\{(?:(?!\$\{\{|\}\})[\s\S])+\}\}$/;
+/**
+ * An opt-in input takes a YAML boolean scalar or one expression. Decided on the YAML type, not
+ * the text: a quoted `'false'` is a string, which GitHub would not treat as the boolean `false`.
+ */
+const isOptInValue = ({ type, value }) => type === 'boolean' || (type === 'string' && SINGLE_EXPRESSION.test(value));
 const levelOf = ({ permissions, scope }) => {
     if (permissions.all === 'write-all')
         return 'write';
@@ -10964,11 +10983,11 @@ const checkSharedCaller = ({ model, scan, profile, context }) => {
                 continue;
             if (profile.optInWithKeys.includes(key)) {
                 const value = job.withValues[key] ?? '';
-                if (!OPT_IN_VALUE.test(value.trim())) {
+                if (!isOptInValue({ type: job.withTypes[key], value })) {
                     add({
                         ruleId: 'caller/inputs',
                         line: job.line,
-                        message: `\`with\` key \`${key}\` must be \`true\`, \`false\` or a \`\${{ ... }}\` expression, not \`${value}\`.`
+                        message: `\`with\` key \`${key}\` must be an unquoted \`true\` or \`false\`, or one \`\${{ ... }}\` expression, not \`${value}\`.`
                     });
                 }
                 continue;
