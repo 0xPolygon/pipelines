@@ -1,0 +1,6 @@
+# Licence-check exemptions for 0xsequence/trails: packages already in its dependency
+# tree under a licence outside the shared allowlist. Moved from the repo's own
+# dependency-review caller on 2026-11-17.
+pkg:npm/@databeat/tracker
+pkg:npm/@reown/appkit
+pkg:npm/@reown/appkit-adapter-wagmi

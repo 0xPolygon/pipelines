@@ -1,0 +1,16 @@
+# Licence-check exemptions for 0xsequence/trails-api: packages already in its dependency
+# tree under a licence outside the shared allowlist. Moved from the repo's own
+# dependency-review caller on 2026-11-17.
+pkg:golang/github.com/0xsequence/ethkit
+pkg:golang/github.com/denis-tingaikin/go-header
+pkg:golang/github.com/ethereum/go-ethereum
+pkg:golang/github.com/fbsobreira/gotron-sdk
+pkg:golang/github.com/firefart/nonamedreturns
+pkg:golang/github.com/golang/freetype
+pkg:golang/github.com/golangci/golangci-lint/v2
+pkg:golang/github.com/ldez/structtags
+pkg:golang/github.com/leonklingele/grouper
+pkg:golang/github.com/openpeedeep/depguard/v2
+pkg:golang/github.com/xen0n/gosmopolitan
+pkg:golang/github.com/zondax/hid
+pkg:golang/golang.org/x/image

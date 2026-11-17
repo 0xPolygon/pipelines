@@ -1,0 +1,47 @@
+# Licence-check exemptions for 0xsequence/wallet-webapp-v3: packages already in its dependency
+# tree under a licence outside the shared allowlist. Moved from the repo's own
+# dependency-review caller on 2026-11-17.
+pkg:npm/@databeat/tracker
+pkg:npm/@iden3/bigarray
+pkg:npm/@iden3/binfileutils
+pkg:npm/@img/sharp-libvips-darwin-arm64
+pkg:npm/@img/sharp-libvips-darwin-x64
+pkg:npm/@img/sharp-libvips-linux-arm
+pkg:npm/@img/sharp-libvips-linux-arm64
+pkg:npm/@img/sharp-libvips-linux-ppc64
+pkg:npm/@img/sharp-libvips-linux-riscv64
+pkg:npm/@img/sharp-libvips-linux-s390x
+pkg:npm/@img/sharp-libvips-linux-x64
+pkg:npm/@img/sharp-libvips-linuxmusl-arm64
+pkg:npm/@img/sharp-libvips-linuxmusl-x64
+pkg:npm/@img/sharp-wasm32
+pkg:npm/@img/sharp-win32-arm64
+pkg:npm/@img/sharp-win32-ia32
+pkg:npm/@img/sharp-win32-x64
+pkg:npm/@metamask/sdk
+pkg:npm/@metamask/sdk-install-modal-web
+pkg:npm/@reown/appkit
+pkg:npm/@reown/appkit-common
+pkg:npm/@reown/appkit-controllers
+pkg:npm/@reown/appkit-pay
+pkg:npm/@reown/appkit-polyfills
+pkg:npm/@reown/appkit-scaffold-ui
+pkg:npm/@reown/appkit-ui
+pkg:npm/@reown/appkit-utils
+pkg:npm/@reown/appkit-wallet
+pkg:npm/@reown/walletkit
+pkg:npm/@walletconnect/core
+pkg:npm/@walletconnect/ethereum-provider
+pkg:npm/@walletconnect/pay
+pkg:npm/@walletconnect/sign-client
+pkg:npm/@walletconnect/types
+pkg:npm/@walletconnect/universal-provider
+pkg:npm/@walletconnect/utils
+pkg:npm/circomlibjs-hinkal-fork
+pkg:npm/fastfile
+pkg:npm/ffjavascript
+pkg:npm/r1csfile
+pkg:npm/rpc-websockets
+pkg:npm/snarkjs
+pkg:npm/wasmbuilder
+pkg:npm/wasmcurves

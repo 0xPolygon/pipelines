@@ -1,36 +1,19 @@
 name: Dependency review
 
-# PR gate: fails when the PR adds a dependency with a known vulnerability at or
-# above `fail-on-severity` in any of `fail-on-scopes`, or one whose licence is
-# outside the shared allowlist below. Changing that list here changes it for
-# every caller.
+# PR gate: fails when the PR adds a dependency with a high or critical advisory
+# (runtime, development or unknown scope), or one whose licence is outside the
+# shared allowlist below.
+#
+# The policy is fixed here, not in the caller: the thresholds take no inputs,
+# and the only licence exemptions are those in
+# .github/dependency-review/<owner>/<repo>.txt in this repository, reviewed by
+# its code owners. A pull request in the calling repository cannot loosen
+# either.
 #
 # Callers trigger it on `pull_request` (see security-dependency-review-trigger.yml).
 # Needs the dependency graph: public repos, or private repos with GitHub Code Security.
 on:
   workflow_call:
-    inputs:
-      fail-on-severity:
-        description: Lowest advisory severity that fails the check (low, moderate, high, critical).
-        type: string
-        required: false
-        default: high
-      fail-on-scopes:
-        description: >-
-          Dependency scopes whose advisories fail the check. Includes development by
-          default: dev and tooling packages run in CI too.
-        type: string
-        required: false
-        default: runtime, development, unknown
-      allow-dependencies-licenses:
-        description: >-
-          Packages exempt from the licence check, as comma-separated purls without a
-          version (e.g. `pkg:npm/@img/sharp-libvips-linux-x64, pkg:golang/github.com/ethereum/go-ethereum`).
-          For dependencies already in the tree under a licence the allowlist excludes;
-          a new dependency under that licence still fails.
-        type: string
-        required: false
-        default: ''
 
 permissions: {}
 
@@ -43,11 +26,25 @@ jobs:
       contents: read
       pull-requests: write # comment-summary-in-pr
     steps:
-      # Reads the PR's dependency diff through the API; no checkout needed.
+      # Reads this repository at the workflow's own commit, so a caller that pins
+      # this workflow to a SHA also pins its exemptions. Anonymous fetch: pipelines
+      # is public. The caller's code is never checked out; the action reads the
+      # PR's dependency diff through the API.
+      - name: Fetch pipelines at this workflow's commit
+        env:
+          WORKFLOW_REPO: ${{ job.workflow_repository }}
+          WORKFLOW_SHA: ${{ job.workflow_sha }}
+        run: |
+          git init -q .pipelines
+          git -C .pipelines fetch -q --depth 1 "https://github.com/${WORKFLOW_REPO}.git" "$WORKFLOW_SHA"
+          git -C .pipelines checkout -q FETCH_HEAD
+      - name: Read licence exemptions
+        id: exemptions
+        uses: ./.pipelines/.github/actions/dependency-review-exemptions
       - uses: actions/dependency-review-action@a1d282b36b6f3519aa1f3fc636f609c47dddb294 # v5.0.0
         with:
-          fail-on-severity: ${{ inputs.fail-on-severity }}
-          fail-on-scopes: ${{ inputs.fail-on-scopes }}
+          fail-on-severity: high
+          fail-on-scopes: runtime, development, unknown
           # Permissive licences GitHub reports across the npm and Go trees of the
           # repos that adopted this gate. Copyleft and unparsed licence data stay out.
           allow-licenses: >-
@@ -71,5 +68,5 @@ jobs:
             Unicode-3.0,
             Zlib,
             LicenseRef-scancode-google-patent-license-golang
-          allow-dependencies-licenses: ${{ inputs.allow-dependencies-licenses }}
+          allow-dependencies-licenses: ${{ steps.exemptions.outputs.allow-dependencies-licenses }}
           comment-summary-in-pr: on-failure
