@@ -83,6 +83,16 @@ jobs:
     # deepen loop, which ignores fetch failures) fails here, not at the
     # 6-hour default.
     timeout-minutes: 20
+    # One version job at a time per repository and ref, so two pushes close
+    # together cannot both rewrite the release PR at once, with the older
+    # checkout landing last. Its own group, separate from the publish job's, so
+    # it never waits behind a publish approval. `queue: max` because a waiting
+    # run must not be cancelled by a third one: the run for a merged release PR
+    # is the one that publishes it.
+    concurrency:
+      group: npm-release-version-${{ github.repository }}-${{ github.ref }}
+      cancel-in-progress: false
+      queue: max
     permissions:
       contents: write # release PR commits and branch
       pull-requests: write # the changesets Release / Deploy PR
@@ -143,6 +153,19 @@ jobs:
         with:
           enabled: 'true'
 
+      # A newer push may have landed while this run waited or ran. Rebuilding
+      # the release PR from this older checkout would overwrite the newer
+      # run's work, and when the newer push was the release PR being merged it
+      # opens a duplicate of that PR. A superseded run with changesets pending
+      # leaves the release PR to the newer run. A run with no changesets
+      # pending is never superseded: it publishes its own commit. A push that
+      # lands after this step can still slip through; the window is the
+      # install and changesets steps below.
+      - uses: ./.pipelines/.github/actions/check-release-head
+        id: head
+        with:
+          token: ${{ github.token }}
+
       # changesets/action in github-api mode commits untracked files too, so
       # the pipelines checkout must be gone before it runs or it would land in
       # the Version Packages commit.
@@ -169,14 +192,19 @@ jobs:
       # (release PR list/create/update).
       - uses: actions/create-github-app-token@bcd2ba49218906704ab6c1aa796996da409d3eb1 # v3.2.0
         id: app-token
+        if: steps.head.outputs.superseded != 'true'
         with:
           app-id: ${{ secrets.CHANGESET_RELEASE_BOT_APP_ID }}
           private-key: ${{ secrets.CHANGESET_RELEASE_BOT_APP_PRIVATE_KEY }}
           permission-contents: write
           permission-pull-requests: write
 
+      # Skipped in a superseded run. `has_changesets` is then empty, which
+      # keeps build, publish and finalize from running, the same as a run with
+      # changesets pending.
       - uses: changesets/action@a45c4d594aa4e2c509dc14a9f2b3b67ba3780d0d # v1.9.0
         id: changesets
+        if: steps.head.outputs.superseded != 'true'
         with:
           title: 'changesets: Release / Deploy'
           commit: 'release: version packages'
@@ -276,8 +304,8 @@ jobs:
     # without it a third run would cancel the pending one and its version
     # would stay unpublished. cancel-in-progress stays false (`queue: max` is invalid with
     # true) so a running publish is never cut off. The lock is on this job only:
-    # the version job and releases with nothing public to publish (a
-    # service-only tag release) must not wait behind an approval. finalize
+    # the version job (which has its own group) and releases with nothing public
+    # to publish (a service-only tag release) must not wait behind an approval. finalize
     # takes no lock: its Latest Release correction judges the current Latest
     # from current state after changesets/action runs. Two finalizes that
     # overlap tightly can still leave an older Latest; the next release's

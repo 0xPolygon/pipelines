@@ -296,8 +296,13 @@ check('finalize checks @changesets/cli before changesets/action, unconditionally
 const conc = jobs.publish?.concurrency;
 check('publish concurrency: group per repository and ref', conc?.group === 'npm-publish-${{ github.repository }}-${{ github.ref }}', json(conc));
 check('publish concurrency: cancel-in-progress false and queue max', conc?.['cancel-in-progress'] === false && conc?.queue === 'max', json(conc));
-const concElsewhere = ['version', 'build', 'finalize', 'snapshot'].filter((n) => 'concurrency' in (jobs[n] ?? {}));
-check('no concurrency on version, build, finalize or snapshot', concElsewhere.length === 0, concElsewhere.join(' '));
+const concElsewhere = ['build', 'finalize', 'snapshot'].filter((n) => 'concurrency' in (jobs[n] ?? {}));
+check('no concurrency on build, finalize or snapshot', concElsewhere.length === 0, concElsewhere.join(' '));
+// The version job is serialized in its own group: sharing the publish group
+// would park it behind a publish approval.
+const vconc = jobs.version?.concurrency;
+check('version concurrency: own group per repository and ref', vconc?.group === 'npm-release-version-${{ github.repository }}-${{ github.ref }}', json(vconc));
+check('version concurrency: cancel-in-progress false and queue max', vconc?.['cancel-in-progress'] === false && vconc?.queue === 'max', json(vconc));
 check('no workflow-level concurrency', !('concurrency' in wf), json(wf.concurrency));
 
 // Latest Release: recorded before changesets/action, corrected after it.
@@ -348,6 +353,7 @@ const vwant = [
   'actions/checkout',
   './.pipelines/.github/actions/check-workspace-protocol',
   './.pipelines/.github/actions/check-version-script',
+  './.pipelines/.github/actions/check-release-head',
   'run:rm -rf .pipelines .pipelines-guard',
   'run:pnpm install --frozen-lockfile --ignore-scripts',
   'actions/create-github-app-token',
@@ -355,6 +361,12 @@ const vwant = [
 ];
 const vhave = vsteps.map(vsig);
 check('version steps are exactly the allowlist, in order', json(vhave) === json(vwant), json(vhave));
+// A superseded run must not write the release PR or mint the token to do it.
+const vhead = vsteps.findIndex((st) => stepUses(st)?.endsWith('/check-release-head'));
+const vtoken = vsteps.findIndex((st) => stepUses(st) === 'actions/create-github-app-token');
+const notSuperseded = "steps.head.outputs.superseded != 'true'";
+check('version job: head check has id head and runs unconditionally', vsteps[vhead]?.id === 'head' && !('if' in (vsteps[vhead] ?? {})));
+check('version job: token minting and changesets/action are skipped in a superseded run', norm(vsteps[vtoken]?.if) === notSuperseded && norm(vsteps[vact]?.if) === notSuperseded, json([vsteps[vtoken]?.if, vsteps[vact]?.if]));
 // The allowlist does not look at a step's shell, env or with values, or at
 // job-level defaults, so the literal hook is also counted over the parsed
 // jobs (comments and the input's description are not occurrences).
