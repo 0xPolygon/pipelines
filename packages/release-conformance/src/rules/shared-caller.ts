@@ -15,6 +15,9 @@ import {
 } from '../canonical.ts';
 import { isSharedCallee } from '../repo-scan.ts';
 
+/** An opt-in input takes a boolean or an expression; any other literal is a typo GitHub would coerce silently. */
+const OPT_IN_VALUE = /^(?:true|false|\$\{\{[\s\S]*\}\})$/;
+
 const levelOf = ({
   permissions,
   scope
@@ -215,13 +218,23 @@ export const checkSharedCaller: Rule = ({ model, scan, profile, context }) => {
       }
     }
     for (const key of job.withKeys) {
-      if (!profile.withKeys.includes(key)) {
-        add({
-          ruleId: 'caller/inputs',
-          line: job.line,
-          message: `\`with\` key \`${key}\` is not one the canonical trigger passes (${profile.withKeys.join(', ')}).`
-        });
+      if (profile.withKeys.includes(key)) continue;
+      if (profile.optInWithKeys.includes(key)) {
+        const value = job.withValues[key] ?? '';
+        if (!OPT_IN_VALUE.test(value.trim())) {
+          add({
+            ruleId: 'caller/inputs',
+            line: job.line,
+            message: `\`with\` key \`${key}\` must be \`true\`, \`false\` or a \`\${{ ... }}\` expression, not \`${value}\`.`
+          });
+        }
+        continue;
       }
+      add({
+        ruleId: 'caller/inputs',
+        line: job.line,
+        message: `\`with\` key \`${key}\` is not allowed. The canonical trigger passes: ${profile.withKeys.join(', ') || '(none)'}. Allowed opt-ins: ${profile.optInWithKeys.join(', ') || '(none)'}.`
+      });
     }
   }
 

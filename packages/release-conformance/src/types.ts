@@ -144,6 +144,8 @@ export interface Profile {
   allowedEvents: Record<string, { inputs: string[] }>;
   secretNames: string[];
   withKeys: string[];
+  /** Opt-in `with` keys a caller may pass: the allowed opt-ins the release workflow declares as `workflow_call` inputs. */
+  optInWithKeys: string[];
   /** Highest level per scope across the callee's jobs. */
   floor: Record<string, PermissionLevel>;
   ceiling: Record<string, PermissionLevel>;

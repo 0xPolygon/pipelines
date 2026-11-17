@@ -38,10 +38,11 @@ const profileFrom = ({ trigger, release }: { trigger: string; release: string })
 const readExpected = (name: string): Profile =>
   JSON.parse(readFileSync(join(fixtures, 'expected-profiles', name), 'utf8')) as Profile;
 
-/** The shapes the canonical files may have: today's, and the one with the attestation job. */
+/** The shapes the canonical files may have: the base, the one with the attestation job, and the base with the `version_script` input. */
 const expected = {
   'npm-release.pr1.json': readExpected('npm-release.pr1.json'),
-  'npm-release.pr2.json': readExpected('npm-release.pr2.json')
+  'npm-release.pr2.json': readExpected('npm-release.pr2.json'),
+  'npm-release.pr3.json': readExpected('npm-release.pr3.json')
 };
 
 const liveTrigger = readFileSync(join(workflows, TRIGGER), 'utf8');
@@ -72,7 +73,8 @@ suite('canonical profile', () => {
   test('each committed profile is the one derived from its committed canonical fixtures', () => {
     for (const [name, shape] of [
       ['npm-release.pr1.json', 'pr1'],
-      ['npm-release.pr2.json', 'pr2']
+      ['npm-release.pr2.json', 'pr2'],
+      ['npm-release.pr3.json', 'pr3']
     ] as const) {
       const read = (file: string) => readFileSync(join(fixtures, 'canonical', shape, file), 'utf8');
       assert.deepEqual(

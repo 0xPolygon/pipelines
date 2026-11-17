@@ -22,7 +22,7 @@ const test = (name: string, body: () => void): void => {
 const fixtures = join(import.meta.dirname, 'fixtures');
 const callerDir = join(fixtures, 'shared-caller');
 
-const loadProfile = (shape: 'pr1' | 'pr2'): Profile => {
+const loadProfile = (shape: 'pr1' | 'pr2' | 'pr3'): Profile => {
   const read = (name: string) =>
     parseWorkflow({
       file: name,
@@ -35,6 +35,7 @@ const loadProfile = (shape: 'pr1' | 'pr2'): Profile => {
 };
 const pr1 = loadProfile('pr1');
 const pr2 = loadProfile('pr2');
+const pr3 = loadProfile('pr3');
 
 const context: RuleContext = {
   defaultBranch: 'main',
@@ -178,5 +179,46 @@ suite('failing callers: each fixture fails exactly the intended rule', () => {
   test('the message names the offending key', () => {
     const findings = runRule({ dir: callerDir, name: 'fail-inputs-extra.yml', profile: pr2 });
     assert.ok(findings[0]?.message.includes('extra_key'));
+  });
+});
+
+suite('shared caller: allowed opt-in inputs', () => {
+  for (const name of [
+    'pass-opt-in-version-script-true.yml',
+    'pass-opt-in-version-script-false.yml',
+    'pass-opt-in-version-script-expression.yml'
+  ]) {
+    test(`${name} passes when the release workflow declares the input`, () => {
+      assert.deepEqual(runRule({ dir: callerDir, name, profile: pr3 }), []);
+    });
+  }
+
+  test('a non-boolean, non-expression value fails caller/inputs', () => {
+    const findings = runRule({
+      dir: callerDir,
+      name: 'fail-opt-in-version-script-string.yml',
+      profile: pr3
+    });
+    assert.deepEqual(ruleIds(findings), ['caller/inputs']);
+    assert.ok(findings[0]?.message.includes('version_script'));
+  });
+
+  test('an unknown key still fails and the message lists the opt-ins', () => {
+    const findings = runRule({ dir: callerDir, name: 'fail-inputs-unknown-key.yml', profile: pr3 });
+    assert.deepEqual(ruleIds(findings), ['caller/inputs']);
+    assert.ok(findings[0]?.message.includes('foo'));
+    assert.ok(findings[0]?.message.includes('Allowed opt-ins: version_script'));
+    assert.ok(findings[0]?.message.includes('snapshot_tag'));
+  });
+
+  test('the opt-in fails when the release workflow does not declare the input', () => {
+    assert.deepEqual(pr2.optInWithKeys, []);
+    const findings = runRule({
+      dir: callerDir,
+      name: 'pass-opt-in-version-script-true.yml',
+      profile: pr2
+    });
+    assert.deepEqual(ruleIds(findings), ['caller/inputs']);
+    assert.ok(findings[0]?.message.includes('version_script'));
   });
 });

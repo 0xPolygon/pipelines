@@ -16,6 +16,14 @@ export const normalizeWorkflowTarget = (target: string): string => {
   return [owner.toLowerCase(), repo.toLowerCase(), ...rest].join('/');
 };
 
+/**
+ * `with` keys a caller may pass even though the canonical trigger does not. Each is an
+ * opt-in input of the shared release workflow that stays off unless the caller sets it:
+ * `version_script` lets a repository run its own `ci:version` script. A key here is only
+ * allowed while the release workflow still declares it as a `workflow_call` input.
+ */
+export const ALLOWED_OPT_IN_WITH_KEYS: readonly string[] = ['version_script'];
+
 /** Fixed settings: the most a caller may grant, and the refs it may use. */
 export const FIXED_CEILING: Record<string, PermissionLevel> = {
   contents: 'write',
@@ -71,10 +79,13 @@ export const deriveProfile = ({
   const allowedEvents: Profile['allowedEvents'] = {};
   for (const event of trigger.events) allowedEvents[event.name] = { inputs: [...event.inputs] };
   const caller = trigger.jobs.find((job) => job.uses !== undefined);
+  const declaredInputs =
+    release.events.find((event) => event.name === 'workflow_call')?.inputs ?? [];
   return {
     allowedEvents,
     secretNames: caller ? [...caller.secrets.names] : [],
     withKeys: caller ? [...caller.withKeys] : [],
+    optInWithKeys: ALLOWED_OPT_IN_WITH_KEYS.filter((key) => declaredInputs.includes(key)),
     floor: deriveFloor(release),
     ceiling: { ...FIXED_CEILING },
     allowedRefs: [...FIXED_ALLOWED_REFS],
