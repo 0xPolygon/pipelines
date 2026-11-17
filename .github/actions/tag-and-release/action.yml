@@ -1,0 +1,38 @@
+name: Collect release tags (3.x)
+description: >
+  Runs `changeset git-tag` (@changesets/cli 3.x) in the checked-out
+  repository to create the local git tags, and writes the tags it created to a
+  JSON file for the step that pushes them and creates the GitHub Releases
+  (`tag-and-release.cjs`, loaded from actions/github-script). Holds no token:
+  it removes the `.pipelines` checkout of this repository from the workspace
+  before the CLI runs, because the CLI executes the repository's own
+  dependencies. Fails when the tags the CLI reports differ from the tags it
+  created.
+
+outputs:
+  tags-file:
+    description: >
+      Path of the JSON file listing the created tags: an object with a `tags`
+      list of tag, packageName and directory entries.
+    value: ${{ steps.collect.outputs.tags-file }}
+
+runs:
+  using: composite
+  steps:
+    - name: Create local tags
+      id: collect
+      shell: bash
+      env:
+        # The action path goes through an env var before shell use to prevent
+        # expression injection.
+        ACTION_PATH: ${{ github.action_path }}
+      run: |
+        # The script is copied out and the workflow checkout removed first: a
+        # cone-mode sparse checkout still places this repository's root
+        # package.json and pnpm-workspace.yaml under .pipelines, and the CLI
+        # must not see them.
+        script_dir="$(mktemp -d "$RUNNER_TEMP/collect-tags.XXXXXX")"
+        cp "$ACTION_PATH/collect-tags.mjs" "$script_dir/"
+        rm -rf "$GITHUB_WORKSPACE/.pipelines"
+        TAGS_FILE="$script_dir/tags.json" node "$script_dir/collect-tags.mjs"
+        echo "tags-file=$script_dir/tags.json" >> "$GITHUB_OUTPUT"

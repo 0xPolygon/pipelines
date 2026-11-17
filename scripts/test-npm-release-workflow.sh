@@ -283,6 +283,12 @@ const packRun = YAML.parse(packAction).runs.steps.map((st) => st.run ?? '').join
 const rmAt = packRun.search(/rm -rf "\$GITHUB_WORKSPACE\/\.pipelines"/);
 const nodeAt = packRun.search(/node "\$script_dir\/pack-packages\.mjs"/);
 check('npm-pack removes the .pipelines checkout, then runs a copy of its script', rmAt >= 0 && nodeAt > rmAt && /cp "\$ACTION_PATH\/pack-packages\.mjs"/.test(packRun));
+// Tag collection: the workflow checkout must be gone before the CLI runs.
+const collectAction = fs.readFileSync(path.join(repoRoot, '.github/actions/tag-and-release/action.yml'), 'utf8');
+const collectRun = YAML.parse(collectAction).runs.steps.map((st) => st.run ?? '').join('\n');
+const rmAt2 = collectRun.search(/rm -rf "\$GITHUB_WORKSPACE\/\.pipelines"/);
+const nodeAt2 = collectRun.search(/node "\$script_dir\/collect-tags\.mjs"/);
+check('tag-and-release removes the .pipelines checkout, then runs a copy of collect-tags before the CLI can see the workspace', rmAt2 >= 0 && nodeAt2 > rmAt2 && /cp "\$ACTION_PATH\/collect-tags\.mjs"/.test(collectRun));
 const buildSteps = jobs.build?.steps ?? [];
 const pk = buildSteps.findIndex((st) => stepUses(st)?.endsWith('/npm-pack'));
 check('build runs npm-pack after the install', pk > buildSteps.findIndex((st) => /pnpm install/.test(st.run ?? '')) && pk >= 0);
@@ -309,15 +315,22 @@ check('finalize corrects Latest once, after changesets/action', fix > act && fin
 check('finalize passes the recorded Latest to the correction through env, not the script text', !/steps\./.test(String(fin[fix]?.with?.script ?? '')) && /previous-latest\.outputs\.previous-id/.test(fin[fix]?.env?.PREVIOUS_LATEST_ID ?? ''));
 check('both Latest github-script steps retry transient API errors', fin[rec]?.with?.retries === 3 && fin[fix]?.with?.retries === 3, json([fin[rec]?.with?.retries, fin[fix]?.with?.retries]));
 check('the Latest record step is unconditional', !('if' in fin[rec]));
-check('the Latest correction runs only when changesets/action reports a new tag (published)', fin[fix]?.if === "steps.changesets.outputs.published == 'true'" && fin[act]?.id === 'changesets', json(fin[fix]?.if));
+const tagColl = fin.findIndex((st) => stepUses(st)?.endsWith('/tag-and-release'));
+const tagRel = fin.findIndex((st) => isScript(st, 'tagAndRelease'));
+const mint = fin.findIndex((st) => stepUses(st) === 'actions/create-github-app-token');
+check('the Latest correction runs when changesets/action reports a new tag (published) or the 3.x tag-and-release step created a Release', fin[fix]?.if === "steps.changesets.outputs.published == 'true' || steps.tag-and-release.outputs.releases-created == 'true'" && fin[act]?.id === 'changesets' && fin[tagRel]?.id === 'tag-and-release', json(fin[fix]?.if));
+check('finalize has exactly one changesets/action step, pinned to v1.9.0 and only on major 2', fin.filter((st) => stepUses(st) === 'changesets/action').length === 1 && fin[act]?.uses === 'changesets/action@a45c4d594aa4e2c509dc14a9f2b3b67ba3780d0d' && norm(fin[act]?.if) === "steps.cli.outputs.major == '2'", json([fin[act]?.uses, fin[act]?.if]));
+check('git-tag runs before the app token is minted, only on major 3, after the cli check and Latest record', tagColl > rec && mint > tagColl && norm(fin[tagColl]?.if) === "steps.cli.outputs.major == '3'" && fin[tagColl]?.id === 'tag-collect', `record ${rec} collect ${tagColl} mint ${mint}`);
+check('the git-tag step holds no secret or app token in env or with', !/secrets\.|app-token/.test(json([fin[tagColl]?.env, fin[tagColl]?.with])), json([fin[tagColl]?.env, fin[tagColl]?.with]));
+check('the tag-and-release step runs only on major 3, after the token mint and before the tag check and the Latest correction, with its inputs through env', tagRel > mint && tagRel > act && norm(fin[tagRel]?.if) === "steps.cli.outputs.major == '3'" && fin[tagRel]?.with?.['github-token'] === '${{ steps.app-token.outputs.token }}' && fin[tagRel]?.with?.retries === 3 && !/\$\{\{/.test(String(fin[tagRel]?.with?.script ?? '')) && /tag-collect\.outputs\.tags-file/.test(fin[tagRel]?.env?.TAGS_FILE ?? ''), json(fin[tagRel]));
 const tagCheck = fin.findIndex((st) => stepUses(st)?.endsWith('/check-release-tags'));
-check('finalize checks release tags before the Latest correction', tagCheck > act && tagCheck < fix, `check-release-tags at ${tagCheck}, correction at ${fix}`);
+check('finalize checks release tags after both tagging arms and before the Latest correction', tagCheck > act && tagCheck > tagRel && tagCheck < fix, `check-release-tags at ${tagCheck}, correction at ${fix}`);
 // The checkout the correction loads its script from is unconditional (a
 // release with nothing public skips publish, and the correction still runs)
 // and must carry both actions' files.
 const shared = fin.map((st, i) => ({ st, i })).filter(({ st, i }) => stepUses(st) === 'actions/checkout' && st.with?.path === '.pipelines' && i > act && i < fix).pop();
 const sparse = String(shared?.st.with?.['sparse-checkout'] ?? '').split('\n').map((l) => l.trim());
-check('finalize: the .pipelines checkout before the correction has no if and lists check-release-tags and correct-latest-release', shared !== undefined && !('if' in shared.st) && sparse.includes('.github/actions/check-release-tags') && sparse.includes('.github/actions/correct-latest-release'), json(shared?.st));
+check('finalize: the .pipelines checkout before the correction has no if and lists check-release-tags, correct-latest-release and tag-and-release, before the tag-and-release step', shared !== undefined && !('if' in shared.st) && sparse.includes('.github/actions/check-release-tags') && sparse.includes('.github/actions/correct-latest-release') && sparse.includes('.github/actions/tag-and-release') && shared.i < tagRel, json(shared?.st));
 check('finalize permissions stay contents: write only', json(jobs.finalize?.permissions) === json({ contents: 'write' }), json(jobs.finalize?.permissions));
 
 const art = Object.values(jobs.build?.steps ?? []).find((st) => stepUses(st) === 'actions/upload-artifact');
