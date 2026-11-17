@@ -106,6 +106,21 @@ export const secretReferences = (text: string): string[] => {
   return names;
 };
 
+/**
+ * True when an expression uses the `secrets` context in a way that names no single secret:
+ * `secrets[matrix.name]`, `toJSON(secrets)`, a bare `secrets`. Such a use can reach any secret, so
+ * a caller that must fail closed treats it as holding one.
+ */
+export const usesSecretsDynamically = (text: string): boolean => {
+  for (const expression of text.matchAll(/\$\{\{([\s\S]*?)\}\}/g)) {
+    for (const use of (expression[1] ?? '').matchAll(
+      /\bsecrets\b(\s*(?:\.\s*[A-Za-z0-9_-]+|\[\s*(?:'[^']*'|"[^"]*")\s*\]))?/gi
+    ))
+      if (use[1] === undefined) return true;
+  }
+  return false;
+};
+
 /** Environment variable names the npm client reads its registry token from. */
 export const NPM_TOKEN_KEYS = new Set(['NODE_AUTH_TOKEN', 'NPM_TOKEN']);
 
@@ -115,7 +130,11 @@ const envSecretRefs = (env: unknown): EnvSecretRef[] => {
   if (isRecord(env)) {
     for (const [key, entry] of Object.entries(env)) {
       const expression = toText(entry);
-      if (NPM_TOKEN_KEYS.has(key.toUpperCase()) || secretReferences(expression).length > 0)
+      if (
+        NPM_TOKEN_KEYS.has(key.toUpperCase()) ||
+        secretReferences(expression).length > 0 ||
+        usesSecretsDynamically(expression)
+      )
         refs.push({ key, expression });
     }
   }
@@ -223,8 +242,13 @@ const parseSteps = ({
   return raw.map((entry, index): StepModel => {
     const step = isRecord(entry) ? entry : {};
     const uses = typeof step['uses'] === 'string' ? parseUses(step['uses']) : undefined;
+    // A step reached through a YAML alias has no node of its own: the alias (or the `steps` key) is the nearest line.
     const model: StepModel = {
-      line: lineOfNode(lines, ['jobs', jobId, 'steps', index]),
+      line:
+        lineOfNode(lines, ['jobs', jobId, 'steps', index]) ||
+        lineOfNode(lines, ['jobs', jobId, 'steps']) ||
+        lineOfKey(lines, ['jobs', jobId, 'steps']) ||
+        lineOfKey(lines, ['jobs', jobId]),
       with: toStringMap(step['with']),
       envSecretRefs: envSecretRefs(step['env'])
     };
@@ -268,7 +292,8 @@ const parseJobs = ({
       environment: parseEnvironment(job['environment']),
       secrets: {
         inherit: secrets === 'inherit',
-        names: isRecord(secrets) ? Object.keys(secrets) : []
+        names: isRecord(secrets) ? Object.keys(secrets) : [],
+        values: isRecord(secrets) ? toStringMap(secrets) : {}
       },
       withKeys: isRecord(job['with']) ? Object.keys(job['with']) : [],
       withValues: toStringMap(job['with']),

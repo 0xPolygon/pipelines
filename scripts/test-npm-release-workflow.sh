@@ -122,6 +122,9 @@ done < <(grep -hE '^[[:space:]]*-?[[:space:]]*uses:' "$REL" "$TRIG")
 [ -z "$unpinned" ]
 check "every third-party uses: has a 40-hex SHA and a # vX.Y.Z comment" $? "$unpinned"
 
+! grep -nE 'pnpm dlx|npx |(^|[^p])npm exec' "$WORK/rel.yml" >"$WORK/out"
+check "no pnpm dlx, npx or npm exec" $? "$(head -2 "$WORK/out" | tr '\n' ';')"
+
 # --- Trigger permissions cover every job's request (write >= read) ---
 rank() { case "$1" in write) echo 2 ;; read) echo 1 ;; *) echo 0 ;; esac; }
 awk '/^permissions:/{p=1;next} p&&/^[^ ]/{p=0} p&&/^  [a-z-]+: (read|write)/{sub(/:/,"");print $1, $2}' "$WORK/trig.yml" >"$WORK/trig-perms"

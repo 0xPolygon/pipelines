@@ -195,11 +195,20 @@ const CASES: Record<string, Case> = {
   'runner/registry-fetch-with-credential': {
     passing: [
       { path: 'runner/pass-credential-no-runner.yml' },
-      { path: 'runner/pass-github-token-only.yml' }
+      { path: 'runner/pass-github-token-only.yml' },
+      { path: 'runner/pass-echo-text.yml' },
+      { path: 'runner/pass-grep-pattern.yml' },
+      { path: 'runner/pass-npm-init-bare.yml' },
+      { path: 'runner/pass-unreadable-action-plain.yml' }
     ],
     failing: [
       { path: 'runner/fail-credential-npx.yml' },
-      { path: 'runner/fail-secret-wrangler.yml' }
+      { path: 'runner/fail-secret-wrangler.yml' },
+      { path: 'runner/fail-echo-piped.yml' },
+      { path: 'runner/fail-heredoc-runner.yml' },
+      { path: 'runner/fail-backtick-body.yml' },
+      { path: 'runner/fail-create.yml' },
+      { path: 'runner/fail-unreadable-action.yml' }
     ]
   },
   'workflow/unparseable': {

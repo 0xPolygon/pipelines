@@ -23,10 +23,12 @@ import {
 } from './canonical.ts';
 import { createScriptReader } from './package-scripts.ts';
 import { linkedParent, readRegularFile } from './safe-read.ts';
+import { blankSearchPatterns } from './search-patterns.ts';
 import {
   analyzeShell,
   isPublishWord,
   publishWordTest,
+  registryRunner,
   stripVersion,
   normalizeShell,
   stripShellComments
@@ -182,6 +184,104 @@ export const textPublishHits = (text: string): TextHits => {
         if (printer && !lineRuns && !piped && !redirected) hits.printed = true;
         else if (hit === 'sure' || printer) hits.confirmed = true;
         else hits.unknownWord.push({ tool, word });
+      }
+    }
+  }
+  return hits;
+};
+
+const RUNNER_BINARIES = new Set(['npx', 'pnpx', 'bunx']);
+const RUNNER_MANAGERS = new Set(['npm', 'pnpm', 'yarn', 'bun']);
+
+/** A runner word read as a tool: shell quoting, a leading path and any `@version` suffix removed. */
+const runnerToolName = (token: string): string => toolName(token).replace(/^.*\//, '');
+
+/**
+ * `line.split(/([;&|])/)` that leaves separators inside quotes alone, so `echo "a; npx b"` stays one
+ * command. A quote that is never closed (prose such as `don't`) gives the plain split instead: the
+ * test fails closed rather than hiding the rest of the line.
+ */
+const splitCommandParts = (line: string): string[] => {
+  const parts: string[] = [];
+  let current = '';
+  let quote = '';
+  for (let at = 0; at < line.length; at += 1) {
+    const char = line[at] ?? '';
+    if (quote !== '') {
+      if (char === '\\' && quote === '"') {
+        current += char + (line[at + 1] ?? '');
+        at += 1;
+        continue;
+      }
+      if (char === quote) quote = '';
+      current += char;
+    } else if (char === '\\') {
+      current += char + (line[at + 1] ?? '');
+      at += 1;
+    } else if (char === '"' || char === "'") {
+      quote = char;
+      current += char;
+    } else if (char === ';' || char === '&' || char === '|') {
+      parts.push(current, char);
+      current = '';
+    } else current += char;
+  }
+  parts.push(current);
+  return quote === '' ? parts : line.split(/([;&|])/);
+};
+
+/**
+ * Text-level test for a registry-fetching runner, the second opinion beside the command parser: every
+ * `npx`, `pnpx` or `bunx` word, and every `npm|pnpm|yarn|bun` followed by flags (and the values flags
+ * may take) and then `exec`, `dlx` or `x`, anywhere in the text, in a command, a quoted string, a
+ * heredoc or an action input. Only an `echo` or `printf` argument that is not piped, substituted,
+ * evaluated or redirected is text. Each hit carries its source line. One pass over each line, so the
+ * cost is linear.
+ */
+export const textRunnerHits = (text: string): { runner: string; line: string }[] => {
+  const hits: { runner: string; line: string }[] = [];
+  for (const line of normalizeShell(text).split('\n')) {
+    const lineRuns = RUNS_PRINTED_TEXT.test(line);
+    const parts = splitCommandParts(line);
+    for (let at = 0; at < parts.length; at += 2) {
+      const tokens = blankSearchPatterns(parts[at] ?? '').split(/[\s=]+/);
+      const separator = parts[at + 1];
+      const printer = PRINTERS.has(segmentCommand(tokens));
+      if (printer && !lineRuns && separator !== '|') continue;
+      for (let index = 0; index < tokens.length; index += 1) {
+        const tool = runnerToolName(tokens[index] ?? '');
+        if (RUNNER_BINARIES.has(tool)) {
+          hits.push({ runner: tool, line });
+          continue;
+        }
+        if (!RUNNER_MANAGERS.has(tool)) continue;
+        let next = index + 1;
+        let afterFlag = false;
+        while (next < tokens.length) {
+          const token = tokens[next] ?? '';
+          if (token === '') {
+            next += 1;
+            continue;
+          }
+          if (RUNNER_MANAGERS.has(runnerToolName(token))) break;
+          if (token.startsWith('-')) afterFlag = !token.includes('=');
+          else if (token.startsWith('$') || afterFlag) afterFlag = false;
+          else break;
+          next += 1;
+        }
+        let arg: string | undefined;
+        for (let after = next + 1; after < tokens.length; after += 1) {
+          const token = tokens[after] ?? '';
+          if (token === '' || token.startsWith('-')) continue;
+          arg = bareWord(token);
+          break;
+        }
+        const runner = registryRunner({
+          manager: tool,
+          sub: bareWord(tokens[next] ?? ''),
+          ...(arg === undefined ? {} : { arg })
+        });
+        if (runner !== undefined) hits.push({ runner, line });
       }
     }
   }
@@ -594,7 +694,7 @@ const entryEventsOf = ({
  * `./.github/workflows/<file>` and a call by `<this repository>/.github/workflows/<file>@<ref>`
  * both reach a file of this tree, so both count as local callers.
  */
-const localCallee = ({ uses, repository }: { uses: UsesRef; repository: string }) => {
+export const localCallee = ({ uses, repository }: { uses: UsesRef; repository: string }) => {
   if (uses.local) {
     return uses.raw.startsWith(LOCAL_WORKFLOW_PREFIX) ? uses.raw.replace(/^\.\//, '') : undefined;
   }

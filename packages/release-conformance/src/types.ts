@@ -78,7 +78,7 @@ export interface JobModel {
   /** True when neither level declares permissions: the token default applies. */
   defaultTokenPermissions: boolean;
   environment: EnvironmentModel;
-  secrets: { inherit: boolean; names: string[] };
+  secrets: { inherit: boolean; names: string[]; values: Record<string, string> };
   withKeys: string[];
   withValues: Record<string, string>;
   envSecretRefs: EnvSecretRef[];

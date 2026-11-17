@@ -39,7 +39,7 @@ export const NEVER_WAIVABLE_RULE_IDS: readonly string[] = [
   'publisher/pull-request-target',
   'publisher/id-token-with-code',
   'publisher/token-with-code',
-  // A registry fetch at run time in a job holding a publishing credential runs code the lockfile never vouched for.
+  // A registry fetch at run time in a job holding a credential runs code the lockfile never vouched for.
   'runner/registry-fetch-with-credential'
 ];
 
