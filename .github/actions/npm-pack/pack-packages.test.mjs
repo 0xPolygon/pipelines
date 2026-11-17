@@ -649,7 +649,7 @@ describe('ignore (applies on @changesets/cli 3.x only)', () => {
     const ws = makeWs({ ignore: ['@s/*'], names: ['a'] });
     await assert.rejects(
       resolveIgnoredNames({ root: ws.root, run: async () => '', loadContext: loadFor(['@s/*']) }),
-      /Could not determine the version/
+      /Could not determine the version[\s\S]*Install @changesets\/cli 2\.x or 3\.x from the repository's lockfile/
     );
     await assert.rejects(
       resolveIgnoredNames({
@@ -661,7 +661,16 @@ describe('ignore (applies on @changesets/cli 3.x only)', () => {
     );
     await assert.rejects(
       resolveIgnoredNames({ root: ws.root, run: versionRun('4.0.0') }),
-      /not supported/
+      /not supported\. Install @changesets\/cli 2\.x or 3\.x from the repository's lockfile/
+    );
+  });
+
+  it('names .changeset/config.json and the parse error when the config is malformed', async () => {
+    const ws = makeWs({ ignore: ['@s/*'], names: ['a'] });
+    writeFileSync(join(ws.root, '.changeset', 'config.json'), '{ not json');
+    await assert.rejects(
+      resolveIgnoredNames({ root: ws.root, run: versionRun('3.0.3') }),
+      /Could not parse \.changeset\/config\.json: .*Fix the JSON syntax in \.changeset\/config\.json/
     );
   });
 

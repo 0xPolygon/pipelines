@@ -25,6 +25,20 @@ const readJson = (path) => JSON.parse(readFileSync(path, 'utf8'));
 
 const readJsonIfExists = (path) => (existsSync(path) ? readJson(path) : undefined);
 
+// The changesets config is the one file a maintainer edits by hand, so a parse
+// error names it and says what to do instead of surfacing a bare JSON error.
+const readChangesetsConfig = (root) => {
+  try {
+    return readJsonIfExists(join(root, '.changeset', 'config.json'));
+  } catch (error) {
+    throw new Error(
+      `Could not parse .changeset/config.json: ${error.message}. ` +
+        'Fix the JSON syntax in .changeset/config.json and re-run.',
+      { cause: error }
+    );
+  }
+};
+
 // Workspace member globs the repository declares: the `packages:` list of
 // pnpm-workspace.yaml (block or flow list), or `workspaces` in package.json
 // (array, or `{ packages }`). Returns undefined when none are declared. Such a
@@ -177,16 +191,23 @@ export async function resolveIgnoredNames({
   run = runCommand,
   loadContext = loadChangesetsContext
 }) {
-  const ignore = readJsonIfExists(join(root, '.changeset', 'config.json'))?.ignore;
+  const ignore = readChangesetsConfig(root)?.ignore;
   if (ignore === undefined || (Array.isArray(ignore) && ignore.length === 0)) return [];
   const major = parseMajor(
     await run({ command: 'pnpm', args: ['exec', 'changeset', '--version'], cwd: root })
   );
   if (major === undefined) {
-    throw new Error('Could not determine the version of @changesets/cli to apply "ignore".');
+    throw new Error(
+      'Could not determine the version of @changesets/cli to apply "ignore". ' +
+        "Install @changesets/cli 2.x or 3.x from the repository's lockfile."
+    );
   }
   if (major === 2) return [];
-  if (major !== 3) throw new Error(`@changesets/cli major ${major} is not supported.`);
+  if (major !== 3)
+    throw new Error(
+      `@changesets/cli major ${major} is not supported. ` +
+        "Install @changesets/cli 2.x or 3.x from the repository's lockfile."
+    );
   const context = await loadContext({ root });
   if (context.cliMajor !== major) {
     throw new Error(
@@ -205,7 +226,7 @@ export function readPreState(root) {
 // The `access` option from `.changeset/config.json`. When the option is
 // unset, changesets defaults it to "restricted".
 export function readConfigAccess(root) {
-  return readJsonIfExists(join(root, '.changeset', 'config.json'))?.access;
+  return readChangesetsConfig(root)?.access;
 }
 
 // Access for a package: its own `publishConfig.access`, else the changesets

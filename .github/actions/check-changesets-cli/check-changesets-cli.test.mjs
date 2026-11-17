@@ -76,7 +76,7 @@ describe('check-changesets-cli: version detection', () => {
     const lines = [];
     assert.equal(main({ run: answer('2.1.0'), log: (l) => lines.push(l), env: {} }), 0);
     assert.equal(main({ run: answer('4.0.0'), log: (l) => lines.push(l), env: {} }), 1);
-    assert.match(lines.at(-1), /^::error title=Unsupported @changesets\/cli::/);
+    assert.match(lines.at(-1), /^::error title=Unsupported @changesets\/cli major::/);
   });
 
   it('main writes version and major to GITHUB_OUTPUT', () => {
@@ -87,6 +87,35 @@ describe('check-changesets-cli: version detection', () => {
   });
 });
 
+describe('check-changesets-cli: annotation title per failure kind', () => {
+  const titleOf = (opts) => {
+    const lines = [];
+    assert.equal(main({ log: (l) => lines.push(l), env: {}, ...opts }), 1);
+    return /^::error title=([^:]*)::/.exec(lines.at(-1))?.[1];
+  };
+
+  it('unsupported major', () => {
+    assert.equal(titleOf({ run: answer('4.0.0') }), 'Unsupported @changesets/cli major');
+  });
+
+  it('unreadable version', () => {
+    assert.equal(titleOf({ run: answer('garbage') }), 'Unreadable @changesets/cli version');
+  });
+
+  it('privatePackages not explicit', () => {
+    const r = repo({ rootPrivate: true, config: {} });
+    assert.equal(titleOf({ run: answer('3.0.1'), ...r }), 'privatePackages not explicit');
+  });
+
+  it('unreadable or invalid config', () => {
+    const r = repo({ rootPrivate: true, config: '{ not json' });
+    assert.equal(
+      titleOf({ run: answer('3.0.1'), ...r }),
+      'Unreadable or invalid changesets config'
+    );
+  });
+});
+
 describe('check-changesets-cli: privatePackages on 3.x', () => {
   const privateRepo = (config) => repo({ rootPrivate: true, config });
 
@@ -94,8 +123,23 @@ describe('check-changesets-cli: privatePackages on 3.x', () => {
     assert.throws(() => three(privateRepo({})), /privatePackages/);
   });
 
+  it('3.x + key true passes', () => {
+    assert.equal(three(privateRepo({ privatePackages: true })).major, 3);
+  });
+
   it('3.x + key false passes', () => {
     assert.equal(three(privateRepo({ privatePackages: false })).major, 3);
+  });
+
+  it('3.x + {version:true} fails with the shape message naming the config file', () => {
+    assert.throws(
+      () => three(privateRepo({ privatePackages: { version: true } })),
+      /\.changeset\/config\.json.*true, false, or an object with\s+boolean "version" and "tag"/
+    );
+  });
+
+  it('3.x + key absent fails with the shape message', () => {
+    assert.throws(() => three(privateRepo({})), /missing or malformed.*true, false, or an object/);
   });
 
   it('3.x + object with both booleans passes', () => {

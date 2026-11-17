@@ -112,7 +112,9 @@ async function tagAndRelease({ github, context, core, tagsFile, workspace }) {
   if (wrongCommit.length > 0) {
     throw new Error(
       `These tags already exist on the remote at a different commit than ${context.sha}, ` +
-        `and are never moved: ${wrongCommit.join(', ')}`
+        `and are never moved: ${wrongCommit.join(', ')}. Check whether that version was released ` +
+        'from another commit; if the existing tag is wrong, delete it in the repository and ' +
+        're-run the failed job. The workflow never moves or deletes a tag itself.'
     );
   }
   for (const tag of refsToCreate) {

@@ -20,6 +20,22 @@ export function defaultRun(command, args) {
 
 const SUPPORTED_MAJORS = ['2', '3'];
 
+// Each failure kind has its own annotation title so the Actions UI says what
+// is wrong; a bare Error from a dependency falls back to the unsupported title.
+const TITLES = {
+  unsupportedMajor: 'Unsupported @changesets/cli major',
+  unreadableVersion: 'Unreadable @changesets/cli version',
+  privatePackages: 'privatePackages not explicit',
+  config: 'Unreadable or invalid changesets config'
+};
+
+class CheckError extends Error {
+  constructor(kind, message) {
+    super(message);
+    this.title = TITLES[kind];
+  }
+}
+
 const readJson = (path) => JSON.parse(readFileSync(path, 'utf8'));
 
 // Workspace member globs: the `packages:` list of pnpm-workspace.yaml (block or
@@ -78,10 +94,10 @@ function packagesInScope({ root, listProjects }) {
 
 const isBoolean = (value) => typeof value === 'boolean';
 
-// Explicit means present and either `false` or an object with boolean
-// `version` and `tag`.
+// Explicit means present and either a boolean (changesets expands a boolean b
+// to { version: b, tag: b }) or an object with boolean `version` and `tag`.
 function privatePackagesIsExplicit(value) {
-  if (value === false) return true;
+  if (isBoolean(value)) return true;
   return (
     value !== null &&
     typeof value === 'object' &&
@@ -101,18 +117,20 @@ function checkPrivatePackagesConfig({ root, listProjects, run }) {
       listProjects: listProjects ?? (() => listProjectsWithPnpm({ root, run }))
     });
   } catch (err) {
-    throw new Error(
+    throw new CheckError(
+      'config',
       `Could not read .changeset/config.json or the workspace package list (${err.message}). ` +
         'Both are needed to check the "privatePackages" setting.'
     );
   }
   const hasPrivate = packages.some((pkg) => pkg.private === true);
   if (hasPrivate && !privatePackagesIsExplicit(config.privatePackages)) {
-    throw new Error(
-      'This repository has private packages and @changesets/cli 3.x, but ' +
-        '".changeset/config.json" does not set "privatePackages" explicitly. Without it, ' +
-        'private packages get no version, tag or GitHub Release on 3.x. Set ' +
-        '"privatePackages": { "version": true, "tag": true }.'
+    throw new CheckError(
+      'privatePackages',
+      'This repository has private packages and @changesets/cli 3.x, but "privatePackages" in ' +
+        '".changeset/config.json" is missing or malformed. Without it, private packages get no ' +
+        'version, tag or GitHub Release on 3.x. Set it to true, false, or an object with ' +
+        'boolean "version" and "tag", for example "privatePackages": { "version": true, "tag": true }.'
     );
   }
 }
@@ -127,14 +145,16 @@ export function checkChangesetsCli({ run = defaultRun, root = '.', listProjects 
   const version = result.stdout.trim().split('\n').pop()?.trim() ?? '';
   const match = /^(\d+)\.\d+\.\d+/.exec(version);
   if (result.status !== 0 || !match) {
-    throw new Error(
+    throw new CheckError(
+      'unreadableVersion',
       'Could not determine the version of @changesets/cli. Add @changesets/cli (major 2 or 3) ' +
         "to the repository's devDependencies and install it from the lockfile."
     );
   }
   const major = match[1];
   if (!SUPPORTED_MAJORS.includes(major)) {
-    throw new Error(
+    throw new CheckError(
+      'unsupportedMajor',
       `This workflow supports @changesets/cli majors 2 and 3; the repository resolves ${version}. ` +
         "Install a supported @changesets/cli from the repository's lockfile."
     );
@@ -158,7 +178,7 @@ export function main({
     }
     return 0;
   } catch (err) {
-    log(`::error title=Unsupported @changesets/cli::${err.message}`);
+    log(`::error title=${err.title ?? TITLES.unsupportedMajor}::${err.message}`);
     return 1;
   }
 }

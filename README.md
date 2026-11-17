@@ -58,7 +58,7 @@ system state automatically.
 | `actions/docker-test` | Resolve service from tag, build image, start container, run tests, stop | No — pure shell |
 | `actions/npm-pack` | Pack every public workspace package whose version is not on npm into tarballs and write `manifest.json`; holds no publish credential | No — dependency-free Node script |
 | `actions/npm-publish-tarballs` | Publish the tarballs listed in `manifest.json` after checking each file's SHA-256 and the npm client version, then verify every publish by reading all versions back from the registry (staged publishing is not supported yet), so tags and GitHub Releases are created only after the version is readable from the registry; needs no checkout or install | No — dependency-free Node script |
-| `actions/check-changesets-cli` | Fail unless the repository's resolved `@changesets/cli` is 2.x or 3.x, report which, and on 3.x require an explicit `privatePackages` setting when private packages exist | No — dependency-free Node script |
+| `actions/check-changesets-cli` | Fail unless the repository's resolved `@changesets/cli` is 2.x or 3.x, report which, and on 3.x require an explicit `privatePackages` setting (`true`, `false` or an object with boolean `version` and `tag`) when private packages exist | No — dependency-free Node script |
 | `actions/tag-and-release` | `@changesets/cli` 3.x: run `changeset git-tag` with no token in the `collect-tags` job, validate the resulting tags file with plain Node, then push the tags and create a GitHub Release for each in `finalize`; holds no publish credential | No — dependency-free Node script |
 | `actions/check-version-script` | When the version hook is enabled, fail unless the root `package.json` defines `ci:version` | No — dependency-free Node script |
 | `actions/release-guard` | Fail unless the run is a push to the repository's default branch | No — dependency-free Node script |
@@ -314,7 +314,8 @@ skips `publish` and is tagged by `finalize` without any approval.
 No trigger change is needed: the workflow picks its arm from the installed
 CLI, so a repository moves by changing its own dependencies and config.
 
-- Set `privatePackages` explicitly in `.changeset/config.json`, for example
+- Set `privatePackages` explicitly in `.changeset/config.json`: `true`,
+  `false`, or an object with boolean `version` and `tag`, for example
   `"privatePackages": { "version": true, "tag": true }`. 3.x neither versions
   nor tags private packages by default, so services would never be tagged. A
   repository with private packages and no explicit setting fails early.

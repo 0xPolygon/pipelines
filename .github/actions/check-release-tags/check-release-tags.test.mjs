@@ -279,6 +279,8 @@ describe('check-release-tags', () => {
       });
       assert.equal(code, 1);
       assert.match(logs.join('\n'), /@s\/a@1\.0\.0 \(points at another commit\)/);
+      assert.match(logs.join('\n'), /delete it in the repository and re-run the failed job/);
+      assert.match(logs.join('\n'), /never moves or deletes a tag itself/);
     });
 
     it('follows an annotated tag to the commit it points at', async () => {

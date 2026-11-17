@@ -104,7 +104,10 @@ describe('tag-and-release', () => {
   it('a ref at another commit fails and creates nothing for that tag', async () => {
     const fixture = setup({ tags: [pub('1.0.0')], changelogs: { 'packages/pub': log('1.0.0') } });
     const gh = fakeGithub({ refs: { '@s/pub@1.0.0': { type: 'commit', sha: OTHER } } });
-    await assert.rejects(run({ gh, fixture }), /different commit/);
+    await assert.rejects(
+      run({ gh, fixture }),
+      /different commit[\s\S]*delete it in the repository and re-run the failed job[\s\S]*never moves or deletes a tag itself/
+    );
     assert.equal(gh.calls.createRef.length, 0);
     assert.equal(gh.calls.createRelease.length, 0);
   });

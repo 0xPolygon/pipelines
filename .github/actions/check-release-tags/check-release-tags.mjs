@@ -398,7 +398,10 @@ export async function main({
       log(
         `::error title=Release tags missing::No git tag or GitHub Release found for: ${[...missing].join(', ')}. ` +
           "Every package published or tagged by this run needs a tag at the run's commit and, where a " +
-          'changelog exists, a GitHub Release; on @changesets/cli 3.x every package that should be tagged needs its tag. Re-running the job is safe: it only reads.'
+          'changelog exists, a GitHub Release; on @changesets/cli 3.x every package that should be tagged needs its tag. Re-running the job is safe: it only reads. ' +
+          'A tag marked "points at another commit" already exists at a different commit: check whether that version ' +
+          'was released from another commit, and if the existing tag is wrong, delete it in the repository and re-run the failed job. ' +
+          'The workflow never moves or deletes a tag itself.'
       );
       return 1;
     }
