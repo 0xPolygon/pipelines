@@ -190,16 +190,24 @@ export const textPublishHits = (text: string): TextHits => {
   return hits;
 };
 
-const RUNNER_BINARIES = new Set(['npx', 'pnpx', 'bunx']);
-const RUNNER_MANAGERS = new Set(['npm', 'pnpm', 'yarn', 'bun']);
-
-/** A runner word read as a tool: shell quoting, a leading path and any `@version` suffix removed. */
-const runnerToolName = (token: string): string => toolName(token).replace(/^.*\//, '');
+/**
+ * A runner word in a name-like context is not a command: `mynpx`, `npxfoo`, `npx-foo`, `@npm/x`. A
+ * word right after a written-out escape (`\n`, `\t`) still counts: the text may be printed into a script.
+ */
+const RUNNER_BINARY_WORD =
+  /(?:(?<![A-Za-z0-9_@-])|(?<=\\[nt]))(npx|pnpx|bunx)(?![A-Za-z0-9_-]|\.[A-Za-z0-9])/g;
+const MANAGER_WORD =
+  /(?:(?<![A-Za-z0-9_@-])|(?<=\\[nt]))(npm|pnpm|yarn|bun)(?![A-Za-z0-9_-]|\.[A-Za-z0-9])/g;
+/** Process substitution (`<(…)`, `>(…)`) runs a command whose output or input is the text. */
+const RUNNER_LINE_RUNS = new RegExp(`${RUNS_PRINTED_TEXT.source}|[<>]\\(`);
+/** Redirect targets that carry no text anywhere a command could read it back. */
+const HARMLESS_TARGET = /^\$\{?GITHUB_STEP_SUMMARY\}?$|^\/dev\/(?:null|stderr)$/;
 
 /**
  * `line.split(/([;&|])/)` that leaves separators inside quotes alone, so `echo "a; npx b"` stays one
- * command. A quote that is never closed (prose such as `don't`) gives the plain split instead: the
- * test fails closed rather than hiding the rest of the line.
+ * command, and leaves the `&` of a redirection (`2>&1`, `>&2`, `&>file`) with its command, so a pipe
+ * after `2>&1` is still the pipe of that command. A quote that is never closed (prose such as
+ * `don't`) gives the plain split instead: the test fails closed rather than hiding the rest of the line.
  */
 const splitCommandParts = (line: string): string[] => {
   const parts: string[] = [];
@@ -221,6 +229,11 @@ const splitCommandParts = (line: string): string[] => {
     } else if (char === '"' || char === "'") {
       quote = char;
       current += char;
+    } else if (
+      char === '&' &&
+      (line[at - 1] === '>' || line[at - 1] === '<' || line[at + 1] === '>')
+    ) {
+      current += char;
     } else if (char === ';' || char === '&' || char === '|') {
       parts.push(current, char);
       current = '';
@@ -231,55 +244,234 @@ const splitCommandParts = (line: string): string[] => {
 };
 
 /**
- * Text-level test for a registry-fetching runner, the second opinion beside the command parser: every
- * `npx`, `pnpx` or `bunx` word, and every `npm|pnpm|yarn|bun` followed by flags (and the values flags
- * may take) and then `exec`, `dlx` or `x`, anywhere in the text, in a command, a quoted string, a
- * heredoc or an action input. Only an `echo` or `printf` argument that is not piped, substituted,
- * evaluated or redirected is text. Each hit carries its source line. One pass over each line, so the
- * cost is linear.
+ * True when the command's stdout can leave the command as something a later command reads: a redirect
+ * to any file (or process substitution, `$GITHUB_OUTPUT`, `$GITHUB_ENV`) except `$GITHUB_STEP_SUMMARY`,
+ * `/dev/null` and stderr (`>&2`, `1>&2`). A redirect of another descriptor (`2>file`) carries no stdout.
+ * One pass over the characters, so the cost is linear in the part.
  */
-export const textRunnerHits = (text: string): { runner: string; line: string }[] => {
-  const hits: { runner: string; line: string }[] = [];
-  for (const line of normalizeShell(text).split('\n')) {
-    const lineRuns = RUNS_PRINTED_TEXT.test(line);
-    const parts = splitCommandParts(line);
-    for (let at = 0; at < parts.length; at += 2) {
-      const tokens = blankSearchPatterns(parts[at] ?? '').split(/[\s=]+/);
-      const separator = parts[at + 1];
-      const printer = PRINTERS.has(segmentCommand(tokens));
-      if (printer && !lineRuns && separator !== '|') continue;
-      for (let index = 0; index < tokens.length; index += 1) {
-        const tool = runnerToolName(tokens[index] ?? '');
-        if (RUNNER_BINARIES.has(tool)) {
-          hits.push({ runner: tool, line });
+const redirectsStdout = (part: string): boolean => {
+  let quote = '';
+  for (let at = 0; at < part.length; at += 1) {
+    const char = part[at] ?? '';
+    if (quote !== '') {
+      if (char === '\\' && quote === '"') at += 1;
+      else if (char === quote) quote = '';
+      continue;
+    }
+    if (char === '\\') at += 1;
+    else if (char === '"' || char === "'") quote = char;
+    else if (char === '>') {
+      // Which descriptor: `&>` is both, a digit at the start of a word is that descriptor, none is stdout.
+      let from = at;
+      while (/[0-9]/.test(part[from - 1] ?? '')) from -= 1;
+      const prior = part[from - 1];
+      const descriptor =
+        from < at && (prior === undefined || /\s/.test(prior)) ? part.slice(from, at) : '';
+      const both = part[at - 1] === '&';
+      if (descriptor !== '' && descriptor !== '1' && !both) {
+        if (part[at + 1] === '>') at += 1;
+        continue;
+      }
+      let next = at + 1;
+      if (part[next] === '>' || part[next] === '|') next += 1;
+      if (part[next] === '&') {
+        const copy = /^[0-9]+|^-/.exec(part.slice(next + 1))?.[0];
+        if (copy === '1' || copy === '2' || copy === '-') {
+          at = next;
           continue;
         }
-        if (!RUNNER_MANAGERS.has(tool)) continue;
-        let next = index + 1;
-        let afterFlag = false;
-        while (next < tokens.length) {
-          const token = tokens[next] ?? '';
-          if (token === '') {
-            next += 1;
-            continue;
-          }
-          if (RUNNER_MANAGERS.has(runnerToolName(token))) break;
-          if (token.startsWith('-')) afterFlag = !token.includes('=');
-          else if (token.startsWith('$') || afterFlag) afterFlag = false;
-          else break;
-          next += 1;
-        }
-        let arg: string | undefined;
-        for (let after = next + 1; after < tokens.length; after += 1) {
-          const token = tokens[after] ?? '';
-          if (token === '' || token.startsWith('-')) continue;
-          arg = bareWord(token);
+        return true;
+      }
+      while (part[next] === ' ' || part[next] === '\t') next += 1;
+      const target = /^[^\s;|&)]*/.exec(part.slice(next))?.[0].replace(/["']/g, '') ?? '';
+      if (!HARMLESS_TARGET.test(target)) return true;
+      at = next;
+    }
+  }
+  return false;
+};
+
+/** The Claude CLI's deny-list flag, in the two spellings it has. Any other spelling is read normally. */
+const DENY_FLAG = /^--disallowed(?:Tools|-tools)(?:=|$)/;
+/** What a deny entry may not hold: anything the shell or the workflow expands before the CLI sees it. */
+const EXPANDS = /\$\(|`|\$\{/;
+
+/** Whitespace-separated words of a text with their offsets, quoted strings kept whole. */
+const positionedWords = (text: string): { start: number; end: number }[] => {
+  const words: { start: number; end: number }[] = [];
+  let at = 0;
+  while (at < text.length) {
+    while (at < text.length && /\s/.test(text[at] ?? '')) at += 1;
+    if (at >= text.length) break;
+    const start = at;
+    let quote = '';
+    while (at < text.length && (quote !== '' || !/\s/.test(text[at] ?? ''))) {
+      const char = text[at] ?? '';
+      if (char === '\\' && quote !== "'") at += 1;
+      else if (quote !== '') {
+        if (char === quote) quote = '';
+      } else if (char === '"' || char === "'") quote = char;
+      at += 1;
+    }
+    words.push({ start, end: Math.min(at, text.length) });
+  }
+  return words;
+};
+
+/** Ranges of the balanced `Bash(…)` entries in a deny-list argument, or undefined when any is not safe to skip. */
+const denyEntries = (value: string): [number, number][] | undefined => {
+  const ranges: [number, number][] = [];
+  let from = value.indexOf('Bash(');
+  while (from >= 0) {
+    let depth = 0;
+    let end = -1;
+    for (let at = from + 4; at < value.length; at += 1) {
+      if (value[at] === '(') depth += 1;
+      else if (value[at] === ')') {
+        depth -= 1;
+        if (depth === 0) {
+          end = at + 1;
           break;
         }
-        const runner = registryRunner({
-          manager: tool,
-          sub: bareWord(tokens[next] ?? ''),
-          ...(arg === undefined ? {} : { arg })
+      }
+    }
+    if (end < 0 || EXPANDS.test(value.slice(from, end))) return undefined;
+    ranges.push([from, end]);
+    from = value.indexOf('Bash(', end);
+  }
+  return ranges;
+};
+
+/**
+ * Blanks the literal, balanced `Bash(…)` entries of the argument of the Claude CLI's deny-list flag
+ * (`--disallowedTools "Bash(npx *)"`): each entry only restricts what an agent may run, so a runner
+ * word in it is not a use of the runner. The caller establishes that the text is arguments of the
+ * Claude CLI. An unbalanced entry, or one with `$(`, a backtick or `${` in it, leaves the whole
+ * argument as it is, and so does any other flag (allow lists are always read). Text outside the
+ * entries stays read.
+ */
+const blankDeniedTools = (segment: string): string => {
+  const words = positionedWords(segment);
+  let out = segment;
+  for (let index = 0; index < words.length; index += 1) {
+    const word = words[index];
+    if (word === undefined) continue;
+    const flag = DENY_FLAG.exec(segment.slice(word.start, word.end));
+    if (flag === null) continue;
+    let start: number;
+    let end: number;
+    if (flag[0].endsWith('=')) {
+      start = word.start + flag[0].length;
+      end = word.end;
+    } else {
+      const next = words[index + 1];
+      if (next === undefined) continue;
+      ({ start, end } = next);
+    }
+    const quoted = /^["']/.test(segment.slice(start, start + 1));
+    const inner = quoted
+      ? segment.slice(start + 1, segment[end - 1] === segment[start] ? end - 1 : end)
+      : segment.slice(start, end);
+    const base = start + (quoted ? 1 : 0);
+    const entries = denyEntries(inner);
+    if (entries === undefined) continue;
+    for (const [from, to] of entries)
+      out = out.slice(0, base + from) + ' '.repeat(to - from) + out.slice(base + to);
+  }
+  return out;
+};
+
+/** The words of a command part with shell syntax kept in them, split on whitespace. */
+const wordsOfPart = (part: string): string[] => part.split(/\s+/).filter((word) => word !== '');
+
+/**
+ * Runner named by a package manager's words: after the manager's name come any number of flags (with
+ * or without a value) and then the subcommand. A word after a flag that has no `=` is read both ways,
+ * as the flag's value and as the subcommand, so `npm --yes exec foo` and `pnpm -C dir dlx foo` both hit.
+ */
+const managerRunner = ({
+  manager,
+  words
+}: {
+  manager: string;
+  words: string[];
+}): string | undefined => {
+  let afterFlag = false;
+  for (let index = 0; index < words.length; index += 1) {
+    const token = words[index] ?? '';
+    if (RUNNER_MANAGERS.has(runnerToolName(token))) return undefined;
+    if (token.startsWith('-')) {
+      afterFlag = !token.includes('=');
+      continue;
+    }
+    if (token.startsWith('$')) {
+      afterFlag = false;
+      continue;
+    }
+    const sub = bareWord(token).replace(/[;,&|)]+$/, '');
+    let arg: string | undefined;
+    for (let after = index + 1; after < words.length; after += 1) {
+      const candidate = words[after] ?? '';
+      if (candidate.startsWith('-')) continue;
+      arg = bareWord(candidate);
+      break;
+    }
+    const runner = registryRunner({
+      manager,
+      sub,
+      ...(arg === undefined ? {} : { arg })
+    });
+    if (runner !== undefined) return runner;
+    if (!afterFlag) return undefined;
+    afterFlag = false;
+  }
+  return undefined;
+};
+
+const RUNNER_MANAGERS = new Set(['npm', 'pnpm', 'yarn', 'bun']);
+
+/** A runner word read as a tool: shell quoting, a leading path and any `@version` suffix removed. */
+const runnerToolName = (token: string): string => toolName(token).replace(/^.*\//, '');
+
+/**
+ * Text-level test for a registry-fetching runner, the second opinion beside the command parser: every
+ * `npx`, `pnpx` or `bunx` word, and every `npm|pnpm|yarn|bun` followed by flags (and the values flags
+ * may take) and then `exec`, `dlx`, `x`, `create` or `init <package>`, anywhere in the text: a
+ * command, a quoted string, a heredoc, a string inside code, an action input. A word counts at any
+ * word boundary (`"cd x&&npx foo"`, `(npx foo)`, `=npx`) and not inside a longer name (`mynpx`).
+ *
+ * Two forms are text and not a command, and only when the command's output cannot run later: it is
+ * not piped (including after `2>&1`), not in `$(…)`, backticks or process substitution, not eval'd,
+ * not passed to `xargs`, and not redirected anywhere except `$GITHUB_STEP_SUMMARY` and stderr.
+ * The forms are the arguments of `echo` and `printf`, and the pattern of `grep`/`egrep`/`fgrep`/`rg`
+ * or the match part of a `sed` script. A redirect to `$GITHUB_OUTPUT` or `$GITHUB_ENV` is not excused,
+ * because a later step can run what was written there. Each hit carries its source line. One pass over
+ * each line, so the cost is linear.
+ */
+export const textRunnerHits = (
+  text: string,
+  { claudeArgs = false }: { claudeArgs?: boolean } = {}
+): { runner: string; line: string }[] => {
+  const hits: { runner: string; line: string }[] = [];
+  for (const line of normalizeShell(text).split('\n')) {
+    const lineRuns = RUNNER_LINE_RUNS.test(line);
+    const parts = splitCommandParts(claudeArgs ? blankDeniedTools(line) : line);
+    for (let at = 0; at < parts.length; at += 2) {
+      const rawPart = parts[at] ?? '';
+      // Arguments of a command whose program word is `claude` (or a path ending in `/claude`).
+      const part =
+        segmentCommand(wordsOfPart(rawPart)) === 'claude' ? blankDeniedTools(rawPart) : rawPart;
+      const separator = parts[at + 1];
+      const textOnly = !lineRuns && separator !== '|' && !redirectsStdout(part);
+      if (textOnly && PRINTERS.has(segmentCommand(wordsOfPart(part)))) continue;
+      const searched = textOnly ? blankSearchPatterns(part) : part;
+      for (const match of searched.matchAll(RUNNER_BINARY_WORD))
+        hits.push({ runner: match[1] ?? '', line });
+      for (const match of searched.matchAll(MANAGER_WORD)) {
+        const manager = match[1] ?? '';
+        const runner = managerRunner({
+          manager,
+          words: wordsOfPart(searched.slice((match.index ?? 0) + manager.length))
         });
         if (runner !== undefined) hits.push({ runner, line });
       }

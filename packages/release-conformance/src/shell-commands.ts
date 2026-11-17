@@ -4,6 +4,12 @@
  * command refers to. Nothing here runs a command; it only reads text.
  */
 
+/** Length of a backslash-newline at `at` (2, or 3 for CRLF), else 0: the only place bash joins two lines. */
+const continuationLength = (text: string, at: number): number => {
+  if (text[at + 1] === '\n') return 2;
+  return text[at + 1] === '\r' && text[at + 2] === '\n' ? 3 : 0;
+};
+
 /**
  * Drops shell comments so a comment that names a publish command does not count
  * as running it. A `#` only starts a comment outside single and double quotes
@@ -18,6 +24,12 @@ export const stripShellComments = (text: string): string => {
     const char = text[index] ?? '';
     if (quote !== undefined) {
       if (char === '\\' && quote === '"') {
+        const join = continuationLength(text, index);
+        if (join > 0) {
+          out += ' ';
+          index += join - 1;
+          continue;
+        }
         out += char + (text[index + 1] ?? '');
         index += 1;
         continue;
@@ -27,6 +39,12 @@ export const stripShellComments = (text: string): string => {
       continue;
     }
     if (char === '\\') {
+      const join = continuationLength(text, index);
+      if (join > 0) {
+        out += ' ';
+        index += join - 1;
+        continue;
+      }
       out += char + (text[index + 1] ?? '');
       index += 1;
       continue;
@@ -47,12 +65,11 @@ export const stripShellComments = (text: string): string => {
 };
 
 /**
- * The one form every matcher reads: backslash line continuations joined into
- * one line, then comments removed. Joining first keeps a command that is wrapped
- * across lines in one piece.
+ * The one form every matcher reads: comments removed and backslash line continuations joined, in one
+ * pass. A continuation joins only where bash joins: a comment ends at its newline whatever precedes it,
+ * and `\\` before a newline is a literal backslash and a line break, so the next line stays its own.
  */
-export const normalizeShell = (text: string): string =>
-  stripShellComments(text.replace(/\\\r?\n/g, ' '));
+export const normalizeShell = (text: string): string => stripShellComments(text);
 
 /** A package script a command runs by name, with the directories it was pointed at. */
 export interface ScriptRef {
@@ -460,6 +477,21 @@ const unquoteWords = (raw: string[]): string[] => {
   return out;
 };
 
+/** An environment assignment that turns lifecycle scripts off for the package manager it prefixes. */
+const IGNORE_SCRIPTS_ENV = /^npm_config_ignore_scripts=["']?(?:true|1)["']?$/i;
+const IGNORE_SCRIPTS_FLAG = /^--ignore-scripts(?:=(?:true|1))?$/;
+
+/**
+ * Words with `--ignore-scripts` placed after a package manager's name, for a command that carried
+ * `npm_config_ignore_scripts=true` in its environment: the install then reads no lifecycle script.
+ */
+const withIgnoreScripts = (words: string[]): string[] => {
+  const [first, ...rest] = words;
+  return first !== undefined && PACKAGE_MANAGERS.has(stripVersion(basename(first)))
+    ? [first, '--ignore-scripts', ...rest]
+    : words;
+};
+
 /** Words of one command with leading shell keywords, variable assignments and wrappers removed. */
 const commandWords = (segment: string): string[] => {
   const raw = segment
@@ -468,6 +500,7 @@ const commandWords = (segment: string): string[] => {
     .split(/\s+/)
     .filter((token) => token !== '');
   let index = 0;
+  let ignoreScripts = false;
   while (index < raw.length) {
     const token = raw[index] ?? '';
     if (SHELL_KEYWORDS.has(token)) {
@@ -475,12 +508,14 @@ const commandWords = (segment: string): string[] => {
       continue;
     }
     if (ASSIGNMENT.test(token)) {
+      if (IGNORE_SCRIPTS_ENV.test(token)) ignoreScripts = true;
       index = skipAssignment({ words: raw, index });
       continue;
     }
     break;
   }
-  return unquoteWords(raw.slice(index));
+  const words = unquoteWords(raw.slice(index));
+  return ignoreScripts ? withIgnoreScripts(words) : words;
 };
 
 const basename = (word: string): string => word.replace(/^.*\//, '');
@@ -499,6 +534,7 @@ const wrappedCommand = ({ name, rest }: { name: string; rest: string[] }): strin
   const valueFlags = WRAPPER_VALUE_FLAGS.get(name) ?? new Set<string>();
   let index = 0;
   let sawDuration = false;
+  let ignoreScripts = false;
   while (index < rest.length) {
     const token = rest[index] ?? '';
     if (token === '--') {
@@ -513,6 +549,7 @@ const wrappedCommand = ({ name, rest }: { name: string; rest: string[] }): strin
       (name === 'env' || name === 'cross-env' || name === 'cross-env-shell') &&
       ASSIGNMENT.test(token)
     ) {
+      if (IGNORE_SCRIPTS_ENV.test(token)) ignoreScripts = true;
       index = skipAssignment({ words: rest, index });
       continue;
     }
@@ -523,7 +560,8 @@ const wrappedCommand = ({ name, rest }: { name: string; rest: string[] }): strin
     }
     break;
   }
-  return rest.slice(index);
+  const words = rest.slice(index);
+  return ignoreScripts ? withIgnoreScripts(words) : words;
 };
 
 /** `bash -c "<command>"`: the words after the `-c` flag are the command it runs. */
@@ -694,6 +732,7 @@ const classifyManager = ({
   let wide = false;
   const words: string[] = [];
   let global = false;
+  let ignoreScripts = false;
   let subIndex = -1;
   for (let index = 0; index < rest.length; index += 1) {
     const token = rest[index] ?? '';
@@ -701,6 +740,7 @@ const classifyManager = ({
       const [flag = '', inline] = token.split('=', 2);
       if (WIDE_FLAGS.has(flag) || (flag === '-w' && manager === 'npm') || flag === '--workspace')
         wide = true;
+      if (IGNORE_SCRIPTS_FLAG.test(token)) ignoreScripts = true;
       if (flag === '-g' || flag === '--global' || (flag === '--location' && inline === 'global'))
         global = true;
       let value = inline;
@@ -720,7 +760,7 @@ const classifyManager = ({
   if (sub === undefined) {
     // A bare `yarn` installs dependencies, and with them runs the lifecycle scripts of every workspace package.
     facts.runsCode = manager === 'yarn';
-    if (manager === 'yarn')
+    if (manager === 'yarn' && !ignoreScripts)
       for (const name of ['install', 'prepare'])
         facts.scripts.push({ name, optional: true, dirs: where, wide: true });
     return facts;
@@ -773,7 +813,8 @@ const classifyManager = ({
     facts.runsCode = true;
     const hooks = [
       ...(TEST_SUBCOMMANDS.has(sub) ? ['test'] : []),
-      ...(INSTALL_SUBCOMMANDS.has(sub) ? ['install', 'prepare'] : []),
+      // `--ignore-scripts` (or its environment form) means the install runs no lifecycle script at all.
+      ...(INSTALL_SUBCOMMANDS.has(sub) && !ignoreScripts ? ['install', 'prepare'] : []),
       ...(!INSTALL_SUBCOMMANDS.has(sub) && !TEST_SUBCOMMANDS.has(sub) && manager !== 'npm'
         ? [sub]
         : [])

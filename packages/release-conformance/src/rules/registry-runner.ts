@@ -1,4 +1,4 @@
-import { readdirSync } from 'node:fs';
+import { existsSync, readdirSync } from 'node:fs';
 import { join, posix } from 'node:path';
 
 import { LineCounter, isNode, parseDocument } from 'yaml';
@@ -67,13 +67,16 @@ const runnersIn = ({
   baseDirs,
   reader,
   credential,
-  prose = false
+  prose = false,
+  claudeArgs = false
 }: {
   text: string;
   baseDirs: string[];
   reader: ScriptReader;
   credential: boolean;
   prose?: boolean;
+  /** The text is the `claude_args` input of the pinned claude-code-action, which it hands to the Claude CLI. */
+  claudeArgs?: boolean;
 }): Hit[] => {
   const hits: Hit[] = [];
   const read = ({
@@ -95,7 +98,7 @@ const runnersIn = ({
       });
     }
     if (credential)
-      for (const found of textRunnerHits(body)) {
+      for (const found of textRunnerHits(body, { claudeArgs })) {
         const at = unmatched.indexOf(found.runner);
         if (at >= 0) unmatched.splice(at, 1);
         else
@@ -111,6 +114,15 @@ const runnersIn = ({
     for (const body of reader.lookup(ref).bodies) read({ body, viaScript: ref.name, dirs: [] });
   return hits;
 };
+
+/** `anthropics/claude-code-action` pinned to a full commit SHA: the only action whose `claude_args` the check knows. */
+const isPinnedClaudeAction = (uses: UsesRef | undefined): boolean =>
+  uses !== undefined &&
+  !uses.local &&
+  uses.owner === 'anthropics' &&
+  uses.repo === 'claude-code-action' &&
+  uses.path === '' &&
+  /^[0-9a-f]{40}$/i.test(uses.ref);
 
 /** True for a `with:` value that switches an install on (`run_install: true`, or a list of install settings). */
 const truthyInput = (value: string | undefined): boolean =>
@@ -181,31 +193,62 @@ const messageFor = ({ hit, credential }: { hit: Hit; credential: boolean }): str
   }; add the tool as a dependency and run it with \`pnpm exec\`.`;
 };
 
-/**
- * Repository-relative directory a local `uses:` reaches: `./x/y`, a trailing slash, `./` for the root
- * action, and `<this repository>/x/y@<ref>`, which GitHub resolves to the same checkout. Undefined for
- * anything that is not a path inside the tree.
- */
-const actionDirectory = ({
+/** The path a local `uses:` names, or one in this repository (`<this repository>/x/y@<ref>`); else undefined. */
+const localPath = ({
   uses,
   repository
 }: {
   uses: UsesRef;
   repository: string;
 }): string | undefined => {
-  let path: string;
-  if (uses.local) path = uses.path;
-  else if (repository !== '' && `${uses.owner}/${uses.repo}` === repository.toLowerCase())
-    path = uses.path;
-  else return undefined;
-  path = path.replace(/^\.\//, '');
+  if (uses.local) return uses.path;
+  if (repository !== '' && `${uses.owner}/${uses.repo}` === repository.toLowerCase())
+    return uses.path;
+  return undefined;
+};
+
+/** True when a local `uses:` path has a `..` segment: it may leave the tree, so it is not read. */
+const climbsOut = ({ uses, repository }: { uses: UsesRef; repository: string }): boolean =>
+  (localPath({ uses, repository }) ?? '').split('/').includes('..');
+
+/**
+ * Repository-relative directories a local `uses:` reaches: `./x/y`, a trailing slash, `./` for the root
+ * action, and `<this repository>/x/y@<ref>`, which GitHub resolves to the same checkout. Empty for
+ * anything that is not a path inside the tree, and for a path with a `..` segment. In the canonical
+ * repository a `.pipelines/` path is the mapped path; when the tree also holds a directory at the
+ * literal path, both are read, so a mapped benign action cannot hide a literal one.
+ */
+const actionDirectories = ({
+  uses,
+  repository,
+  root
+}: {
+  uses: UsesRef;
+  repository: string;
+  root: string;
+}): string[] => {
+  const given = localPath({ uses, repository });
+  if (given === undefined || climbsOut({ uses, repository })) return [];
+  const clean = (value: string): string => {
+    const path = posix.normalize(value === '' ? '.' : value).replace(/\/+$/, '');
+    return path === '' ? '.' : path;
+  };
+  const usable = (path: string): boolean =>
+    path !== '..' && !path.startsWith('../') && !posix.isAbsolute(path);
+  const literal = clean(given.replace(/^\.\//, ''));
+  let mapped = given.replace(/^\.\//, '');
   // Only the canonical repository's own run identity (never a value read from the tree) maps these paths.
   if (sameRepository({ a: repository, b: CALLEE_REPOSITORY }))
     for (const prefix of SELF_CHECKOUT_PREFIXES)
-      if (path.startsWith(prefix)) path = path.slice(prefix.length);
-  path = posix.normalize(path === '' ? '.' : path).replace(/\/+$/, '');
-  if (path === '') path = '.';
-  return path === '..' || path.startsWith('../') || posix.isAbsolute(path) ? undefined : path;
+      if (mapped.startsWith(prefix)) mapped = mapped.slice(prefix.length);
+  const found = [clean(mapped)];
+  if (
+    literal !== found[0] &&
+    existsSync(join(root, literal)) &&
+    linkedParent({ root, relative: literal }) === undefined
+  )
+    found.push(literal);
+  return found.filter(usable);
 };
 
 /** Directories under `.github/actions` that hold an action file, without following links. */
@@ -433,7 +476,14 @@ export const checkRegistryRunners = ({
     if (step.uses !== undefined) {
       for (const [key, value] of Object.entries(step.with))
         hits.push(
-          ...runnersIn({ text: value, baseDirs, reader, credential, prose: PROSE_KEY.test(key) })
+          ...runnersIn({
+            text: value,
+            baseDirs,
+            reader,
+            credential,
+            prose: PROSE_KEY.test(key),
+            claudeArgs: key === 'claude_args' && isPinnedClaudeAction(step.uses)
+          })
         );
       if (installsThroughAction(step))
         hits.push(...runnersIn({ text: 'pnpm install', baseDirs, reader, credential }));
@@ -449,6 +499,8 @@ export const checkRegistryRunners = ({
   }
   /** Action directories a workflow step uses, and whether the job holds a credential. */
   const workflowUses: { directory: string; credential: boolean; site: Site }[] = [];
+  /** Local `uses:` paths with a `..` segment: never read, so a credential job using one fails closed. */
+  const climbs: { from: string | undefined; credential: boolean; site: Site; path: string }[] = [];
 
   for (const file of scan.files) {
     if (file.class === 'unparseable') continue;
@@ -487,17 +539,15 @@ export const checkRegistryRunners = ({
           credential
         });
         if (step.uses === undefined) continue;
-        const directory = actionDirectory({ uses: step.uses, repository });
-        if (directory !== undefined)
-          workflowUses.push({
-            directory,
-            credential,
-            site: {
-              file: model.file,
-              line: step.line,
-              covered: info?.holdsPublishCredential === true
-            }
-          });
+        const site: Site = {
+          file: model.file,
+          line: step.line,
+          covered: info?.holdsPublishCredential === true
+        };
+        for (const directory of actionDirectories({ uses: step.uses, repository, root: scan.root }))
+          workflowUses.push({ directory, credential, site });
+        if (climbsOut({ uses: step.uses, repository }))
+          climbs.push({ from: undefined, credential, site, path: step.uses.path });
       }
     }
   }
@@ -523,15 +573,23 @@ export const checkRegistryRunners = ({
     if (read.kind !== 'composite') continue;
     for (const step of read.steps) {
       if (step.uses === undefined) continue;
-      const to = actionDirectory({ uses: parseUses(step.uses), repository });
-      if (to === undefined) continue;
-      edges.set(directory, [
-        ...(edges.get(directory) ?? []),
-        { to, file: read.file, line: step.line }
-      ]);
-      if (!all.has(to)) {
-        all.add(to);
-        queue.push(to);
+      const nested = parseUses(step.uses);
+      if (climbsOut({ uses: nested, repository }))
+        climbs.push({
+          from: directory,
+          credential: false,
+          site: { file: read.file, line: step.line, covered: false },
+          path: nested.path
+        });
+      for (const to of actionDirectories({ uses: nested, repository, root: scan.root })) {
+        edges.set(directory, [
+          ...(edges.get(directory) ?? []),
+          { to, file: read.file, line: step.line }
+        ]);
+        if (!all.has(to)) {
+          all.add(to);
+          queue.push(to);
+        }
       }
     }
   }
@@ -555,6 +613,28 @@ export const checkRegistryRunners = ({
         });
         spread.push(edge.to);
       }
+
+  for (const climb of climbs) {
+    const site =
+      climb.from === undefined
+        ? climb.credential
+          ? climb.site
+          : undefined
+        : credentialed.has(climb.from)
+          ? {
+              ...climb.site,
+              covered: credentialed.get(climb.from)?.covered === true
+            }
+          : undefined;
+    if (site !== undefined && !site.covered)
+      findings.push({
+        ruleId: REGISTRY_RUNNER_CREDENTIAL_RULE,
+        file: site.file,
+        line: site.line,
+        message: `The local action \`${climb.path}\` is used in a job that holds a credential and could not be read (its path climbs out of the directory with \`..\`), so the check cannot confirm that it fetches nothing from the registry.`,
+        severity: 'error'
+      });
+  }
 
   const actionFiles: ScannedFile[] = [];
   for (const directory of [...all].sort()) {

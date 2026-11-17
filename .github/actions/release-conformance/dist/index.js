@@ -9273,6 +9273,12 @@ const blankSearchPatterns = (command) => {
  * package, which install or run repository code, and which package scripts a
  * command refers to. Nothing here runs a command; it only reads text.
  */
+/** Length of a backslash-newline at `at` (2, or 3 for CRLF), else 0: the only place bash joins two lines. */
+const continuationLength = (text, at) => {
+    if (text[at + 1] === '\n')
+        return 2;
+    return text[at + 1] === '\r' && text[at + 2] === '\n' ? 3 : 0;
+};
 /**
  * Drops shell comments so a comment that names a publish command does not count
  * as running it. A `#` only starts a comment outside single and double quotes
@@ -9287,6 +9293,12 @@ const stripShellComments = (text) => {
         const char = text[index] ?? '';
         if (quote !== undefined) {
             if (char === '\\' && quote === '"') {
+                const join = continuationLength(text, index);
+                if (join > 0) {
+                    out += ' ';
+                    index += join - 1;
+                    continue;
+                }
                 out += char + (text[index + 1] ?? '');
                 index += 1;
                 continue;
@@ -9297,6 +9309,12 @@ const stripShellComments = (text) => {
             continue;
         }
         if (char === '\\') {
+            const join = continuationLength(text, index);
+            if (join > 0) {
+                out += ' ';
+                index += join - 1;
+                continue;
+            }
             out += char + (text[index + 1] ?? '');
             index += 1;
             continue;
@@ -9317,11 +9335,11 @@ const stripShellComments = (text) => {
     return out;
 };
 /**
- * The one form every matcher reads: backslash line continuations joined into
- * one line, then comments removed. Joining first keeps a command that is wrapped
- * across lines in one piece.
+ * The one form every matcher reads: comments removed and backslash line continuations joined, in one
+ * pass. A continuation joins only where bash joins: a comment ends at its newline whatever precedes it,
+ * and `\\` before a newline is a literal backslash and a line break, so the next line stays its own.
  */
-const normalizeShell = (text) => stripShellComments(text.replace(/\\\r?\n/g, ' '));
+const normalizeShell = (text) => stripShellComments(text);
 /**
  * True for the word `publish`, alone or with shell syntax glued to it (`publish>out.log`, `publish<<<y`,
  * `publish\n` inside printed text). A name that merely starts with it (`publishConfig`, `publish-please`,
@@ -9686,6 +9704,19 @@ const unquoteWords = (raw) => {
     }
     return out;
 };
+/** An environment assignment that turns lifecycle scripts off for the package manager it prefixes. */
+const IGNORE_SCRIPTS_ENV = /^npm_config_ignore_scripts=["']?(?:true|1)["']?$/i;
+const IGNORE_SCRIPTS_FLAG = /^--ignore-scripts(?:=(?:true|1))?$/;
+/**
+ * Words with `--ignore-scripts` placed after a package manager's name, for a command that carried
+ * `npm_config_ignore_scripts=true` in its environment: the install then reads no lifecycle script.
+ */
+const withIgnoreScripts = (words) => {
+    const [first, ...rest] = words;
+    return first !== undefined && PACKAGE_MANAGERS.has(stripVersion(basename(first)))
+        ? [first, '--ignore-scripts', ...rest]
+        : words;
+};
 /** Words of one command with leading shell keywords, variable assignments and wrappers removed. */
 const commandWords = (segment) => {
     const raw = segment
@@ -9694,6 +9725,7 @@ const commandWords = (segment) => {
         .split(/\s+/)
         .filter((token) => token !== '');
     let index = 0;
+    let ignoreScripts = false;
     while (index < raw.length) {
         const token = raw[index] ?? '';
         if (SHELL_KEYWORDS.has(token)) {
@@ -9701,12 +9733,15 @@ const commandWords = (segment) => {
             continue;
         }
         if (shell_commands_ASSIGNMENT.test(token)) {
+            if (IGNORE_SCRIPTS_ENV.test(token))
+                ignoreScripts = true;
             index = skipAssignment({ words: raw, index });
             continue;
         }
         break;
     }
-    return unquoteWords(raw.slice(index));
+    const words = unquoteWords(raw.slice(index));
+    return ignoreScripts ? withIgnoreScripts(words) : words;
 };
 const basename = (word) => word.replace(/^.*\//, '');
 const tooDeepFacts = () => ({
@@ -9722,6 +9757,7 @@ const wrappedCommand = ({ name, rest }) => {
     const valueFlags = WRAPPER_VALUE_FLAGS.get(name) ?? new Set();
     let index = 0;
     let sawDuration = false;
+    let ignoreScripts = false;
     while (index < rest.length) {
         const token = rest[index] ?? '';
         if (token === '--') {
@@ -9734,6 +9770,8 @@ const wrappedCommand = ({ name, rest }) => {
         }
         if ((name === 'env' || name === 'cross-env' || name === 'cross-env-shell') &&
             shell_commands_ASSIGNMENT.test(token)) {
+            if (IGNORE_SCRIPTS_ENV.test(token))
+                ignoreScripts = true;
             index = skipAssignment({ words: rest, index });
             continue;
         }
@@ -9744,7 +9782,8 @@ const wrappedCommand = ({ name, rest }) => {
         }
         break;
     }
-    return rest.slice(index);
+    const words = rest.slice(index);
+    return ignoreScripts ? withIgnoreScripts(words) : words;
 };
 /** `bash -c "<command>"`: the words after the `-c` flag are the command it runs. */
 const shellCommandString = (rest) => {
@@ -9887,6 +9926,7 @@ const classifyManager = ({ manager, rest, dirs, depth }) => {
     let wide = false;
     const words = [];
     let global = false;
+    let ignoreScripts = false;
     let subIndex = -1;
     for (let index = 0; index < rest.length; index += 1) {
         const token = rest[index] ?? '';
@@ -9894,6 +9934,8 @@ const classifyManager = ({ manager, rest, dirs, depth }) => {
             const [flag = '', inline] = token.split('=', 2);
             if (WIDE_FLAGS.has(flag) || (flag === '-w' && manager === 'npm') || flag === '--workspace')
                 wide = true;
+            if (IGNORE_SCRIPTS_FLAG.test(token))
+                ignoreScripts = true;
             if (flag === '-g' || flag === '--global' || (flag === '--location' && inline === 'global'))
                 global = true;
             let value = inline;
@@ -9915,7 +9957,7 @@ const classifyManager = ({ manager, rest, dirs, depth }) => {
     if (sub === undefined) {
         // A bare `yarn` installs dependencies, and with them runs the lifecycle scripts of every workspace package.
         facts.runsCode = manager === 'yarn';
-        if (manager === 'yarn')
+        if (manager === 'yarn' && !ignoreScripts)
             for (const name of ['install', 'prepare'])
                 facts.scripts.push({ name, optional: true, dirs: where, wide: true });
         return facts;
@@ -9971,7 +10013,8 @@ const classifyManager = ({ manager, rest, dirs, depth }) => {
         facts.runsCode = true;
         const hooks = [
             ...(TEST_SUBCOMMANDS.has(sub) ? ['test'] : []),
-            ...(INSTALL_SUBCOMMANDS.has(sub) ? ['install', 'prepare'] : []),
+            // `--ignore-scripts` (or its environment form) means the install runs no lifecycle script at all.
+            ...(INSTALL_SUBCOMMANDS.has(sub) && !ignoreScripts ? ['install', 'prepare'] : []),
             ...(!INSTALL_SUBCOMMANDS.has(sub) && !TEST_SUBCOMMANDS.has(sub) && manager !== 'npm'
                 ? [sub]
                 : [])
@@ -10736,14 +10779,21 @@ const textPublishHits = (text) => {
     }
     return hits;
 };
-const RUNNER_BINARIES = new Set(['npx', 'pnpx', 'bunx']);
-const RUNNER_MANAGERS = new Set(['npm', 'pnpm', 'yarn', 'bun']);
-/** A runner word read as a tool: shell quoting, a leading path and any `@version` suffix removed. */
-const runnerToolName = (token) => toolName(token).replace(/^.*\//, '');
+/**
+ * A runner word in a name-like context is not a command: `mynpx`, `npxfoo`, `npx-foo`, `@npm/x`. A
+ * word right after a written-out escape (`\n`, `\t`) still counts: the text may be printed into a script.
+ */
+const RUNNER_BINARY_WORD = /(?:(?<![A-Za-z0-9_@-])|(?<=\\[nt]))(npx|pnpx|bunx)(?![A-Za-z0-9_-]|\.[A-Za-z0-9])/g;
+const MANAGER_WORD = /(?:(?<![A-Za-z0-9_@-])|(?<=\\[nt]))(npm|pnpm|yarn|bun)(?![A-Za-z0-9_-]|\.[A-Za-z0-9])/g;
+/** Process substitution (`<(…)`, `>(…)`) runs a command whose output or input is the text. */
+const RUNNER_LINE_RUNS = new RegExp(`${RUNS_PRINTED_TEXT.source}|[<>]\\(`);
+/** Redirect targets that carry no text anywhere a command could read it back. */
+const HARMLESS_TARGET = /^\$\{?GITHUB_STEP_SUMMARY\}?$|^\/dev\/(?:null|stderr)$/;
 /**
  * `line.split(/([;&|])/)` that leaves separators inside quotes alone, so `echo "a; npx b"` stays one
- * command. A quote that is never closed (prose such as `don't`) gives the plain split instead: the
- * test fails closed rather than hiding the rest of the line.
+ * command, and leaves the `&` of a redirection (`2>&1`, `>&2`, `&>file`) with its command, so a pipe
+ * after `2>&1` is still the pipe of that command. A quote that is never closed (prose such as
+ * `don't`) gives the plain split instead: the test fails closed rather than hiding the rest of the line.
  */
 const splitCommandParts = (line) => {
     const parts = [];
@@ -10769,6 +10819,10 @@ const splitCommandParts = (line) => {
             quote = char;
             current += char;
         }
+        else if (char === '&' &&
+            (line[at - 1] === '>' || line[at - 1] === '<' || line[at + 1] === '>')) {
+            current += char;
+        }
         else if (char === ';' || char === '&' || char === '|') {
             parts.push(current, char);
             current = '';
@@ -10780,62 +10834,241 @@ const splitCommandParts = (line) => {
     return quote === '' ? parts : line.split(/([;&|])/);
 };
 /**
- * Text-level test for a registry-fetching runner, the second opinion beside the command parser: every
- * `npx`, `pnpx` or `bunx` word, and every `npm|pnpm|yarn|bun` followed by flags (and the values flags
- * may take) and then `exec`, `dlx` or `x`, anywhere in the text, in a command, a quoted string, a
- * heredoc or an action input. Only an `echo` or `printf` argument that is not piped, substituted,
- * evaluated or redirected is text. Each hit carries its source line. One pass over each line, so the
- * cost is linear.
+ * True when the command's stdout can leave the command as something a later command reads: a redirect
+ * to any file (or process substitution, `$GITHUB_OUTPUT`, `$GITHUB_ENV`) except `$GITHUB_STEP_SUMMARY`,
+ * `/dev/null` and stderr (`>&2`, `1>&2`). A redirect of another descriptor (`2>file`) carries no stdout.
+ * One pass over the characters, so the cost is linear in the part.
  */
-const textRunnerHits = (text) => {
-    const hits = [];
-    for (const line of normalizeShell(text).split('\n')) {
-        const lineRuns = RUNS_PRINTED_TEXT.test(line);
-        const parts = splitCommandParts(line);
-        for (let at = 0; at < parts.length; at += 2) {
-            const tokens = blankSearchPatterns(parts[at] ?? '').split(/[\s=]+/);
-            const separator = parts[at + 1];
-            const printer = PRINTERS.has(segmentCommand(tokens));
-            if (printer && !lineRuns && separator !== '|')
+const redirectsStdout = (part) => {
+    let quote = '';
+    for (let at = 0; at < part.length; at += 1) {
+        const char = part[at] ?? '';
+        if (quote !== '') {
+            if (char === '\\' && quote === '"')
+                at += 1;
+            else if (char === quote)
+                quote = '';
+            continue;
+        }
+        if (char === '\\')
+            at += 1;
+        else if (char === '"' || char === "'")
+            quote = char;
+        else if (char === '>') {
+            // Which descriptor: `&>` is both, a digit at the start of a word is that descriptor, none is stdout.
+            let from = at;
+            while (/[0-9]/.test(part[from - 1] ?? ''))
+                from -= 1;
+            const prior = part[from - 1];
+            const descriptor = from < at && (prior === undefined || /\s/.test(prior)) ? part.slice(from, at) : '';
+            const both = part[at - 1] === '&';
+            if (descriptor !== '' && descriptor !== '1' && !both) {
+                if (part[at + 1] === '>')
+                    at += 1;
                 continue;
-            for (let index = 0; index < tokens.length; index += 1) {
-                const tool = runnerToolName(tokens[index] ?? '');
-                if (RUNNER_BINARIES.has(tool)) {
-                    hits.push({ runner: tool, line });
+            }
+            let next = at + 1;
+            if (part[next] === '>' || part[next] === '|')
+                next += 1;
+            if (part[next] === '&') {
+                const copy = /^[0-9]+|^-/.exec(part.slice(next + 1))?.[0];
+                if (copy === '1' || copy === '2' || copy === '-') {
+                    at = next;
                     continue;
                 }
-                if (!RUNNER_MANAGERS.has(tool))
-                    continue;
-                let next = index + 1;
-                let afterFlag = false;
-                while (next < tokens.length) {
-                    const token = tokens[next] ?? '';
-                    if (token === '') {
-                        next += 1;
-                        continue;
-                    }
-                    if (RUNNER_MANAGERS.has(runnerToolName(token)))
-                        break;
-                    if (token.startsWith('-'))
-                        afterFlag = !token.includes('=');
-                    else if (token.startsWith('$') || afterFlag)
-                        afterFlag = false;
-                    else
-                        break;
-                    next += 1;
-                }
-                let arg;
-                for (let after = next + 1; after < tokens.length; after += 1) {
-                    const token = tokens[after] ?? '';
-                    if (token === '' || token.startsWith('-'))
-                        continue;
-                    arg = bareWord(token);
+                return true;
+            }
+            while (part[next] === ' ' || part[next] === '\t')
+                next += 1;
+            const target = /^[^\s;|&)]*/.exec(part.slice(next))?.[0].replace(/["']/g, '') ?? '';
+            if (!HARMLESS_TARGET.test(target))
+                return true;
+            at = next;
+        }
+    }
+    return false;
+};
+/** The Claude CLI's deny-list flag, in the two spellings it has. Any other spelling is read normally. */
+const DENY_FLAG = /^--disallowed(?:Tools|-tools)(?:=|$)/;
+/** What a deny entry may not hold: anything the shell or the workflow expands before the CLI sees it. */
+const EXPANDS = /\$\(|`|\$\{/;
+/** Whitespace-separated words of a text with their offsets, quoted strings kept whole. */
+const positionedWords = (text) => {
+    const words = [];
+    let at = 0;
+    while (at < text.length) {
+        while (at < text.length && /\s/.test(text[at] ?? ''))
+            at += 1;
+        if (at >= text.length)
+            break;
+        const start = at;
+        let quote = '';
+        while (at < text.length && (quote !== '' || !/\s/.test(text[at] ?? ''))) {
+            const char = text[at] ?? '';
+            if (char === '\\' && quote !== "'")
+                at += 1;
+            else if (quote !== '') {
+                if (char === quote)
+                    quote = '';
+            }
+            else if (char === '"' || char === "'")
+                quote = char;
+            at += 1;
+        }
+        words.push({ start, end: Math.min(at, text.length) });
+    }
+    return words;
+};
+/** Ranges of the balanced `Bash(…)` entries in a deny-list argument, or undefined when any is not safe to skip. */
+const denyEntries = (value) => {
+    const ranges = [];
+    let from = value.indexOf('Bash(');
+    while (from >= 0) {
+        let depth = 0;
+        let end = -1;
+        for (let at = from + 4; at < value.length; at += 1) {
+            if (value[at] === '(')
+                depth += 1;
+            else if (value[at] === ')') {
+                depth -= 1;
+                if (depth === 0) {
+                    end = at + 1;
                     break;
                 }
-                const runner = registryRunner({
-                    manager: tool,
-                    sub: bareWord(tokens[next] ?? ''),
-                    ...(arg === undefined ? {} : { arg })
+            }
+        }
+        if (end < 0 || EXPANDS.test(value.slice(from, end)))
+            return undefined;
+        ranges.push([from, end]);
+        from = value.indexOf('Bash(', end);
+    }
+    return ranges;
+};
+/**
+ * Blanks the literal, balanced `Bash(…)` entries of the argument of the Claude CLI's deny-list flag
+ * (`--disallowedTools "Bash(npx *)"`): each entry only restricts what an agent may run, so a runner
+ * word in it is not a use of the runner. The caller establishes that the text is arguments of the
+ * Claude CLI. An unbalanced entry, or one with `$(`, a backtick or `${` in it, leaves the whole
+ * argument as it is, and so does any other flag (allow lists are always read). Text outside the
+ * entries stays read.
+ */
+const blankDeniedTools = (segment) => {
+    const words = positionedWords(segment);
+    let out = segment;
+    for (let index = 0; index < words.length; index += 1) {
+        const word = words[index];
+        if (word === undefined)
+            continue;
+        const flag = DENY_FLAG.exec(segment.slice(word.start, word.end));
+        if (flag === null)
+            continue;
+        let start;
+        let end;
+        if (flag[0].endsWith('=')) {
+            start = word.start + flag[0].length;
+            end = word.end;
+        }
+        else {
+            const next = words[index + 1];
+            if (next === undefined)
+                continue;
+            ({ start, end } = next);
+        }
+        const quoted = /^["']/.test(segment.slice(start, start + 1));
+        const inner = quoted
+            ? segment.slice(start + 1, segment[end - 1] === segment[start] ? end - 1 : end)
+            : segment.slice(start, end);
+        const base = start + (quoted ? 1 : 0);
+        const entries = denyEntries(inner);
+        if (entries === undefined)
+            continue;
+        for (const [from, to] of entries)
+            out = out.slice(0, base + from) + ' '.repeat(to - from) + out.slice(base + to);
+    }
+    return out;
+};
+/** The words of a command part with shell syntax kept in them, split on whitespace. */
+const wordsOfPart = (part) => part.split(/\s+/).filter((word) => word !== '');
+/**
+ * Runner named by a package manager's words: after the manager's name come any number of flags (with
+ * or without a value) and then the subcommand. A word after a flag that has no `=` is read both ways,
+ * as the flag's value and as the subcommand, so `npm --yes exec foo` and `pnpm -C dir dlx foo` both hit.
+ */
+const managerRunner = ({ manager, words }) => {
+    let afterFlag = false;
+    for (let index = 0; index < words.length; index += 1) {
+        const token = words[index] ?? '';
+        if (RUNNER_MANAGERS.has(runnerToolName(token)))
+            return undefined;
+        if (token.startsWith('-')) {
+            afterFlag = !token.includes('=');
+            continue;
+        }
+        if (token.startsWith('$')) {
+            afterFlag = false;
+            continue;
+        }
+        const sub = bareWord(token).replace(/[;,&|)]+$/, '');
+        let arg;
+        for (let after = index + 1; after < words.length; after += 1) {
+            const candidate = words[after] ?? '';
+            if (candidate.startsWith('-'))
+                continue;
+            arg = bareWord(candidate);
+            break;
+        }
+        const runner = registryRunner({
+            manager,
+            sub,
+            ...(arg === undefined ? {} : { arg })
+        });
+        if (runner !== undefined)
+            return runner;
+        if (!afterFlag)
+            return undefined;
+        afterFlag = false;
+    }
+    return undefined;
+};
+const RUNNER_MANAGERS = new Set(['npm', 'pnpm', 'yarn', 'bun']);
+/** A runner word read as a tool: shell quoting, a leading path and any `@version` suffix removed. */
+const runnerToolName = (token) => toolName(token).replace(/^.*\//, '');
+/**
+ * Text-level test for a registry-fetching runner, the second opinion beside the command parser: every
+ * `npx`, `pnpx` or `bunx` word, and every `npm|pnpm|yarn|bun` followed by flags (and the values flags
+ * may take) and then `exec`, `dlx`, `x`, `create` or `init <package>`, anywhere in the text: a
+ * command, a quoted string, a heredoc, a string inside code, an action input. A word counts at any
+ * word boundary (`"cd x&&npx foo"`, `(npx foo)`, `=npx`) and not inside a longer name (`mynpx`).
+ *
+ * Two forms are text and not a command, and only when the command's output cannot run later: it is
+ * not piped (including after `2>&1`), not in `$(…)`, backticks or process substitution, not eval'd,
+ * not passed to `xargs`, and not redirected anywhere except `$GITHUB_STEP_SUMMARY` and stderr.
+ * The forms are the arguments of `echo` and `printf`, and the pattern of `grep`/`egrep`/`fgrep`/`rg`
+ * or the match part of a `sed` script. A redirect to `$GITHUB_OUTPUT` or `$GITHUB_ENV` is not excused,
+ * because a later step can run what was written there. Each hit carries its source line. One pass over
+ * each line, so the cost is linear.
+ */
+const textRunnerHits = (text, { claudeArgs = false } = {}) => {
+    const hits = [];
+    for (const line of normalizeShell(text).split('\n')) {
+        const lineRuns = RUNNER_LINE_RUNS.test(line);
+        const parts = splitCommandParts(claudeArgs ? blankDeniedTools(line) : line);
+        for (let at = 0; at < parts.length; at += 2) {
+            const rawPart = parts[at] ?? '';
+            // Arguments of a command whose program word is `claude` (or a path ending in `/claude`).
+            const part = segmentCommand(wordsOfPart(rawPart)) === 'claude' ? blankDeniedTools(rawPart) : rawPart;
+            const separator = parts[at + 1];
+            const textOnly = !lineRuns && separator !== '|' && !redirectsStdout(part);
+            if (textOnly && PRINTERS.has(segmentCommand(wordsOfPart(part))))
+                continue;
+            const searched = textOnly ? blankSearchPatterns(part) : part;
+            for (const match of searched.matchAll(RUNNER_BINARY_WORD))
+                hits.push({ runner: match[1] ?? '', line });
+            for (const match of searched.matchAll(MANAGER_WORD)) {
+                const manager = match[1] ?? '';
+                const runner = managerRunner({
+                    manager,
+                    words: wordsOfPart(searched.slice((match.index ?? 0) + manager.length))
                 });
                 if (runner !== undefined)
                     hits.push({ runner, line });
@@ -11592,7 +11825,7 @@ const PROSE_KEY = /body|title|message|description|comment|text|summary|notes?|la
  * argument, a heredoc, a prose input), except in the two search-command forms the text test excuses.
  * `prose` text is never parsed as commands, so only the text-level test sees it.
  */
-const runnersIn = ({ text, baseDirs, reader, credential, prose = false }) => {
+const runnersIn = ({ text, baseDirs, reader, credential, prose = false, claudeArgs = false }) => {
     const hits = [];
     const read = ({ body, viaScript, dirs }) => {
         const facts = prose ? undefined : shell_commands_analyzeShell({ text: body, baseDirs: dirs });
@@ -11605,7 +11838,7 @@ const runnersIn = ({ text, baseDirs, reader, credential, prose = false }) => {
             });
         }
         if (credential)
-            for (const found of textRunnerHits(body)) {
+            for (const found of textRunnerHits(body, { claudeArgs })) {
                 const at = unmatched.indexOf(found.runner);
                 if (at >= 0)
                     unmatched.splice(at, 1);
@@ -11623,6 +11856,13 @@ const runnersIn = ({ text, baseDirs, reader, credential, prose = false }) => {
             read({ body, viaScript: ref.name, dirs: [] });
     return hits;
 };
+/** `anthropics/claude-code-action` pinned to a full commit SHA: the only action whose `claude_args` the check knows. */
+const isPinnedClaudeAction = (uses) => uses !== undefined &&
+    !uses.local &&
+    uses.owner === 'anthropics' &&
+    uses.repo === 'claude-code-action' &&
+    uses.path === '' &&
+    /^[0-9a-f]{40}$/i.test(uses.ref);
 /** True for a `with:` value that switches an install on (`run_install: true`, or a list of install settings). */
 const truthyInput = (value) => value !== undefined && !['', 'false', 'null', '0', 'no'].includes(value.trim().toLowerCase());
 /** `pnpm/action-setup` with `run_install` runs `pnpm install` itself, and with it every lifecycle script. */
@@ -11663,29 +11903,45 @@ const messageFor = ({ hit, credential }) => {
         : `\`${hit.runner}\` (in package script \`${hit.viaScript}\`)`;
     return `${how} fetches a package from the registry at run time, so the lockfile does not cover what runs${credential ? ' in a job that holds a credential' : ''}; add the tool as a dependency and run it with \`pnpm exec\`.`;
 };
-/**
- * Repository-relative directory a local `uses:` reaches: `./x/y`, a trailing slash, `./` for the root
- * action, and `<this repository>/x/y@<ref>`, which GitHub resolves to the same checkout. Undefined for
- * anything that is not a path inside the tree.
- */
-const actionDirectory = ({ uses, repository }) => {
-    let path;
+/** The path a local `uses:` names, or one in this repository (`<this repository>/x/y@<ref>`); else undefined. */
+const localPath = ({ uses, repository }) => {
     if (uses.local)
-        path = uses.path;
-    else if (repository !== '' && `${uses.owner}/${uses.repo}` === repository.toLowerCase())
-        path = uses.path;
-    else
-        return undefined;
-    path = path.replace(/^\.\//, '');
+        return uses.path;
+    if (repository !== '' && `${uses.owner}/${uses.repo}` === repository.toLowerCase())
+        return uses.path;
+    return undefined;
+};
+/** True when a local `uses:` path has a `..` segment: it may leave the tree, so it is not read. */
+const climbsOut = ({ uses, repository }) => (localPath({ uses, repository }) ?? '').split('/').includes('..');
+/**
+ * Repository-relative directories a local `uses:` reaches: `./x/y`, a trailing slash, `./` for the root
+ * action, and `<this repository>/x/y@<ref>`, which GitHub resolves to the same checkout. Empty for
+ * anything that is not a path inside the tree, and for a path with a `..` segment. In the canonical
+ * repository a `.pipelines/` path is the mapped path; when the tree also holds a directory at the
+ * literal path, both are read, so a mapped benign action cannot hide a literal one.
+ */
+const actionDirectories = ({ uses, repository, root }) => {
+    const given = localPath({ uses, repository });
+    if (given === undefined || climbsOut({ uses, repository }))
+        return [];
+    const clean = (value) => {
+        const path = external_node_path_namespaceObject.posix.normalize(value === '' ? '.' : value).replace(/\/+$/, '');
+        return path === '' ? '.' : path;
+    };
+    const usable = (path) => path !== '..' && !path.startsWith('../') && !external_node_path_namespaceObject.posix.isAbsolute(path);
+    const literal = clean(given.replace(/^\.\//, ''));
+    let mapped = given.replace(/^\.\//, '');
     // Only the canonical repository's own run identity (never a value read from the tree) maps these paths.
     if (sameRepository({ a: repository, b: CALLEE_REPOSITORY }))
         for (const prefix of SELF_CHECKOUT_PREFIXES)
-            if (path.startsWith(prefix))
-                path = path.slice(prefix.length);
-    path = external_node_path_namespaceObject.posix.normalize(path === '' ? '.' : path).replace(/\/+$/, '');
-    if (path === '')
-        path = '.';
-    return path === '..' || path.startsWith('../') || external_node_path_namespaceObject.posix.isAbsolute(path) ? undefined : path;
+            if (mapped.startsWith(prefix))
+                mapped = mapped.slice(prefix.length);
+    const found = [clean(mapped)];
+    if (literal !== found[0] &&
+        (0,external_node_fs_namespaceObject.existsSync)((0,external_node_path_namespaceObject.join)(root, literal)) &&
+        linkedParent({ root, relative: literal }) === undefined)
+        found.push(literal);
+    return found.filter(usable);
 };
 /** Directories under `.github/actions` that hold an action file, without following links. */
 const listActionDirectories = (root) => {
@@ -11870,7 +12126,14 @@ const checkRegistryRunners = ({ scan, repository }) => {
             hits.push(...runnersIn({ text: step.run, baseDirs, reader, credential }));
         if (step.uses !== undefined) {
             for (const [key, value] of Object.entries(step.with))
-                hits.push(...runnersIn({ text: value, baseDirs, reader, credential, prose: PROSE_KEY.test(key) }));
+                hits.push(...runnersIn({
+                    text: value,
+                    baseDirs,
+                    reader,
+                    credential,
+                    prose: PROSE_KEY.test(key),
+                    claudeArgs: key === 'claude_args' && isPinnedClaudeAction(step.uses)
+                }));
             if (installsThroughAction(step))
                 hits.push(...runnersIn({ text: 'pnpm install', baseDirs, reader, credential }));
         }
@@ -11878,6 +12141,8 @@ const checkRegistryRunners = ({ scan, repository }) => {
     };
     /** Action directories a workflow step uses, and whether the job holds a credential. */
     const workflowUses = [];
+    /** Local `uses:` paths with a `..` segment: never read, so a credential job using one fails closed. */
+    const climbs = [];
     for (const file of scan.files) {
         if (file.class === 'unparseable')
             continue;
@@ -11917,17 +12182,15 @@ const checkRegistryRunners = ({ scan, repository }) => {
                 });
                 if (step.uses === undefined)
                     continue;
-                const directory = actionDirectory({ uses: step.uses, repository });
-                if (directory !== undefined)
-                    workflowUses.push({
-                        directory,
-                        credential,
-                        site: {
-                            file: model.file,
-                            line: step.line,
-                            covered: info?.holdsPublishCredential === true
-                        }
-                    });
+                const site = {
+                    file: model.file,
+                    line: step.line,
+                    covered: info?.holdsPublishCredential === true
+                };
+                for (const directory of actionDirectories({ uses: step.uses, repository, root: scan.root }))
+                    workflowUses.push({ directory, credential, site });
+                if (climbsOut({ uses: step.uses, repository }))
+                    climbs.push({ from: undefined, credential, site, path: step.uses.path });
             }
         }
     }
@@ -11955,16 +12218,23 @@ const checkRegistryRunners = ({ scan, repository }) => {
         for (const step of read.steps) {
             if (step.uses === undefined)
                 continue;
-            const to = actionDirectory({ uses: parseUses(step.uses), repository });
-            if (to === undefined)
-                continue;
-            edges.set(directory, [
-                ...(edges.get(directory) ?? []),
-                { to, file: read.file, line: step.line }
-            ]);
-            if (!all.has(to)) {
-                all.add(to);
-                queue.push(to);
+            const nested = parseUses(step.uses);
+            if (climbsOut({ uses: nested, repository }))
+                climbs.push({
+                    from: directory,
+                    credential: false,
+                    site: { file: read.file, line: step.line, covered: false },
+                    path: nested.path
+                });
+            for (const to of actionDirectories({ uses: nested, repository, root: scan.root })) {
+                edges.set(directory, [
+                    ...(edges.get(directory) ?? []),
+                    { to, file: read.file, line: step.line }
+                ]);
+                if (!all.has(to)) {
+                    all.add(to);
+                    queue.push(to);
+                }
             }
         }
     }
@@ -11987,6 +12257,26 @@ const checkRegistryRunners = ({ scan, repository }) => {
                 });
                 spread.push(edge.to);
             }
+    for (const climb of climbs) {
+        const site = climb.from === undefined
+            ? climb.credential
+                ? climb.site
+                : undefined
+            : credentialed.has(climb.from)
+                ? {
+                    ...climb.site,
+                    covered: credentialed.get(climb.from)?.covered === true
+                }
+                : undefined;
+        if (site !== undefined && !site.covered)
+            findings.push({
+                ruleId: REGISTRY_RUNNER_CREDENTIAL_RULE,
+                file: site.file,
+                line: site.line,
+                message: `The local action \`${climb.path}\` is used in a job that holds a credential and could not be read (its path climbs out of the directory with \`..\`), so the check cannot confirm that it fetches nothing from the registry.`,
+                severity: 'error'
+            });
+    }
     const actionFiles = [];
     for (const directory of [...all].sort()) {
         const read = readAction(directory);
