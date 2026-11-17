@@ -271,8 +271,11 @@ describe('validate-tags', () => {
       "packages:\n  - 'a/{x,y}'\n",
       "packages:\n  - 'a/*/b'\n",
       "packages:\n  - 'a/[xy]'\n",
-      'packages: [a/*]\n',
-      'other: 1\n'
+      "packages: ['a/*/b']\n",
+      'packages: [a/*, b/{c,d}]\n',
+      'packages:\n  - a/*\n  - "!a/*/b"\n  - a/**/c\n',
+      'packages: []\n',
+      'packages: a/*\n'
     ]) {
       const ws = join(
         scratch,
@@ -283,10 +286,59 @@ describe('validate-tags', () => {
       writeFile(ws, 'a/x/package.json', JSON.stringify({ name: 'p', version: '1.0.0' }));
       failsWith(
         { tags: [], expected: [{ tag: 'p@1.0.0', packageName: 'p', directory: 'a/x' }] },
-        /cannot be evaluated|cannot be read|not a block list|no packages list/,
+        /cannot be evaluated|cannot be read|not a block or flow list|empty packages list/,
         { ws }
       );
     }
+  });
+
+  it('no workspace file, or a settings-only one, means the root is the only package', () => {
+    for (const [name, files] of [
+      ['none', {}],
+      [
+        'settings-only',
+        { 'pnpm-workspace.yaml': 'minimumReleaseAge: 1440\nblockExoticSubdeps: true\n' }
+      ]
+    ]) {
+      const ws = join(scratch, `root-only-${name}`);
+      for (const [file, body] of Object.entries(files)) writeFile(ws, file, body);
+      writeFile(ws, '.changeset/config.json', '{}');
+      writeFile(ws, 'package.json', JSON.stringify({ name: 'solo', version: '1.2.3' }));
+      writeFile(ws, 'a/x/package.json', JSON.stringify({ name: 'solo', version: '1.2.3' }));
+      const root = { tag: 'solo@1.2.3', packageName: 'solo', directory: '.' };
+      assert.deepEqual(check({ tags: [], expected: [root] }, { ws }).errors, [], name);
+      assert.deepEqual(
+        check({ tags: [], expected: [{ ...root, directory: 'a/x' }] }, { ws }).errors.length > 0,
+        true,
+        `${name}: a subdirectory is not a package`
+      );
+    }
+  });
+
+  it('a one-line flow list is read, including the root', () => {
+    const ws = join(scratch, 'flow');
+    writeFile(ws, 'pnpm-workspace.yaml', 'packages: [\'.\', a/*, "b/**"] # members\n');
+    writeFile(ws, '.changeset/config.json', '{}');
+    for (const dir of ['.', 'a/x', 'b/y/z']) {
+      writeFile(ws, `${dir}/package.json`, JSON.stringify({ name: 'p', version: '1.0.0' }));
+    }
+    for (const directory of ['.', 'a/x', 'b/y/z']) {
+      const entry = { tag: 'p@1.0.0', packageName: 'p', directory };
+      assert.deepEqual(check({ tags: [], expected: [entry] }, { ws }).errors, [], directory);
+    }
+  });
+
+  it('a block list with a ! exclusion is evaluated', () => {
+    const ws = join(scratch, 'negation');
+    writeFile(ws, 'pnpm-workspace.yaml', "packages:\n  - 'pkgs/**'\n  - '!pkgs/test/**'\n");
+    writeFile(ws, '.changeset/config.json', '{}');
+    for (const dir of ['pkgs/a', 'pkgs/test/b']) {
+      writeFile(ws, `${dir}/package.json`, JSON.stringify({ name: 'p', version: '1.0.0' }));
+    }
+    const ok = (directory) =>
+      check({ tags: [], expected: [{ tag: 'p@1.0.0', packageName: 'p', directory }] }, { ws })
+        .errors.length === 0;
+    assert.deepEqual(['pkgs/a', 'pkgs/test/b'].map(ok), [true, false]);
   });
 
   it('declared workspaces without a pnpm-workspace.yaml fail closed', () => {

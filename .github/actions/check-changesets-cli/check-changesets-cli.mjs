@@ -9,6 +9,8 @@ import { appendFileSync, existsSync, readFileSync } from 'node:fs';
 import { join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 
+import { readWorkspacePatterns } from '../workspace-patterns/workspace-patterns.mjs';
+
 export function defaultRun(command, args) {
   const result = spawnSync(command, args, { encoding: 'utf8', maxBuffer: 64 * 1024 * 1024 });
   return {
@@ -26,7 +28,8 @@ const TITLES = {
   unsupportedMajor: 'Unsupported @changesets/cli major',
   unreadableVersion: 'Unreadable @changesets/cli version',
   privatePackages: 'privatePackages not explicit',
-  config: 'Unreadable or invalid changesets config'
+  config: 'Unreadable or invalid changesets config',
+  workspacePatterns: 'Unsupported workspace layout'
 };
 
 class CheckError extends Error {
@@ -114,6 +117,22 @@ function privatePackagesIsExplicit(value) {
   );
 }
 
+// The finalize job validates the tags it is given against this same
+// evaluation, after the publish; running it here fails an unevaluable layout
+// before any release PR is merged.
+function checkWorkspaceLayout(root) {
+  try {
+    readWorkspacePatterns(resolve(root));
+  } catch (err) {
+    throw new CheckError(
+      'workspacePatterns',
+      `The workspace layout cannot be evaluated for @changesets/cli 3.x tagging: ${err.message}. ` +
+        'List the packages in "pnpm-workspace.yaml" as a block or one-line list of directory paths, ' +
+        'optionally ending in "*" or "**", with "!" for exclusions, or remove the "packages" key for a single root package.'
+    );
+  }
+}
+
 function checkPrivatePackagesConfig({ root, listProjects, run }) {
   let config;
   let packages;
@@ -167,7 +186,10 @@ export function checkChangesetsCli({ run = defaultRun, root = '.', listProjects 
         "Install a supported @changesets/cli from the repository's lockfile."
     );
   }
-  if (major === '3') checkPrivatePackagesConfig({ root, listProjects, run });
+  if (major === '3') {
+    checkWorkspaceLayout(root);
+    checkPrivatePackagesConfig({ root, listProjects, run });
+  }
   return { version, major: Number(major) };
 }
 

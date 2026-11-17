@@ -180,6 +180,7 @@ jobs:
           path: .pipelines
           sparse-checkout: |
             .github/actions/check-changesets-cli
+            .github/actions/workspace-patterns
             .github/actions/check-cli-major
           persist-credentials: false
 
@@ -326,17 +327,20 @@ jobs:
 
       - uses: ./.pipelines-guard/.github/actions/release-guard
 
-      # Existing tags are fetched by name (this job's read-only token, not
-      # persisted): `changeset git-tag` skips a tag that exists locally or on
-      # the remote, and on a private or internal caller its unauthenticated
-      # remote lookup fails, which reads as "no such tag". Without the tags in
-      # the clone it would create a tag again for every unchanged package that
-      # an earlier release already tagged, and finalize would then fail on a
-      # correct tag. Depth stays 1: a tag at a commit outside the history is
-      # still listed by name.
+      # Every existing tag is fetched while this checkout still holds the job's
+      # read-only token (not persisted): `changeset git-tag` skips a tag that
+      # exists locally or on the remote, and on a private or internal caller
+      # its unauthenticated remote lookup fails, which reads as "no such tag".
+      # Without the tags in the clone it would create a tag again for every
+      # unchanged package that an earlier release already tagged, and finalize
+      # would then fail on a correct tag. With a positive depth the action
+      # fetches only the one ref and git follows only tags that point into the
+      # objects it downloads, so older tags are missed; depth 0 makes the
+      # action fetch `+refs/tags/*` explicitly, and no partial-clone filter is
+      # set because a later lazy fetch would have no credential.
       - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4.3.1
         with:
-          fetch-depth: 1
+          fetch-depth: 0
           fetch-tags: true
           persist-credentials: false
 
@@ -356,6 +360,7 @@ jobs:
           path: .pipelines
           sparse-checkout: |
             .github/actions/check-changesets-cli
+            .github/actions/workspace-patterns
             .github/actions/tag-and-release
           persist-credentials: false
 
@@ -522,6 +527,7 @@ jobs:
           path: .pipelines
           sparse-checkout: |
             .github/actions/check-changesets-cli
+            .github/actions/workspace-patterns
             .github/actions/correct-latest-release
             .github/actions/tag-and-release
           persist-credentials: false
@@ -610,6 +616,7 @@ jobs:
           path: .pipelines
           sparse-checkout: |
             .github/actions/check-release-tags
+            .github/actions/workspace-patterns
             .github/actions/correct-latest-release
             .github/actions/tag-and-release
           persist-credentials: false

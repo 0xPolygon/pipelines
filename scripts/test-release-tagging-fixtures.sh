@@ -363,48 +363,77 @@ expect_rc "3.x conflict: end-state check fails" 1
 expect_out "3.x conflict: names the conflicting tag" "@fx/pub@1.0.0 (points at another commit)"
 expect_eq "3.x conflict: the remote tag is untouched" "$(git --git-dir "$REMOTE" rev-parse '@fx/pub@1.0.0^{commit}')" "$(git -C "$WS" rev-parse HEAD~1)"
 
-echo "-- 3.x: unreachable origin, unchanged package already tagged at an older commit"
-# A private caller has no git credential in the tagging job, so the CLI's remote
-# tag lookup fails and reads as "no such tag". With existing tags fetched into
-# the clone (fetch-tags), it skips them by local name; without them it would
-# create a tag again for an unchanged package, which the end-state check reports.
-unreachable_origin() {
-  git -C "$WS" remote set-url origin https://127.0.0.1:9/fixture.git
-}
-new_workspace 3 multi "$(config_json '[]' "$PRIV_ON")" @fx/old 1.0.0 false @fx/new 1.0.0 false
-git -C "$WS" tag -a "@fx/old@1.0.0" -m old
-git -C "$WS" push -q origin "refs/tags/@fx/old@1.0.0"
-add_commit "second"
-printf '%s\n' '{"name":"@fx/new","version":"2.0.0"}' >"$WS/packages/new/package.json"
-git -C "$WS" add -A
-git -C "$WS" commit -q -m "bump new"
-unreachable_origin
-collect3
-expect_rc "3.x unreachable origin, old tag fetched: tags artifact validates" 0
-expect_eq "3.x unreachable origin, old tag fetched: only the bumped package is tagged" "$(tag_names)" "@fx/new@2.0.0"
-expect_eq "3.x unreachable origin, old tag fetched: both tags are expected" "$(expected_names)" "@fx/new@2.0.0,@fx/old@1.0.0"
-git -C "$WS" remote set-url origin "$REMOTE"
-push_tags @fx/new@2.0.0
-check 3 "$TAGS_FILE"
-expect_rc "3.x unreachable origin, old tag fetched: end-state check passes" 0
+echo "-- 3.x: private caller, clone made by the pinned checkout's own fetch, origin then unreachable"
+# A private caller has no git credential once the checkout step is over, so the
+# CLI's remote tag lookup fails and reads as "no such tag". The clone is made
+# with the exact fetch arguments actions/checkout@34e11487 (v4.3.1) runs, read
+# from src/git-source-provider.ts and src/git-command-manager.ts at that SHA:
+#   fetch-depth 0, fetch-tags true, no filter, no sparse checkout:
+#     git -c protocol.version=2 fetch --prune --no-recurse-submodules origin \
+#       +refs/heads/*:refs/remotes/origin/* +refs/tags/*:refs/tags/*
+#   fetch-depth 1, fetch-tags true (the old setting; no --no-tags, one refspec):
+#     git -c protocol.version=2 fetch --prune --no-recurse-submodules --depth=1 \
+#       origin +<sha>:refs/remotes/origin/main
+# The fetch is made over a file:// URL so --depth is honoured as it is over HTTPS.
+# Then origin is made unreachable (GIT_TERMINAL_PROMPT=0 is already exported).
 
-echo "-- 3.x: unreachable origin, the old tag is NOT in the clone (the falsification of fetch-tags: without the fetched tags the run must not end green)"
-new_workspace 3 multi "$(config_json '[]' "$PRIV_ON")" @fx/old 1.0.0 false @fx/new 1.0.0 false
-git -C "$WS" tag -a "@fx/old@1.0.0" -m old
-git -C "$WS" push -q origin "refs/tags/@fx/old@1.0.0"
-git -C "$WS" tag -d "@fx/old@1.0.0" >/dev/null
-add_commit "second"
-printf '%s\n' '{"name":"@fx/new","version":"2.0.0"}' >"$WS/packages/new/package.json"
-git -C "$WS" add -A
-git -C "$WS" commit -q -m "bump new"
-unreachable_origin
+# seed_old_tag: a remote holding an old tag on an unchanged package and a later
+# commit that bumps another one. Sets REMOTE and SEED_WS.
+seed_old_tag() {
+  new_workspace 3 multi "$(config_json '[]' "$PRIV_ON")" @fx/old 1.0.0 false @fx/new 1.0.0 false
+  git -C "$WS" tag -a "@fx/old@1.0.0" -m old
+  git -C "$WS" push -q origin "refs/tags/@fx/old@1.0.0"
+  add_commit "second"
+  printf '%s\n' '{"name":"@fx/new","version":"2.0.0"}' >"$WS/packages/new/package.json"
+  git -C "$WS" add -A
+  git -C "$WS" commit -q -m "bump new"
+  git -C "$WS" push -q origin main
+  SEED_WS="$WS"
+}
+
+# action_clone DEPTH: replaces WS with a fresh clone of REMOTE made the way the
+# pinned checkout makes it, with origin unreachable afterwards.
+action_clone() {
+  local depth="$1" sha cl="$WORK/clone-$CASE_N-$1"
+  sha="$(git -C "$SEED_WS" rev-parse HEAD)"
+  git init -q -b main "$cl"
+  git -C "$cl" remote add origin "file://$REMOTE"
+  if [ "$depth" = 0 ]; then
+    git -C "$cl" -c protocol.version=2 fetch --prune --no-recurse-submodules origin \
+      '+refs/heads/*:refs/remotes/origin/*' '+refs/tags/*:refs/tags/*'
+  else
+    git -C "$cl" -c protocol.version=2 fetch --prune --no-recurse-submodules --depth="$depth" origin \
+      "+$sha:refs/remotes/origin/main"
+  fi
+  git -C "$cl" checkout -q --force -B main "$sha"
+  ln -s "$WORK/cli-3/node_modules" "$cl/node_modules"
+  git -C "$cl" remote set-url origin https://127.0.0.1:9/fixture.git
+  WS="$cl"
+}
+
+seed_old_tag
+action_clone 0
+expect_eq "3.x private caller, depth 0: the old tag is in the clone" "$(git -C "$WS" tag | sort | paste -sd, -)" "@fx/old@1.0.0"
 collect3
-expect_eq "3.x unreachable origin, old tag absent: the CLI creates both tags" "$(tag_names)" "@fx/new@2.0.0,@fx/old@1.0.0"
-git -C "$WS" remote set-url origin "$REMOTE"
+expect_rc "3.x private caller, depth 0: tags artifact validates" 0
+expect_eq "3.x private caller, depth 0: only the bumped package is tagged" "$(tag_names)" "@fx/new@2.0.0"
+expect_eq "3.x private caller, depth 0: both tags are expected" "$(expected_names)" "@fx/new@2.0.0,@fx/old@1.0.0"
+git -C "$WS" remote set-url origin "file://$REMOTE"
 push_tags @fx/new@2.0.0
 check 3 "$TAGS_FILE"
-expect_rc "3.x unreachable origin, old tag absent (no fetch-tags): the run does not end green" 1
-expect_out "3.x unreachable origin, old tag absent: names the conflict" "@fx/old@1.0.0 (points at another commit)"
+expect_rc "3.x private caller, depth 0: end-state check passes" 0
+
+echo "-- 3.x: private caller, depth 1 (the old setting): the old tag is absent, so the run must not end green"
+seed_old_tag
+action_clone 1
+expect_eq "3.x private caller, depth 1: the old tag is NOT in the clone" "$(git -C "$WS" tag | sort | paste -sd, -)" ""
+collect3
+expect_eq "3.x private caller, depth 1: the CLI creates both tags" "$(tag_names)" "@fx/new@2.0.0,@fx/old@1.0.0"
+git -C "$WS" remote set-url origin "file://$REMOTE"
+push_tags @fx/new@2.0.0
+check 3 "$TAGS_FILE"
+expect_rc "3.x private caller, depth 1: the run does not end green" 1
+expect_out "3.x private caller, depth 1: names the conflict" "@fx/old@1.0.0 (points at another commit)"
 
 echo "-- 3.x: an artifact entry that disagrees with the checkout"
 new_workspace 3 multi "$(config_json '[]' "$PRIV_ON")" @fx/pub 1.0.0 false

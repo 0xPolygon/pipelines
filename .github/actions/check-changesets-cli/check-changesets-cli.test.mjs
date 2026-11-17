@@ -183,3 +183,46 @@ describe('check-changesets-cli: privatePackages on 3.x', () => {
     assert.throws(() => three(repo({ rootPrivate: true, config: '{ not json' })), /Could not read/);
   });
 });
+
+describe('check-changesets-cli: workspace layout on 3.x', () => {
+  const withWorkspaceFile = (body) => {
+    const r = repo({ config: {} });
+    if (body !== undefined) writeFileSync(join(r.root, 'pnpm-workspace.yaml'), body);
+    return r;
+  };
+
+  it('accepts no workspace file, a settings-only file, a flow list with ".", and a block list with a negation', () => {
+    for (const body of [
+      undefined,
+      'minimumReleaseAge: 1440\n',
+      "packages: ['.']\n",
+      'packages: [a/*, b/**]\n',
+      "packages:\n  - 'pkgs/**'\n  - '!pkgs/test/**'\n"
+    ]) {
+      assert.equal(three(withWorkspaceFile(body)).major, 3, String(body));
+    }
+  });
+
+  it('fails an unevaluable pattern with an actionable message and its own title', () => {
+    for (const body of [
+      "packages:\n  - 'a/*/b'\n",
+      "packages: ['a/{x,y}']\n",
+      "packages:\n  - 'a/[xy]'\n",
+      'packages: []\n'
+    ]) {
+      const r = withWorkspaceFile(body);
+      assert.throws(
+        () => three(r),
+        /workspace layout cannot be evaluated.*block or one-line list/s
+      );
+      const lines = [];
+      assert.equal(main({ run: answer('3.0.1\n'), log: (l) => lines.push(l), env: {}, ...r }), 1);
+      assert.match(lines[0], /^::error title=Unsupported workspace layout::/);
+    }
+  });
+
+  it('does not apply on 2.x', () => {
+    const r = withWorkspaceFile("packages:\n  - 'a/*/b'\n");
+    assert.equal(checkChangesetsCli({ run: answer('2.30.0\n'), ...r }).major, 2);
+  });
+});

@@ -4,7 +4,7 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { afterEach, beforeEach, describe, it } from 'node:test';
 
-import { main } from './check-release-tags.mjs';
+import { main, workspacePackages } from './check-release-tags.mjs';
 
 let dir;
 beforeEach(() => {
@@ -181,25 +181,37 @@ describe('check-release-tags', () => {
   });
 
   describe('tags at HEAD in the local clone', () => {
-    const pnpmCalls = [];
+    const commands = [];
     const HEAD = 'a'.repeat(40);
     const OTHER = 'b'.repeat(40);
 
-    /** A command stub: HEAD and its tags, plus the pnpm workspace package list. */
-    const gitRun =
-      ({ tags = [], packages = [] } = {}) =>
-      (command, args) => {
+    /**
+     * A command stub: HEAD and its tags. `packages` are written to the
+     * workspace as package.json files (the root at '.', members listed
+     * literally in pnpm-workspace.yaml), because the packages are read from disk.
+     */
+    const gitRun = ({ tags = [], packages = [] } = {}) => {
+      const members = packages.filter((p) => p.directory !== '.');
+      for (const p of packages) {
+        mkdirSync(join(dir, p.directory), { recursive: true });
+        writeFileSync(
+          join(dir, p.directory, 'package.json'),
+          JSON.stringify({ name: p.name, version: p.version })
+        );
+      }
+      if (members.length > 0) {
+        writeFileSync(
+          join(dir, 'pnpm-workspace.yaml'),
+          `packages:\n${members.map((p) => `  - '${p.directory}'\n`).join('')}`
+        );
+      }
+      return (command, args) => {
+        commands.push(command);
         if (command === 'git' && args[0] === 'rev-parse') return { status: 0, stdout: `${HEAD}\n` };
         if (command === 'git' && args[0] === 'tag') return { status: 0, stdout: tags.join('\n') };
-        if (command === 'pnpm') {
-          pnpmCalls.push(args);
-          return {
-            status: 0,
-            stdout: JSON.stringify(packages.map((p) => ({ ...p, path: join(dir, p.directory) })))
-          };
-        }
         throw new Error(`unexpected command ${command}`);
       };
+    };
 
     /** Fetch stub for refs (`commits`: tag → commit) and Releases. */
     const refFetch =
@@ -230,16 +242,42 @@ describe('check-release-tags', () => {
 
     const pkgA = { name: '@s/a', version: '1.0.0', directory: 'pkgs/a' };
 
-    it('every pnpm call passes --config.ignore-pnpmfile=true, so no repository .pnpmfile.cjs loads', async () => {
-      pnpmCalls.length = 0;
-      await runLocal({
+    it('spawns no pnpm: packages are read from the workspace files, so no repository .pnpmfile.cjs loads', async () => {
+      commands.length = 0;
+      writeFileSync(join(dir, '.pnpmfile.cjs'), "throw new Error('loaded');\n");
+      const { code } = await runLocal({
         fetchImpl: refFetch({ commits: { '@s/a@1.0.0': HEAD } }),
         run: gitRun({ tags: ['@s/a@1.0.0'], packages: [pkgA] }),
         withManifest: false
       });
-      assert.ok(pnpmCalls.length > 0);
-      for (const args of pnpmCalls)
-        assert.ok(args.includes('--config.ignore-pnpmfile=true'), args.join(' '));
+      assert.equal(code, 0);
+      assert.ok(commands.length > 0);
+      assert.deepEqual([...new Set(commands)], ['git']);
+    });
+
+    it('reads packages by the shared workspace rules: root, block and flow lists, exclusions, settings-only', () => {
+      const w = (file, body) => {
+        mkdirSync(join(dir, file, '..'), { recursive: true });
+        writeFileSync(join(dir, file), body);
+      };
+      w('package.json', JSON.stringify({ name: 'root', version: '0.0.1' }));
+      for (const d of ['pkgs/a', 'pkgs/test/b', 'other/c', 'node_modules/n']) {
+        w(`${d}/package.json`, JSON.stringify({ name: d.replace('/', '-'), version: '1.0.0' }));
+      }
+      w('pkgs/novers/package.json', JSON.stringify({ name: 'novers' }));
+      const listed = () =>
+        workspacePackages({ workspace: dir })
+          .map((p) => p.directory)
+          .sort();
+      assert.deepEqual(listed(), ['.']);
+      w('pnpm-workspace.yaml', 'minimumReleaseAge: 1\n');
+      assert.deepEqual(listed(), ['.']);
+      w('pnpm-workspace.yaml', "packages:\n  - 'pkgs/**'\n  - '!pkgs/test/**'\n");
+      assert.deepEqual(listed(), ['.', 'pkgs/a']);
+      w('pnpm-workspace.yaml', "packages: ['pkgs/*', other/*]\n");
+      assert.deepEqual(listed(), ['.', 'other/c', 'pkgs/a']);
+      w('pnpm-workspace.yaml', "packages:\n  - 'a/*/b'\n");
+      assert.throws(() => listed(), /cannot be evaluated/);
     });
 
     it('passes with nothing to tag', async () => {

@@ -371,7 +371,7 @@ check('the Latest correction is the last finalize step', fix === fin.length - 1,
 // and must carry both actions' files.
 const shared = fin.map((st, i) => ({ st, i })).filter(({ st, i }) => stepUses(st) === 'actions/checkout' && st.with?.path === '.pipelines' && i > act && i < fix).pop();
 const sparse = String(shared?.st.with?.['sparse-checkout'] ?? '').split('\n').map((l) => l.trim());
-check('finalize: the .pipelines checkout before the correction has no if and lists check-release-tags, correct-latest-release and tag-and-release, before the tag-and-release step', shared !== undefined && !('if' in shared.st) && sparse.includes('.github/actions/check-release-tags') && sparse.includes('.github/actions/correct-latest-release') && sparse.includes('.github/actions/tag-and-release') && shared.i < tagRel, json(shared?.st));
+check('finalize: the .pipelines checkout before the correction has no if and lists check-release-tags, workspace-patterns (its evaluator), correct-latest-release and tag-and-release, before the tag-and-release step', shared !== undefined && !('if' in shared.st) && sparse.includes('.github/actions/check-release-tags') && sparse.includes('.github/actions/workspace-patterns') && sparse.includes('.github/actions/correct-latest-release') && sparse.includes('.github/actions/tag-and-release') && shared.i < tagRel, json(shared?.st));
 // Exact ordered allowlists for finalize and collect-tags, in the form the
 // version job has: a step is identified by its action or its run text, and by
 // its `if:`. A step that is not on the list (a new local action, a run step, a
@@ -428,7 +428,14 @@ check('collect-tags steps are exactly the allowlist, with their conditions, in o
 // The checkout of the caller's repository must see existing tags (so the CLI
 // skips them on a private caller) and must not persist the job token.
 const ctRepo = ct.filter((st) => stepUses(st) === 'actions/checkout' && !('repository' in (st.with ?? {})));
-check('collect-tags: the one repository checkout fetches tags and does not persist credentials', ctRepo.length === 1 && ctRepo[0].with['fetch-tags'] === true && ctRepo[0].with['persist-credentials'] === false && ctRepo[0].with['fetch-depth'] === 1, json(ctRepo.map((st) => st.with)));
+check('collect-tags: the one repository checkout fetches all tags (depth 0, no filter, no sparse checkout) and does not persist credentials', ctRepo.length === 1 && ctRepo[0].with['fetch-tags'] === true && ctRepo[0].with['persist-credentials'] === false && ctRepo[0].with['fetch-depth'] === 0 && !('filter' in ctRepo[0].with) && !('sparse-checkout' in ctRepo[0].with), json(ctRepo.map((st) => st.with)));
+// The detector and validate-tags import ../workspace-patterns, so every sparse
+// checkout that brings the detector must bring the shared module too. The one
+// before validate-tags lists the detector, so it is covered; the checkout that
+// only runs tag-and-release.cjs loads neither.
+const sparseLists = Object.entries(jobs).flatMap(([name, j]) => (j.steps ?? []).filter((st) => stepUses(st) === 'actions/checkout' && 'sparse-checkout' in (st.with ?? {})).map((st) => [name, String(st.with['sparse-checkout']).split('\n').map((l) => l.trim()).filter(Boolean)]));
+const needsShared = sparseLists.filter(([, l]) => l.includes('.github/actions/check-changesets-cli'));
+check('every sparse checkout that lists check-changesets-cli also lists workspace-patterns', needsShared.length === 3 && needsShared.every(([, l]) => l.includes('.github/actions/workspace-patterns')), json(needsShared));
 check('finalize permissions stay contents: write only', json(jobs.finalize?.permissions) === json({ contents: 'write' }), json(jobs.finalize?.permissions));
 
 const art = Object.values(jobs.build?.steps ?? []).find((st) => stepUses(st) === 'actions/upload-artifact');
@@ -507,21 +514,24 @@ check('version job: 3.x version-script is pnpm run ci:version only under version
 check('version job: the has_changesets output reads both arms', norm(wf.jobs?.version?.outputs?.has_changesets) === "${{ steps.changesets.outputs.hasChangesets || steps.changesets3.outputs['has-changesets'] }}", norm(wf.jobs?.version?.outputs?.has_changesets));
 check('version job: no id-token permission', isMap(jobs.version?.permissions) && !('id-token' in jobs.version.permissions));
 check('version job: permissions are exactly contents: write and pull-requests: write', json(jobs.version?.permissions) === json({ contents: 'write', 'pull-requests': 'write' }), json(jobs.version?.permissions));
-// pnpm loads a repository's .pnpmfile.cjs, which is repository code. Every
-// pnpm invocation in the scripts finalize runs (the end-state check, and the
-// detector on the 2.x arm) must pass the ignore flag. Calls are found as
-// `'pnpm',` argument lists and read up to the closing bracket.
-const pnpmScripts = ['.github/actions/check-release-tags/check-release-tags.mjs', '.github/actions/check-changesets-cli/check-changesets-cli.mjs'];
+// pnpm loads a repository's .pnpmfile.cjs, which is repository code, and the
+// ignore option does not hold on every pnpm major. So finalize's end-state
+// scripts (check-release-tags and the shared evaluator it imports) run no pnpm
+// at all. Only the 2.x-arm detector still runs pnpm, with the ignore flag; its
+// calls are found as `'pnpm',` argument lists read up to the closing bracket.
+const noPnpm = ['.github/actions/check-release-tags/check-release-tags.mjs', '.github/actions/workspace-patterns/workspace-patterns.mjs'];
+const pnpmFound = noPnpm.filter((f) => /['"`]pnpm['"`]|\bpnpm\s+(ls|exec|run|install)\b/.test(fs.readFileSync(path.join(repoRoot, f), 'utf8').replace(/\/\/[^\n]*/g, '').replace(/\/\*[\s\S]*?\*\//g, '')));
+check('no pnpm invocation appears in the end-state scripts finalize runs (check-release-tags and workspace-patterns)', pnpmFound.length === 0, json(pnpmFound));
 const pnpmBad = [];
 let pnpmCalls = 0;
-for (const f of pnpmScripts) {
-  const text = fs.readFileSync(path.join(repoRoot, f), 'utf8');
+{
+  const text = fs.readFileSync(path.join(repoRoot, '.github/actions/check-changesets-cli/check-changesets-cli.mjs'), 'utf8');
   for (const m of text.matchAll(/'pnpm',\s*\[([^\]]*)\]/g)) {
     pnpmCalls += 1;
-    if (!m[1].includes("'--config.ignore-pnpmfile=true'")) pnpmBad.push(`${f}: ${m[1].trim()}`);
+    if (!m[1].includes("'--config.ignore-pnpmfile=true'")) pnpmBad.push(m[1].trim());
   }
 }
-check('every pnpm call in the finalize scripts passes --config.ignore-pnpmfile=true (no repository .pnpmfile.cjs loads)', pnpmCalls >= 3 && pnpmBad.length === 0, json(pnpmBad));
+check('every pnpm call in the 2.x-arm detector passes --config.ignore-pnpmfile=true', pnpmCalls >= 2 && pnpmBad.length === 0, json(pnpmBad));
 console.log(out.join('\n'));
 NODE
   if [ $? -ne 0 ]; then

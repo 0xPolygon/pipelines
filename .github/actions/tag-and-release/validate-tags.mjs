@@ -10,8 +10,8 @@
 // commit this run is for. Beyond the entry shape, the artifact is held to what
 // the repository's own configuration allows, read as plain data: every created
 // tag is also an expected tag; an entry's directory is a workspace package
-// (the globs of pnpm-workspace.yaml, or the one root package of a repository
-// without a workspace file; `v<version>` only names that root package); a
+// (evaluated by ../workspace-patterns: the globs of pnpm-workspace.yaml, or
+// the one root package of a repository without a `packages:` list; `v<version>` only names that root package); a
 // package listed by literal name under `ignore` in .changeset/config.json is
 // never an entry; and a private package is an entry only when
 // `privatePackages` turns tagging on. A pattern shape this script cannot
@@ -21,6 +21,12 @@
 import { readFileSync, realpathSync } from 'node:fs';
 import { isAbsolute, relative, resolve, sep } from 'node:path';
 import { fileURLToPath } from 'node:url';
+
+import {
+  GLOB_CHARS,
+  isWorkspaceDirectory,
+  readWorkspacePatterns
+} from '../workspace-patterns/workspace-patterns.mjs';
 
 const NPM_NAME = /^(?:@[a-z0-9~-][a-z0-9._~-]*\/)?[a-z0-9~-][a-z0-9._~-]*$/;
 const SEMVER =
@@ -45,98 +51,6 @@ function insideWorkspace({ root, directory }) {
   } catch {
     return undefined;
   }
-}
-
-// Characters that make a pattern something other than a literal path segment.
-const GLOB_CHARS = /[*?[\]{}()!]/;
-
-/**
- * Reads the workspace package patterns of the checkout with plain fs: the
- * `packages:` list of pnpm-workspace.yaml (block list only), or `null` for a
- * repository with no workspace file, whose only package is the root. Throws
- * when the layout cannot be evaluated.
- */
-function readWorkspacePatterns(root) {
-  let text;
-  try {
-    text = readFileSync(resolve(root, 'pnpm-workspace.yaml'), 'utf8');
-  } catch (err) {
-    if (err?.code !== 'ENOENT') throw new Error('pnpm-workspace.yaml is not readable');
-    const rootJson = readPackageJson(root);
-    if (rootJson !== undefined && 'workspaces' in rootJson) {
-      throw new Error('the repository declares workspaces without a pnpm-workspace.yaml');
-    }
-    return null;
-  }
-  const patterns = [];
-  let inList = false;
-  let found = false;
-  for (const line of text.split(/\r?\n/)) {
-    if (/^\s*(#.*)?$/.test(line)) continue;
-    if (/^packages:\s*(#.*)?$/.test(line)) {
-      inList = true;
-      found = true;
-      continue;
-    }
-    if (/^\S/.test(line)) {
-      if (/^packages:/.test(line))
-        throw new Error('pnpm-workspace.yaml packages is not a block list');
-      inList = false;
-      continue;
-    }
-    if (!inList) continue;
-    const item = /^\s+-\s+(?:'([^']*)'|"([^"]*)"|([^\s#'"][^\s#]*))\s*(?:#.*)?$/.exec(line);
-    if (item === null)
-      throw new Error('pnpm-workspace.yaml has a packages entry that cannot be read');
-    patterns.push(item[1] ?? item[2] ?? item[3]);
-  }
-  if (!found || patterns.length === 0) {
-    throw new Error('pnpm-workspace.yaml has no packages list');
-  }
-  // Every pattern is checked now, so an unevaluable shape fails the whole
-  // artifact once rather than surfacing from inside an entry's check.
-  for (const pattern of patterns) parsePattern(pattern.replace(/^!/, ''));
-  return patterns;
-}
-
-/** Splits a pattern into its literal prefix and a trailing wildcard kind; throws on any other shape. */
-function parsePattern(pattern) {
-  const segments = pattern.replace(/^\.\//, '').replace(/\/+$/, '').split('/');
-  const last = segments[segments.length - 1];
-  const wildcard = last === '*' || last === '**' ? last : undefined;
-  const prefix = wildcard === undefined ? segments : segments.slice(0, -1);
-  if (
-    pattern === '' ||
-    prefix.some((segment) => segment === '' || segment === '..' || GLOB_CHARS.test(segment))
-  ) {
-    throw new Error(`the workspace pattern ${JSON.stringify(pattern)} cannot be evaluated`);
-  }
-  return { prefix: prefix.filter((segment) => segment !== '.'), wildcard };
-}
-
-function matchesPattern({ pattern, segments }) {
-  const { prefix, wildcard } = parsePattern(pattern);
-  if (!prefix.every((segment, i) => segments[i] === segment)) return false;
-  if (wildcard === undefined) return segments.length === prefix.length;
-  return wildcard === '*' ? segments.length === prefix.length + 1 : segments.length > prefix.length;
-}
-
-/** True when `directory` (relative, normalised) is a workspace package of the checkout. */
-function isWorkspaceDirectory({ patterns, directory }) {
-  if (patterns === null) return directory === '.';
-  const segments = directory === '.' ? [] : directory.split('/');
-  if (
-    segments.some((segment) => segment === '' || segment === '.' || segment === '..') ||
-    segments.includes('node_modules')
-  ) {
-    return false;
-  }
-  const included = patterns.filter((p) => !p.startsWith('!'));
-  const excluded = patterns.filter((p) => p.startsWith('!')).map((p) => p.slice(1));
-  return (
-    included.some((pattern) => matchesPattern({ pattern, segments })) &&
-    !excluded.some((pattern) => matchesPattern({ pattern, segments }))
-  );
 }
 
 /** Reads `.changeset/config.json` as plain JSON: literal `ignore` names and whether private packages are tagged. */

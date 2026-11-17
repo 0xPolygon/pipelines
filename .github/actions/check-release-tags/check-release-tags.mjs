@@ -31,9 +31,14 @@
 // the run's commit. The 2.x arm is unchanged.
 
 import { spawnSync } from 'node:child_process';
-import { existsSync, readFileSync } from 'node:fs';
+import { existsSync, readdirSync, readFileSync } from 'node:fs';
 import { relative, resolve, isAbsolute, sep } from 'node:path';
 import { fileURLToPath } from 'node:url';
+
+import {
+  isWorkspaceDirectory,
+  readWorkspacePatterns
+} from '../workspace-patterns/workspace-patterns.mjs';
 
 export function readManifest(directory) {
   const manifest = JSON.parse(readFileSync(resolve(directory, 'manifest.json'), 'utf8'));
@@ -265,29 +270,43 @@ export function localTagsAtHead({ workspace, run = defaultRun }) {
   };
 }
 
-/** Workspace packages as `{ name, version, directory }`, directory relative to the workspace. */
-export function workspacePackages({ workspace, run = defaultRun }) {
-  // --config.ignore-pnpmfile=true (the plain flag is rejected by `ls`): pnpm would otherwise load the repository's
-  // .pnpmfile.cjs, which is repository code, in a job holding a write token.
-  const result = run(
-    'pnpm',
-    ['ls', '-r', '--depth', '-1', '--json', '--config.ignore-pnpmfile=true'],
-    {
-      cwd: workspace
-    }
-  );
-  if (result.status !== 0) throw new Error('Could not list the workspace packages with pnpm.');
+/**
+ * Workspace packages as `{ name, version, directory }`, directory relative to
+ * the workspace. Read as plain data (the workspace patterns and each
+ * package.json) because this job holds a write token and must not run the
+ * repository's package manager, which would load its .pnpmfile.cjs. Like
+ * `pnpm ls -r`, the root package is listed alongside the members. Throws when
+ * the workspace layout cannot be evaluated.
+ */
+export function workspacePackages({ workspace }) {
   const root = resolve(workspace);
-  return JSON.parse(result.stdout)
-    .filter(
-      (p) =>
-        typeof p?.name === 'string' && typeof p?.version === 'string' && typeof p?.path === 'string'
-    )
-    .map((p) => ({
-      name: p.name,
-      version: p.version,
-      directory: relative(root, resolve(p.path)) || '.'
-    }));
+  const patterns = readWorkspacePatterns(root);
+  const directories = ['.'];
+  if (patterns !== null) {
+    const walk = (relativeDir) => {
+      for (const entry of readdirSync(resolve(root, relativeDir), { withFileTypes: true })) {
+        if (!entry.isDirectory() || entry.name === 'node_modules' || entry.name === '.git')
+          continue;
+        const directory = relativeDir === '.' ? entry.name : `${relativeDir}/${entry.name}`;
+        if (isWorkspaceDirectory({ patterns, directory })) directories.push(directory);
+        walk(directory);
+      }
+    };
+    walk('.');
+  }
+  const packages = [];
+  for (const directory of directories) {
+    let pkg;
+    try {
+      pkg = JSON.parse(readFileSync(resolve(root, directory, 'package.json'), 'utf8'));
+    } catch {
+      continue;
+    }
+    if (typeof pkg?.name === 'string' && typeof pkg?.version === 'string') {
+      packages.push({ name: pkg.name, version: pkg.version, directory });
+    }
+  }
+  return packages;
 }
 
 /**
@@ -381,7 +400,7 @@ export async function main({
     if (artifact === undefined) {
       const local = localTagsAtHead({ workspace, run });
       head = local.head;
-      const packages = local.tags.length > 0 ? workspacePackages({ workspace, run }) : [];
+      const packages = local.tags.length > 0 ? workspacePackages({ workspace }) : [];
       // A tag at HEAD that names no workspace package is not ours to check.
       tags = local.tags.flatMap((tag) => {
         const pkg = packageForTag({ tag, packages });
