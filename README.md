@@ -366,6 +366,25 @@ Rules for bespoke publishers:
 | `publisher/unreadable-local-action` | A job that holds a publishing credential does not use a local action the check cannot read: one outside `.github/actions/`, missing, not a composite action, or using a further local action |
 | `publisher/possible-publish` | A job that holds `id-token: write` names a package publish only in text that may not run one: an `echo` or `printf` argument that is not piped or substituted, or a word between `pnpm`, `yarn` or `bun` and `publish` that no `package.json` script explains (`pnpm wrangler publish`). Any other `<tool> [flags] publish` (`npm`, `pnpm`, `yarn`, `lerna`, `bun`, `changeset`), in a command, a quoted string or an action input, is a publish, not this finding. A code-owner-reviewed marker may waive this one |
 
+A rule that applies to every workflow and composite action, not only release
+files:
+
+| Rule | Requirement |
+|------|-------------|
+| `runner/registry-fetch` | No runner that downloads and runs a package at run time: `npx`, `pnpx`, `bunx`, `bun x`, `npm exec`, `npm x`, `pnpm dlx`, `yarn dlx`, and the initializer forms `npm create <x>`, `npm init <x>` (a bare `npm init` does not fetch), `pnpm create`, `yarn create` and `bun create`. It reads workflow `run:` text (command separators including `&` and `\|&`; quoted strings are not split; a heredoc body is text unless a shell reads it; strings handed to `sh -c`, `su -c`, `script -c`, `eval`, `concurrently` and `start-server-and-test`; wrappers such as `env`, `xargs`, `sudo`, `time`, `doppler run --`, `op run --`, `dotenv --`, `dotenvx run --`, `cross-env`, `retry`, `watch`, `docker run <image>`), `with:` strings (a prose input such as `body` is never parsed as commands), the `run:` and `with:` of every composite action the repository has under `.github/actions/` or uses from any local path, and the body of a package script a command runs (one level; a root install reads the `preinstall`, `install`, `postinstall` and `prepare` scripts of every workspace package). READMEs and docs are not read. `npx --no-install` and `npm exec --offline` are flagged too |
+| `runner/registry-fetch-with-credential` | The same condition in a job that holds a credential, or in a composite action such a job uses, directly or through other actions. A job holds one when it has `id-token: write` (its own, or inherited from a local caller job when it declares no permissions), an npm token, or any secret other than `GITHUB_TOKEN`: read by name or dynamically (`secrets[...]` with any index, `toJSON(secrets)`) in `env`, a `with:` value or `run:` text, or passed by `secrets: inherit` or a `secrets:` mapping on a reusable-workflow call. A call whose `secrets:` pass only `GITHUB_TOKEN` holds none. Here a text-level test backs up the command parser: a runner word in the step's `run:` text or in a `with:` string of a `uses:` step counts when it stands at a word boundary (`"cd x&&npx foo"`, `(npx foo)`, `=npx`, a string inside `github-script` code; not inside a longer name such as `mynpx`), whether it is a quoted argument, a heredoc line, a backtick, an unknown wrapper or a prose input such as a pull-request `body`. After `npm`, `pnpm`, `yarn` or `bun` any number of flags, with or without values, may come before `exec`, `dlx`, `x`, `create` or `init <x>` (`npm --yes exec foo`, `pnpm -C dir dlx foo`). The one exception to the word test is the deny list of the Claude CLI: the literal, balanced `Bash(…)` entries in the argument of `--disallowedTools` or `--disallowed-tools` (also `=` form) are not read, when the text is the arguments of a `claude` command or the `claude_args` input of `anthropics/claude-code-action` pinned to a full commit SHA. An entry with `$(`, a backtick or `${`, an unbalanced entry, any other spelling, any other program, and every `--allowedTools` entry are read, as is all text outside the entries. Comments are not read, and a comment never continues onto the next line, even when it ends in a backslash. Two forms are excused, and only when their output cannot run later: the output is not piped (also after `2>&1`), not inside `$(…)`, backticks or process substitution, not passed to `eval` or `xargs`, and not redirected anywhere except `$GITHUB_STEP_SUMMARY`, `/dev/null` or stderr (`>&2`). A redirect to a file, to `$GITHUB_OUTPUT` or to `$GITHUB_ENV` is not excused, because a later step can run what was written. The forms are an `echo` or `printf` argument, and the pattern argument of `grep`, `egrep`, `fgrep` or `rg`, or the match part of a `sed` script (`! grep -nE "npx \|pnpm dlx" file`, `sed -n '/npx/p'`). Anything else is a finding, and when the check is in doubt it is a finding. A local `uses:` path with a `..` segment cannot be read, so in such a job it is a finding too. An install with `--ignore-scripts` (or `npm_config_ignore_scripts=true`) reads no lifecycle script. It cannot be waived |
+
+A registry fetch at run time bypasses the lockfile: the version and integrity
+hashes the repository reviewed do not cover the code that runs. Add the tool
+as a dependency and run it with `pnpm exec <tool>`, which resolves from the
+lockfile and is allowed. A published command-line tool that a README tells end
+users to run with `npx` is outside this rule. The credential-free rule is reported as a
+notice for now: it is listed but does not fail the check, and a valid marker in
+the file that holds the command still suppresses it. It becomes a waivable
+error once the repositories that use runners have moved to `pnpm exec`.
+Because it reads every workflow, a repository with no release workflow can
+still fail it even though the summary lists nothing in scope.
+
 Three further results are informational: `publisher/unclassified-id-token`
 and `publisher/unclassified-npm-token` (notices for a job that holds
 `id-token: write` or an npm token but is not recognised as a release job;
@@ -395,8 +414,8 @@ expired marker is itself an error (`exception/invalid`). Active exceptions
 and their end dates are listed in the job summary. The rules behind
 `caller/secrets-inherit`, `caller/pull-request-target`,
 `caller/publish-permission-scope`, `publisher/pull-request-target`,
-`publisher/id-token-with-code` and `publisher/token-with-code` cannot be
-waived.
+`publisher/id-token-with-code`, `publisher/token-with-code` and
+`runner/registry-fetch-with-credential` cannot be waived.
 
 #### Calling the check from a repository
 

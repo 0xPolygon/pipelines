@@ -1,0 +1,12 @@
+name: a missing local action with no credential
+on:
+  push:
+    branches: [main]
+permissions: {}
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    steps:
+      - uses: ./tools/missing-action

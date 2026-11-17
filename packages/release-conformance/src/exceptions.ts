@@ -22,7 +22,8 @@ export const WAIVABLE_RULE_IDS: readonly string[] = [
   // Waivable for now: a publishing workflow_dispatch may still be waived with a dated marker.
   'publisher/publishing-dispatch',
   'publisher/unreadable-local-action',
-  'publisher/possible-publish'
+  'publisher/possible-publish',
+  'runner/registry-fetch'
 ];
 
 /**
@@ -37,7 +38,9 @@ export const NEVER_WAIVABLE_RULE_IDS: readonly string[] = [
   'caller/publish-permission-scope',
   'publisher/pull-request-target',
   'publisher/id-token-with-code',
-  'publisher/token-with-code'
+  'publisher/token-with-code',
+  // A registry fetch at run time in a job holding a credential runs code the lockfile never vouched for.
+  'runner/registry-fetch-with-credential'
 ];
 
 const DAY_MS = 86_400_000;

@@ -1,0 +1,14 @@
+name: only the workflow token
+on:
+  push:
+    branches: [main]
+permissions: {}
+jobs:
+  lint:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    steps:
+      - run: pnpm exec prettier --check .
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}

@@ -188,6 +188,29 @@ const CASES: Record<string, Case> = {
       { path: 'hardening/pr-target-lookalike-owner.yml' }
     ]
   },
+  'runner/registry-fetch': {
+    passing: [{ path: 'runner/pass-pnpm-exec.yml' }],
+    failing: [{ path: 'runner/fail-npx.yml' }]
+  },
+  'runner/registry-fetch-with-credential': {
+    passing: [
+      { path: 'runner/pass-credential-no-runner.yml' },
+      { path: 'runner/pass-github-token-only.yml' },
+      { path: 'runner/pass-echo-text.yml' },
+      { path: 'runner/pass-grep-pattern.yml' },
+      { path: 'runner/pass-npm-init-bare.yml' },
+      { path: 'runner/pass-unreadable-action-plain.yml' }
+    ],
+    failing: [
+      { path: 'runner/fail-credential-npx.yml' },
+      { path: 'runner/fail-secret-wrangler.yml' },
+      { path: 'runner/fail-echo-piped.yml' },
+      { path: 'runner/fail-heredoc-runner.yml' },
+      { path: 'runner/fail-backtick-body.yml' },
+      { path: 'runner/fail-create.yml' },
+      { path: 'runner/fail-unreadable-action.yml' }
+    ]
+  },
   'workflow/unparseable': {
     passing: [{ path: 'model/on-map.yml' }],
     failing: [{ path: 'model/unparseable.yml' }]
@@ -211,7 +234,9 @@ const emittedRuleIds = (): string[] => {
       if (entry.isDirectory()) walk(path);
       else if (entry.name.endsWith('.ts')) {
         const text = readFileSync(path, 'utf8');
-        for (const match of text.matchAll(/'((?:caller|publisher|workflow|exception)\/[a-z-]+)'/g))
+        for (const match of text.matchAll(
+          /'((?:caller|publisher|workflow|exception|runner)\/[a-z-]+)'/g
+        ))
           ids.add(match[1] ?? '');
       }
     }

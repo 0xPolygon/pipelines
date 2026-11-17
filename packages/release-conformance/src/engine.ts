@@ -4,6 +4,7 @@ import { CALLEE_PATH, CALLEE_REPOSITORY, sameRepository } from './canonical.ts';
 import { applyExceptions } from './exceptions.ts';
 import { runsPublishText, scanRepo } from './repo-scan.ts';
 import { checkBespokePublisher, checkUnclassifiedJobs } from './rules/bespoke-publisher.ts';
+import { checkRegistryRunners } from './rules/registry-runner.ts';
 import { checkSharedCaller } from './rules/shared-caller.ts';
 
 /** An unreadable file is only a failure when it could be a release workflow; otherwise it is a notice. */
@@ -95,7 +96,16 @@ export const runChecks = ({
     }
   }
 
-  const applied = applyExceptions({ findings, files: scan.files, today: context.today });
+  // Every workflow and composite action is read, not only the release files: a run-time registry fetch
+  // bypasses the lockfile wherever it runs.
+  const runners = checkRegistryRunners({ scan, repository: context.repository });
+  findings.push(...runners.findings);
+
+  const applied = applyExceptions({
+    findings,
+    files: [...scan.files, ...runners.actionFiles],
+    today: context.today
+  });
   return {
     findings: unique(
       downgradeCanonicalCalleeFindings({
