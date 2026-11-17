@@ -58,7 +58,8 @@ system state automatically.
 | `actions/docker-test` | Resolve service from tag, build image, start container, run tests, stop | No — pure shell |
 | `actions/npm-pack` | Pack every public workspace package whose version is not on npm into tarballs and write `manifest.json`; holds no publish credential | No — dependency-free Node script |
 | `actions/npm-publish-tarballs` | Publish the tarballs listed in `manifest.json` after checking each file's SHA-256 and the npm client version, then verify every publish by reading all versions back from the registry (staged publishing is not supported yet), so tags and GitHub Releases are created only after the version is readable from the registry; needs no checkout or install | No — dependency-free Node script |
-| `actions/check-changesets-cli` | Fail unless the repository's resolved `@changesets/cli` is 2.x | No — dependency-free Node script |
+| `actions/check-changesets-cli` | Fail unless the repository's resolved `@changesets/cli` is 2.x or 3.x, report which, and on 3.x require an explicit `privatePackages` setting when private packages exist | No — dependency-free Node script |
+| `actions/tag-and-release` | `@changesets/cli` 3.x: run `changeset git-tag` with no token, then push the created tags and create a GitHub Release for each; holds no publish credential | No — dependency-free Node script |
 | `actions/check-version-script` | When the version hook is enabled, fail unless the root `package.json` defines `ci:version` | No — dependency-free Node script |
 | `actions/release-guard` | Fail unless the run is a push to the repository's default branch | No — dependency-free Node script |
 | `actions/check-release-tags` | Confirm every package in `manifest.json` has a git tag and a GitHub Release, read through the GitHub REST API | No — dependency-free Node script |
@@ -186,13 +187,18 @@ event with an empty `snapshot_tag` fails. Its jobs are `version`, `build`,
 on the old job name needs updating). A repository with only private packages
 skips `publish` and is tagged by `finalize` without any approval.
 
-- **`@changesets/cli` 2.x.** Version 3.x prints no tag lines the workflow can
-  read, so `finalize` fails on every run unless the repository's resolved
-  `@changesets/cli` is 2.x, including runs that publish nothing. After a
-  publish, `finalize` also checks that each published package has a git tag,
-  and a GitHub Release when changelogs are enabled (`.changeset/config.json`
-  `changelog` is not `false`) and the package has a `CHANGELOG.md`, because
-  changesets creates a Release from the changelog and none without it.
+- **`@changesets/cli` 2.x or 3.x.** The workflow reads the resolved
+  `@changesets/cli` major from the installed repository and runs the matching
+  arm; any other major fails the `version` and `finalize` jobs, including
+  runs that publish nothing. See "Moving to `@changesets/cli` 3.x" below.
+  After a run that had something to tag, `finalize` checks that each package
+  published or tagged in the run has a git tag, and a GitHub Release when
+  changelogs are enabled (`.changeset/config.json` `changelog` is not `false`)
+  and the package has a `CHANGELOG.md`, because changesets creates a Release
+  from the changelog and none without it. The release fails when it had
+  something to tag and a tag or Release is missing, also when nothing was
+  published. Re-running the `finalize` job is safe: it passes once the tags
+  and Releases exist.
 - **`publishConfig.access`.** Set it to `public` on every public package. A
   public package that resolves to restricted access fails the pack step.
 - **Public npm registry only.** Every registry lookup and publish names
@@ -268,8 +274,9 @@ skips `publish` and is tagged by `finalize` without any approval.
   the registry cannot be read, nothing is published for that package. The
   read-back checks the version document and its integrity, so a version
   published under `previous` passes it like any other.
-- **A non-highest Release is not left as Latest.** After changesets creates
-  at least one Release (a push with nothing to release never touches Latest),
+- **A non-highest Release is not left as Latest.** After a run creates
+  at least one Release, on either `@changesets/cli` major (a push with
+  nothing to release never touches Latest),
   `finalize` checks the release tags and then judges the current Latest Release from current state:
   if it is its package's highest stable version (from the package's tags;
   per package, so multi-package repositories need no primary package) it
@@ -299,6 +306,24 @@ skips `publish` and is tagged by `finalize` without any approval.
   string expression is not supported.
 - **Trigger permissions.** Copy `apps-npm-release-trigger.yml`; its top-level
   `permissions` must cover every scope the called jobs request.
+
+### Moving to `@changesets/cli` 3.x
+
+No trigger change is needed: the workflow picks its arm from the installed
+CLI, so a repository moves by changing its own dependencies and config.
+
+- Set `privatePackages` explicitly in `.changeset/config.json`, for example
+  `"privatePackages": { "version": true, "tag": true }`. 3.x neither versions
+  nor tags private packages by default, so services would never be tagged. A
+  repository with private packages and no explicit setting fails early.
+- Use `@changesets/changelog-github` 1.x with the 3.x CLI.
+- The 3.x CLI needs Node `^22.11 || ^24 || >=26` and pnpm `>=10.0.0`.
+- A push whose pending changesets are all empty opens no release PR on 3.x.
+  The empty changesets are consumed with the next real one.
+- A peer-dependency bump is a patch bump for the dependents.
+- The tag command is `changeset git-tag`; the `finalize` job runs it with no
+  token, then `actions/tag-and-release` pushes the tags and creates the
+  GitHub Releases.
 
 ### Release workflow conformance
 

@@ -14,6 +14,10 @@ updates:
     ignore:
       - dependency-name: 'changesets/action'
         update-types: ['version-update:semver-major']
+      # TEMPORARY: remove this entry once setup-node is moved to its current
+      # major by hand.
+      - dependency-name: 'actions/setup-node'
+        update-types: ['version-update:semver-major']
     # Majors come as separate PRs: callers that use this repo at @main pick each
     # one up on merge, so it gets its own review.
     groups:
