@@ -29,9 +29,11 @@
 # from 0xPolygon/apps-team-workflows. Last, so it wins over the catch-all.
 /.github/workflows/apps-*                      @0xPolygon/product-applications
 /.github/actions/ci/                           @0xPolygon/product-applications
+/.github/actions/correct-latest-release/       @0xPolygon/product-applications
 /.github/actions/check-changesets-cli/         @0xPolygon/product-applications
 /.github/actions/check-dockerfile/             @0xPolygon/product-applications
 /.github/actions/check-release-tags/           @0xPolygon/product-applications
+/.github/actions/check-version-script/         @0xPolygon/product-applications
 /.github/actions/check-workspace-protocol/     @0xPolygon/product-applications
 /.github/actions/docker-test/                  @0xPolygon/product-applications
 /.github/actions/npm-pack/                     @0xPolygon/product-applications
@@ -39,6 +41,7 @@
 /.github/actions/release-conformance/         @0xPolygon/product-applications
 /.github/actions/release-guard/                @0xPolygon/product-applications
 /.github/actions/slack-notify/                 @0xPolygon/product-applications
+/.github/actions/tag-and-release/              @0xPolygon/product-applications
 /.github/actions/upsert-changeset-comment/     @0xPolygon/product-applications
 /.github/scripts/                              @0xPolygon/product-applications
 
