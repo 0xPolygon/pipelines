@@ -12,15 +12,9 @@ name: Workflow lint
 # that is skipped by a path filter stays pending and blocks the merge.
 on:
   workflow_call:
+    # The thresholds are fixed (medium severity and confidence) so a caller
+    # cannot loosen them.
     inputs:
-      min-severity:
-        type: string
-        required: false
-        default: medium
-      min-confidence:
-        type: string
-        required: false
-        default: medium
       advanced-security:
         description: Upload SARIF to code scanning. Set false for private repos without GitHub Code Security.
         type: boolean
@@ -45,6 +39,6 @@ jobs:
       - uses: zizmorcore/zizmor-action@85b2b9fb8e3325e7a23d7d0a9d7ba5ae0f999e3e # v0.7.1
         with:
           version: 1.31.1 # the action defaults to latest; bump deliberately
-          min-severity: ${{ inputs.min-severity }}
-          min-confidence: ${{ inputs.min-confidence }}
+          min-severity: medium
+          min-confidence: medium
           advanced-security: ${{ inputs.advanced-security }}

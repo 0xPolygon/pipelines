@@ -1,0 +1,24 @@
+name: Dependency review exemptions
+description: >
+  Reads the licence-check exemptions for the calling repository from
+  `.github/dependency-review/<owner>/<repo>.txt` in this repository and outputs
+  them as a comma-separated purl list for `allow-dependencies-licenses`. A
+  repository without a file gets no exemptions; a malformed file fails.
+
+outputs:
+  allow-dependencies-licenses:
+    description: Comma-separated purls exempt from the licence check (empty for none).
+    value: ${{ steps.read.outputs.allow-dependencies-licenses }}
+
+runs:
+  using: composite
+  steps:
+    - name: Read exemptions
+      id: read
+      shell: bash
+      env:
+        # Context values are assigned to env vars before shell use to prevent
+        # expression injection.
+        ACTION_PATH: ${{ github.action_path }}
+        REPOSITORY: ${{ github.repository }}
+      run: node "$ACTION_PATH/read-exemptions.mjs"

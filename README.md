@@ -61,6 +61,7 @@ system state automatically.
 | `actions/check-changesets-cli` | Fail unless the repository's resolved `@changesets/cli` is 2.x | No — dependency-free Node script |
 | `actions/check-version-script` | When the version hook is enabled, fail unless the root `package.json` defines `ci:version` | No — dependency-free Node script |
 | `actions/release-guard` | Fail unless the run is a push to the repository's default branch | No — dependency-free Node script |
+| `actions/dependency-review-exemptions` | Read the calling repo's licence-check exemptions from `.github/dependency-review/` at the workflow's commit; used by `security-dependency-review.yml` | No — dependency-free Node script |
 | `actions/check-release-tags` | Confirm every package in `manifest.json` has a git tag and a GitHub Release, read through the GitHub REST API | No — dependency-free Node script |
 | `actions/release-conformance` | Check a repository's npm release workflow files against the shared release standard; reads files only | Yes — ncc bundle |
 | `actions/slack-notify` | Post Slack Block Kit message from `pr.json` | Yes — ncc bundle |
@@ -501,7 +502,7 @@ public, so repos in any org can call them; an org that restricts allowed actions
 
 | Workflow | When the caller runs it | Purpose |
 |----------|-------------------------|---------|
-| `security-dependency-review.yml` | `pull_request` | Fails on a new dependency with a high-severity advisory (runtime, development or unknown scope) or a licence outside the shared allowlist |
+| `security-dependency-review.yml` | `pull_request` | Fails on a new dependency with a high-severity advisory (runtime, development or unknown scope) or a licence outside the shared allowlist, apart from the repo's exemptions in `.github/dependency-review/` |
 | `security-zizmor.yml` | `pull_request` (no path filter) + weekly `schedule` | Lints workflows, composite actions and Dependabot config with zizmor; reports to code scanning |
 | `security-go-mod-check.yml` | `pull_request` (no path filter) | `go mod verify` and `go mod tidy -diff` with `GOFLAGS=-mod=readonly` |
 | `security-govulncheck.yml` | weekly `schedule` + `pull_request` on `go.mod`/`go.sum` | govulncheck on the caller's module |
@@ -544,26 +545,35 @@ the findings it introduces, add a **Require code scanning results** rule to the 
 with tool `zizmor` and the threshold you want (for example security alerts medium or higher,
 alerts errors). Findings already on the default branch do not block. Repos without code
 scanning (private repos without GitHub Code Security) pass `advanced-security: false`; the job
-then fails on every finding at or above `min-severity`/`min-confidence`, existing ones included.
+then fails on every finding at or above medium severity and confidence, existing ones included.
+
+**Policy lives here, not in the caller.** The gates take no inputs that loosen them: dependency
+review always fails on high or critical advisories in the `runtime`, `development` and `unknown`
+scopes (dev and tooling dependencies run in CI too), and zizmor always reports at medium severity
+and confidence. A pull request in a consuming repo can therefore not weaken the check it is
+being checked by.
 
 **Licences.** The allowlist in `security-dependency-review.yml` is shared. A package that is
 already in a repo's tree under a licence outside it (LGPL `sharp-libvips`, GPL `go-ethereum`,
-licence data GitHub cannot parse) is exempted by name in that repo's trigger, so bumping it does
-not fail the check while a new dependency under that licence still does:
+licence data GitHub cannot parse) is exempted by name, so bumping it does not fail the check
+while a new dependency under that licence still does. Exemptions live in this repo, one file per
+consuming repo, and changes to them are reviewed by the security team (CODEOWNERS):
 
-```yaml
-    with:
-      allow-dependencies-licenses: >-
-        pkg:npm/@img/sharp-libvips-linux-x64,
-        pkg:golang/github.com/ethereum/go-ethereum
+```text
+# .github/dependency-review/<owner>/<repo>.txt
+# One purl per line, without a version. Comments explain why.
+pkg:npm/@img/sharp-libvips-linux-x64  # LGPL-3.0, via next → sharp
+pkg:golang/github.com/ethereum/go-ethereum  # LGPL/GPL, core dependency
 ```
+
+The workflow reads the file for `github.repository` at its own commit, so a caller that pins a
+commit of this repo also pins its exemptions. A repo with no file has no exemptions; a malformed
+line fails the check. To add one, open a PR here that adds the line to the repo's file, then bump
+the caller's pin to a commit that contains it.
 
 To find the packages a repo needs to exempt, evaluate its dependency-graph SBOM
 (`GET /repos/{owner}/{repo}/dependency-graph/sbom`) against the allowlist. Packages without
 licence data only produce a warning.
-
-Advisories fail the check in the `runtime`, `development` and `unknown` scopes, because dev and
-tooling dependencies run in CI too. A caller can narrow that with the `fail-on-scopes` input.
 
 **Versions.** Dependabot keeps the action pins here current (`.github/dependabot.yml`, 7-day
 cooldown; minor and patch updates grouped, majors as separate PRs). The zizmor version (`version:` input) and the govulncheck version (`go install`) are

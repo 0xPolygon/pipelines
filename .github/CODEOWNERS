@@ -30,3 +30,9 @@
 /pnpm-lock.yaml                                @0xPolygon/product-applications
 /pnpm-workspace.yaml                           @0xPolygon/product-applications
 /tsconfig.json                                 @0xPolygon/product-applications
+
+# Security gates and the licence-check exemptions they read: changes are
+# security policy, so the security team reviews them.
+/.github/dependency-review/                    @0xPolygon/internal-security
+/.github/actions/dependency-review-exemptions/ @0xPolygon/internal-security
+/.github/workflows/security-*                  @0xPolygon/internal-security
