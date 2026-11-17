@@ -350,6 +350,9 @@ const vwant = [
   './.pipelines/.github/actions/check-version-script',
   'run:rm -rf .pipelines .pipelines-guard',
   'run:pnpm install --frozen-lockfile --ignore-scripts',
+  'actions/checkout',
+  './.pipelines/.github/actions/check-changesets-cli',
+  'run:rm -rf .pipelines',
   'actions/create-github-app-token',
   'changesets/action'
 ];
@@ -360,6 +363,16 @@ check('version steps are exactly the allowlist, in order', json(vhave) === json(
 // jobs (comments and the input's description are not occurrences).
 const hookCount = (json(jobs).match(/ci:version/g) ?? []).length;
 check('ci:version appears exactly once in the jobs, as the conditional version input of the version job changesets step', hookCount === 1 && /ci:version/.test(String(vsteps[vact]?.with?.version)), 'occurrences ' + hookCount);
+// The version job detects the @changesets/cli major after the install, before
+// the token is minted and before any changesets step, on every run, and the
+// extra checkout is removed again before changesets/action.
+const vdet = vsteps.findIndex((st) => stepUses(st)?.endsWith('/check-changesets-cli'));
+const vinst = vsteps.findIndex((st) => /^pnpm install/.test(norm(st.run ?? '')));
+const vtok = vsteps.findIndex((st) => stepUses(st) === 'actions/create-github-app-token');
+const vrm = vsteps.findIndex((st, i) => i > vdet && norm(st.run ?? '') === 'rm -rf .pipelines');
+check('version job: @changesets/cli major is detected after the install, before the token and changesets/action, unconditionally', vdet > vinst && vinst >= 0 && vtok > vdet && vact > vdet && !('if' in vsteps[vdet]) && vsteps[vdet]?.id === 'cli', `install ${vinst} detect ${vdet} token ${vtok} action ${vact}`);
+check('version job: the pipelines checkout is removed between the detector and changesets/action', vdet >= 0 && vrm > vdet && vrm < vact, `detect ${vdet} rm ${vrm} action ${vact}`);
+check('finalize: the @changesets/cli detector step has id cli', fin[cli]?.id === 'cli', String(fin[cli]?.id));
 check('version job has no job-level defaults', !('defaults' in (jobs.version ?? {})), json(jobs.version?.defaults));
 check('version job: changesets/action version is pnpm run ci:version only under version_script', vhook === "${{ inputs.version_script && 'pnpm run ci:version' || '' }}", vhook);
 const vact_keys = Object.keys(vsteps[vact]?.with ?? {}).sort().join(' ');

@@ -160,6 +160,26 @@ jobs:
       # keeps dependency code from running in a job that holds a release token.
       - run: pnpm install --frozen-lockfile --ignore-scripts
 
+      # Detect the resolved @changesets/cli major after the install and before
+      # the token is minted. The workspace checkout above was removed before
+      # the install, so the action is checked out again (only its own
+      # directory) and removed again before changesets/action, which commits
+      # untracked files.
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+        with:
+          repository: ${{ job.workflow_repository }}
+          ref: ${{ job.workflow_sha }}
+          path: .pipelines
+          sparse-checkout: |
+            .github/actions/check-changesets-cli
+          persist-credentials: false
+
+      - uses: ./.pipelines/.github/actions/check-changesets-cli
+        id: cli
+
+      - name: Remove the pipelines checkout
+        run: rm -rf .pipelines
+
       # Token-ordering trap: mint the app token AFTER checkout and install,
       # never before. A token minted earlier is reachable from every later
       # step — checkout would persist it into .git/config, and any
@@ -368,7 +388,7 @@ jobs:
 
       # Tags and Releases are created from the `New tag:` lines that
       # `changeset tag` prints in @changesets/cli 2.x, so finalize fails on any
-      # other major, whether or not anything was published in this run.
+      # unsupported major, whether or not anything was published in this run.
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
         with:
           repository: ${{ job.workflow_repository }}
@@ -380,6 +400,7 @@ jobs:
           persist-credentials: false
 
       - uses: ./.pipelines/.github/actions/check-changesets-cli
+        id: cli
 
       # GitHub marks each Release it creates as Latest. Record which Release
       # holds Latest now, before changesets/action creates any, as a hint for
