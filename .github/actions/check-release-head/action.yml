@@ -1,0 +1,33 @@
+name: Check release head
+description: >
+  Reports whether a release run should leave the changesets release PR alone
+  because a newer push to the same branch has replaced it. Sets `superseded` to
+  'true' only when changesets are pending and the run's commit is no longer the
+  head of its branch; a run with no changesets pending publishes its own commit
+  and is never superseded. Run it from the repository root. It only reads.
+
+inputs:
+  token:
+    description: Token with read access to the repository's git refs.
+    required: true
+
+outputs:
+  superseded:
+    description: "'true' when the run should not write the release PR, otherwise 'false'."
+    value: ${{ steps.check.outputs.superseded }}
+
+runs:
+  using: composite
+  steps:
+    - name: Compare this run's commit with the branch head
+      id: check
+      shell: bash
+      env:
+        # Context values are assigned to env vars before shell use to prevent
+        # expression injection.
+        ACTION_PATH: ${{ github.action_path }}
+        GITHUB_TOKEN: ${{ inputs.token }}
+        REPOSITORY: ${{ github.repository }}
+        REF: ${{ github.ref }}
+        SHA: ${{ github.sha }}
+      run: node "$ACTION_PATH/check-release-head.mjs"

@@ -60,6 +60,7 @@ system state automatically.
 | `actions/npm-publish-tarballs` | Publish the tarballs listed in `manifest.json` after checking each file's SHA-256 and the npm client version, then verify every publish by reading all versions back from the registry (staged publishing is not supported yet), so tags and GitHub Releases are created only after the version is readable from the registry; needs no checkout or install | No — dependency-free Node script |
 | `actions/check-changesets-cli` | Fail unless the repository's resolved `@changesets/cli` is 2.x | No — dependency-free Node script |
 | `actions/check-version-script` | When the version hook is enabled, fail unless the root `package.json` defines `ci:version` | No — dependency-free Node script |
+| `actions/check-release-head` | Report whether a release run with changesets pending has been replaced by a newer push to its branch, so it leaves the release PR alone | No — dependency-free Node script |
 | `actions/release-guard` | Fail unless the run is a push to the repository's default branch | No — dependency-free Node script |
 | `actions/check-release-tags` | Confirm every package in `manifest.json` has a git tag and a GitHub Release, read through the GitHub REST API | No — dependency-free Node script |
 | `actions/release-conformance` | Check a repository's npm release workflow files against the shared release standard; reads files only | Yes — ncc bundle |
@@ -241,7 +242,9 @@ skips `publish` and is tagged by `finalize` without any approval.
   left awaiting approval holds the repository's publish queue: approve or
   reject the oldest pending one first, or later publishes wait behind it. The
   `version` job and
-  releases with nothing public to publish never wait on it. Runs on different
+  releases with nothing public to publish never wait on it. The `version` job
+  has its own group, so release PR updates also run one at a time; a run that
+  a newer push has replaced leaves the release PR to the newer run. Runs on different
   refs are not serialized, and the registry's package document can lag a
   fresh publish, so a publish that starts immediately after another may still
   read a stale `latest`.
