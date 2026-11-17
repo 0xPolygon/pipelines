@@ -17,7 +17,7 @@ let counter = 0;
 const notFound = () => Object.assign(new Error('Not Found'), { status: 404 });
 
 /** A workspace with a tags file; `changelogs` maps a directory to CHANGELOG.md text. */
-function setup({ tags, changelogs = {}, config }) {
+function setup({ tags, expected = [], changelogs = {}, config }) {
   const workspace = join(scratch, `w${counter++}`);
   mkdirSync(join(workspace, '.changeset'), { recursive: true });
   if (config !== undefined)
@@ -27,7 +27,7 @@ function setup({ tags, changelogs = {}, config }) {
     writeFileSync(join(workspace, dir, 'CHANGELOG.md'), text);
   }
   const tagsFile = join(workspace, 'tags.json');
-  writeFileSync(tagsFile, JSON.stringify({ tags }));
+  writeFileSync(tagsFile, JSON.stringify({ tags, expected }));
   return { workspace, tagsFile };
 }
 
@@ -86,6 +86,7 @@ describe('tag-and-release', () => {
       { owner: 'o', repo: 'r', ref: 'refs/tags/@s/pub@1.0.0', sha: SHA }
     ]);
     assert.equal(gh.calls.createRelease[0].body, 'Notes');
+    assert.equal(gh.calls.createRelease[0].target_commitish, SHA);
     assert.equal(outputs['releases-created'], 'true');
   });
 
@@ -160,6 +161,82 @@ describe('tag-and-release', () => {
     const gh = fakeGithub({});
     await assert.rejects(run({ gh, fixture }), /no "## 2\.0\.0" section/);
     assert.equal(gh.calls.createRelease.length, 0);
+  });
+
+  it('a changelog error on one tag creates no ref for any tag, before any Release', async () => {
+    const fixture = setup({
+      tags: [
+        pub('1.0.0'),
+        { tag: '@s/lib@3.0.0', packageName: '@s/lib', directory: 'packages/lib' }
+      ],
+      changelogs: {
+        'packages/pub': log('1.0.0'),
+        'packages/lib': '# @s/lib\n\n## 0.0.1\n\nOld\n'
+      }
+    });
+    const gh = fakeGithub({});
+    await assert.rejects(
+      run({ gh, fixture }),
+      /packages\/lib\/CHANGELOG.md has no "## 3\.0\.0" section/
+    );
+    assert.equal(gh.calls.createRef.length, 0);
+    assert.equal(gh.calls.createRelease.length, 0);
+  });
+
+  it('re-run after tags pushed but Release creation failed ends with the Release created', async () => {
+    const entry = pub('1.0.0');
+    const fixture = setup({
+      tags: [],
+      expected: [entry],
+      changelogs: { 'packages/pub': log('1.0.0') }
+    });
+    const gh = fakeGithub({ refs: { '@s/pub@1.0.0': { type: 'commit', sha: SHA } } });
+    const { outputs } = await run({ gh, fixture });
+    assert.equal(gh.calls.createRef.length, 0);
+    assert.equal(gh.calls.createRelease.length, 1);
+    assert.equal(gh.calls.createRelease[0].tag_name, '@s/pub@1.0.0');
+    assert.equal(gh.calls.createRelease[0].target_commitish, SHA);
+    assert.equal(outputs['releases-created'], 'true');
+  });
+
+  it('an expected tag at another commit is never touched, and none that is absent is created', async () => {
+    const fixture = setup({
+      tags: [],
+      expected: [
+        pub('1.0.0'),
+        { tag: '@s/lib@1.0.0', packageName: '@s/lib', directory: 'packages/lib' }
+      ],
+      changelogs: { 'packages/pub': log('1.0.0'), 'packages/lib': '# lib\n\n## 1.0.0\n\nN\n' }
+    });
+    const gh = fakeGithub({ refs: { '@s/pub@1.0.0': { type: 'commit', sha: OTHER } } });
+    const { outputs } = await run({ gh, fixture });
+    assert.equal(gh.calls.createRef.length, 0);
+    assert.equal(gh.calls.createRelease.length, 0);
+    assert.equal(outputs['releases-created'], 'false');
+  });
+
+  it('an expected tag at the run commit that already has its Release creates nothing', async () => {
+    const fixture = setup({
+      tags: [],
+      expected: [pub('1.0.0')],
+      changelogs: { 'packages/pub': log('1.0.0') }
+    });
+    const gh = fakeGithub({
+      refs: { '@s/pub@1.0.0': { type: 'commit', sha: SHA } },
+      releases: ['@s/pub@1.0.0']
+    });
+    await run({ gh, fixture });
+    assert.equal(gh.calls.createRelease.length, 0);
+  });
+
+  it('an expected tag at the run commit whose changelog lacks its section fails', async () => {
+    const fixture = setup({
+      tags: [],
+      expected: [pub('2.0.0')],
+      changelogs: { 'packages/pub': log('1.0.0') }
+    });
+    const gh = fakeGithub({ refs: { '@s/pub@2.0.0': { type: 'commit', sha: SHA } } });
+    await assert.rejects(run({ gh, fixture }), /no "## 2\.0\.0" section/);
   });
 
   it('a prerelease gets prerelease true and make_latest false', async () => {

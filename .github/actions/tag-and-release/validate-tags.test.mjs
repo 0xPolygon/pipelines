@@ -15,9 +15,24 @@ const writePackage = (directory, json) => {
   mkdirSync(join(workspace, directory), { recursive: true });
   writeFileSync(join(workspace, directory, 'package.json'), JSON.stringify(json));
 };
+const writeFile = (ws, name, text) => {
+  mkdirSync(join(ws, ...name.split('/').slice(0, -1)), { recursive: true });
+  writeFileSync(join(ws, name), text);
+};
 writePackage('.', { name: 'root', version: '3.1.0' });
 writePackage('packages/pub', { name: '@s/pub', version: '1.0.0' });
 writePackage('packages/priv', { name: '@s/priv', version: '2.0.0-beta.1', private: true });
+writePackage('packages/skipped', { name: '@s/skipped', version: '1.0.0' });
+writePackage('examples/demo', { name: '@s/demo', version: '1.0.0' });
+writeFile(workspace, 'pnpm-workspace.yaml', "packages:\n  - 'packages/*'\n");
+writeFile(
+  workspace,
+  '.changeset/config.json',
+  JSON.stringify({
+    ignore: ['@s/skipped', '@s/glob-*'],
+    privatePackages: { version: true, tag: true }
+  })
+);
 
 const created = (overrides = {}) => ({
   tag: '@s/pub@1.0.0',
@@ -32,10 +47,10 @@ const expected = (overrides = {}) => ({
   directory: 'packages/priv',
   ...overrides
 });
-const check = (artifact, { sha = SHA } = {}) =>
+const check = (artifact, { sha = SHA, ws = workspace } = {}) =>
   validateArtifact({
     text: typeof artifact === 'string' ? artifact : JSON.stringify(artifact),
-    workspace,
+    workspace: ws,
     sha
   });
 const failsWith = (artifact, pattern, options) => {
@@ -66,13 +81,25 @@ describe('validate-tags', () => {
     assert.deepEqual(check({ tags: [], expected: [] }).errors, []);
   });
 
-  it('the root package may use v<version>, other packages may not', () => {
+  it('the root package of a single-package repository may use v<version>, other packages may not', () => {
+    const single = join(scratch, 'single');
+    mkdirSync(single, { recursive: true });
+    writeFileSync(join(single, 'package.json'), JSON.stringify({ name: 'root', version: '3.1.0' }));
+    writeFile(single, '.changeset/config.json', '{}');
     const root = { tag: 'v3.1.0', packageName: 'root', directory: '.' };
-    assert.deepEqual(check({ tags: [{ ...root, commit: SHA }], expected: [root] }).errors, []);
+    assert.deepEqual(
+      check({ tags: [{ ...root, commit: SHA }], expected: [root] }, { ws: single }).errors,
+      []
+    );
     failsWith(
       { tags: [], expected: [expected({ tag: 'v2.0.0-beta.1' })] },
       /not the package.json name and version/
     );
+  });
+
+  it('v<version> is refused for the root of a repository that has a workspace file', () => {
+    const root = { tag: 'v3.1.0', packageName: 'root', directory: '.' };
+    failsWith({ tags: [{ ...root, commit: SHA }], expected: [root] }, /not a workspace package/);
   });
 
   it('malformed JSON fails', () => {
@@ -154,13 +181,140 @@ describe('validate-tags', () => {
     assert.ok(errors.some((e) => e.startsWith('expected[0]')));
   });
 
+  it('a created tag that is not in the expected list fails', () => {
+    failsWith({ tags: [created()], expected: [] }, /not in the expected list/);
+    failsWith({ tags: [created()], expected: [expected()] }, /not in the expected list/);
+  });
+
+  it('a package listed by literal name under ignore fails, in either list', () => {
+    const skipped = {
+      tag: '@s/skipped@1.0.0',
+      packageName: '@s/skipped',
+      directory: 'packages/skipped'
+    };
+    failsWith({ tags: [{ ...skipped, commit: SHA }], expected: [skipped] }, /ignores/);
+    failsWith({ tags: [], expected: [skipped] }, /ignores/);
+  });
+
+  it('a private package fails when privatePackages is false, tag is false or the setting is absent', () => {
+    for (const privatePackages of [false, { version: true, tag: false }, undefined]) {
+      const ws = join(
+        scratch,
+        `priv-${JSON.stringify(privatePackages) ?? 'absent'}`.replace(/\W/g, '_')
+      );
+      writeFile(ws, 'pnpm-workspace.yaml', "packages:\n  - 'packages/*'\n");
+      writeFile(
+        ws,
+        'packages/priv/package.json',
+        JSON.stringify({ name: '@s/priv', version: '2.0.0-beta.1', private: true })
+      );
+      writeFile(ws, '.changeset/config.json', JSON.stringify({ privatePackages }));
+      const { errors } = check({ tags: [], expected: [expected()] }, { ws });
+      assert.match(errors.join('\n'), /private package that .changeset\/config.json does not tag/);
+    }
+    assert.deepEqual(check({ tags: [], expected: [expected()] }).errors, []);
+  });
+
+  it('an unreadable or missing .changeset/config.json fails closed', () => {
+    const ws = join(scratch, 'noconfig');
+    writeFile(ws, 'pnpm-workspace.yaml', "packages:\n  - 'packages/*'\n");
+    writeFile(
+      ws,
+      'packages/pub/package.json',
+      JSON.stringify({ name: '@s/pub', version: '1.0.0' })
+    );
+    failsWith({ tags: [], expected: [] }, /config.json is not readable/, { ws });
+    writeFile(ws, '.changeset/config.json', '{nope');
+    failsWith({ tags: [], expected: [] }, /config.json is not readable/, { ws });
+  });
+
+  it('a package.json outside the workspace globs fails (a committed example is not a workspace package)', () => {
+    failsWith(
+      {
+        tags: [],
+        expected: [{ tag: '@s/demo@1.0.0', packageName: '@s/demo', directory: 'examples/demo' }]
+      },
+      /not a workspace package/
+    );
+    failsWith({ tags: [], expected: [expected({ directory: 'packages/priv/..' })] }, /workspace/);
+  });
+
+  it('workspace patterns: dir/*, dir/**, literal paths and ! exclusions are evaluated', () => {
+    const ws = join(scratch, 'globs');
+    writeFile(
+      ws,
+      'pnpm-workspace.yaml',
+      "# comment\npackages:\n  - 'a/*'   # direct children\n  - \"b/**\"\n  - c/lib\n  - '!a/excluded'\n\ncatalog:\n  x: 1\n"
+    );
+    writeFile(ws, '.changeset/config.json', '{}');
+    const dirs = [
+      'a/one',
+      'a/excluded',
+      'a/one/deep',
+      'b/x',
+      'b/x/y',
+      'c/lib',
+      'c/other',
+      'node_modules/p'
+    ];
+    for (const dir of dirs) {
+      writeFile(ws, `${dir}/package.json`, JSON.stringify({ name: 'p', version: '1.0.0' }));
+    }
+    const verdict = (directory) =>
+      check({ tags: [], expected: [{ tag: 'p@1.0.0', packageName: 'p', directory }] }, { ws })
+        .errors.length === 0;
+    assert.deepEqual(dirs.map(verdict), [true, false, false, true, true, true, false, false]);
+  });
+
+  it('a workspace pattern shape that cannot be evaluated fails closed', () => {
+    for (const body of [
+      "packages:\n  - 'a/{x,y}'\n",
+      "packages:\n  - 'a/*/b'\n",
+      "packages:\n  - 'a/[xy]'\n",
+      'packages: [a/*]\n',
+      'other: 1\n'
+    ]) {
+      const ws = join(
+        scratch,
+        `bad-${Math.abs([...body].reduce((h, c) => h * 31 + c.charCodeAt(0), 7))}`
+      );
+      writeFile(ws, 'pnpm-workspace.yaml', body);
+      writeFile(ws, '.changeset/config.json', '{}');
+      writeFile(ws, 'a/x/package.json', JSON.stringify({ name: 'p', version: '1.0.0' }));
+      failsWith(
+        { tags: [], expected: [{ tag: 'p@1.0.0', packageName: 'p', directory: 'a/x' }] },
+        /cannot be evaluated|cannot be read|not a block list|no packages list/,
+        { ws }
+      );
+    }
+  });
+
+  it('declared workspaces without a pnpm-workspace.yaml fail closed', () => {
+    const ws = join(scratch, 'npm-workspaces');
+    writeFile(
+      ws,
+      'package.json',
+      JSON.stringify({ name: 'root', version: '1.0.0', workspaces: ['a/*'] })
+    );
+    writeFile(ws, '.changeset/config.json', '{}');
+    failsWith({ tags: [], expected: [] }, /workspaces without a pnpm-workspace.yaml/, { ws });
+  });
+
   it('main reads its inputs from the environment and reports through the log', () => {
     const file = join(scratch, 'tags.json');
     const run = (env) => {
       const logs = [];
       return { code: main({ env, log: (m) => logs.push(m) }), logs };
     };
-    writeFileSync(file, JSON.stringify({ tags: [created()], expected: [] }));
+    writeFileSync(
+      file,
+      JSON.stringify({
+        tags: [created()],
+        expected: [
+          expected({ tag: '@s/pub@1.0.0', packageName: '@s/pub', directory: 'packages/pub' })
+        ]
+      })
+    );
     const base = { TAGS_FILE: file, GITHUB_WORKSPACE: workspace, GITHUB_SHA: SHA };
     assert.equal(run(base).code, 0);
     assert.equal(run({ ...base, GITHUB_SHA: 'b'.repeat(40) }).code, 1);

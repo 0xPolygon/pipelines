@@ -180,10 +180,18 @@ jobs:
           path: .pipelines
           sparse-checkout: |
             .github/actions/check-changesets-cli
+            .github/actions/check-cli-major
           persist-credentials: false
 
       - uses: ./.pipelines/.github/actions/check-changesets-cli
         id: cli
+
+      # Fail closed on an empty or unexpected detector output: with neither
+      # changesets/action arm selected the run would end green having done
+      # nothing, and every later job would be skipped.
+      - uses: ./.pipelines/.github/actions/check-cli-major
+        with:
+          major: ${{ steps.cli.outputs.major }}
 
       - name: Remove the pipelines checkout
         run: rm -rf .pipelines
@@ -318,9 +326,18 @@ jobs:
 
       - uses: ./.pipelines-guard/.github/actions/release-guard
 
+      # Existing tags are fetched by name (this job's read-only token, not
+      # persisted): `changeset git-tag` skips a tag that exists locally or on
+      # the remote, and on a private or internal caller its unauthenticated
+      # remote lookup fails, which reads as "no such tag". Without the tags in
+      # the clone it would create a tag again for every unchanged package that
+      # an earlier release already tagged, and finalize would then fail on a
+      # correct tag. Depth stays 1: a tag at a commit outside the history is
+      # still listed by name.
       - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4.3.1
         with:
           fetch-depth: 1
+          fetch-tags: true
           persist-credentials: false
 
       - uses: pnpm/action-setup@41ff72655975bd51cab0327fa583b6e92b6d3061 # v4.2.0
@@ -458,7 +475,9 @@ jobs:
           repository: ${{ job.workflow_repository }}
           ref: ${{ job.workflow_sha }}
           path: .pipelines-guard
-          sparse-checkout: .github/actions/release-guard
+          sparse-checkout: |
+            .github/actions/release-guard
+            .github/actions/check-cli-major
           persist-credentials: false
 
       - uses: ./.pipelines-guard/.github/actions/release-guard
@@ -466,14 +485,9 @@ jobs:
       # The arm comes from the version job's detector output, which is data:
       # nothing from the repository runs in this job to choose it. Anything
       # but 2 or 3 stops here, before any install.
-      - name: Check the CLI major
-        env:
-          CLI_MAJOR: ${{ needs.version.outputs.cli_major }}
-        run: |
-          case "$CLI_MAJOR" in
-            2|3) ;;
-            *) echo "::error::Unsupported @changesets/cli major '$CLI_MAJOR'"; exit 1 ;;
-          esac
+      - uses: ./.pipelines-guard/.github/actions/check-cli-major
+        with:
+          major: ${{ needs.version.outputs.cli_major }}
 
       # Same checkout as the version job: read-only job token, not persisted.
       - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4.3.1
@@ -481,7 +495,9 @@ jobs:
           fetch-depth: 1
           persist-credentials: false
 
+      # pnpm is used only on the 2.x arm, which is the only arm that installs.
       - uses: pnpm/action-setup@41ff72655975bd51cab0327fa583b6e92b6d3061 # v4.2.0
+        if: needs.version.outputs.cli_major == '2'
 
       - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4.4.0
         with:

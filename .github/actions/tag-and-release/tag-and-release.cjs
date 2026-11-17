@@ -5,7 +5,8 @@
 // given; no repository dependency code runs here. Safe to re-run: a tag that
 // already points at the run's commit is left alone, a tag that points
 // anywhere else fails the step and is never moved, and a Release that exists
-// is never recreated.
+// is never recreated. A Release that is missing for a tag at the run's commit
+// (a previous attempt pushed the ref and failed before the Release) is created.
 //
 // Loaded with require() from actions/github-script, which is why this is CommonJS.
 
@@ -89,15 +90,21 @@ function packageDirectory({ workspace, directory }) {
 }
 
 /**
- * Pushes every tag in the tags file and creates its Release. Sets the step
- * output `releases-created` to 'true' when this run created at least one
- * GitHub Release (not merely a tag ref), else 'false'.
+ * Pushes every tag in the tags file and creates a Release for each tag that
+ * needs one. A Release is created for every created tag, and also for every
+ * `expected` tag whose remote ref already points at this run's commit and has
+ * no Release: the recovery after a run that pushed its refs and failed before
+ * creating the Release. An expected tag at any other commit is never touched.
+ * Every changelog is read before the first ref is created, so a changelog
+ * error leaves nothing half done. Sets the step output `releases-created` to
+ * 'true' when this run created at least one GitHub Release (not merely a tag
+ * ref), else 'false'.
  */
 async function tagAndRelease({ github, context, core, tagsFile, workspace }) {
   const { owner, repo } = context.repo;
-  const { tags } = JSON.parse(fs.readFileSync(tagsFile, 'utf8'));
+  const { tags, expected = [] } = JSON.parse(fs.readFileSync(tagsFile, 'utf8'));
   core.setOutput('releases-created', 'false');
-  if (tags.length === 0) {
+  if (tags.length === 0 && expected.length === 0) {
     core.info('Nothing to tag');
     return { created: [] };
   }
@@ -117,28 +124,32 @@ async function tagAndRelease({ github, context, core, tagsFile, workspace }) {
         're-run the failed job. The workflow never moves or deletes a tag itself.'
     );
   }
-  for (const tag of refsToCreate) {
-    await github.rest.git.createRef({ owner, repo, ref: `refs/tags/${tag}`, sha: context.sha });
-    core.info(`Created tag ${tag}`);
+
+  // Tags that need a Release: the created ones (they will point at this
+  // commit) and the expected ones that already do.
+  const candidates = [...tags];
+  const createdTags = new Set(tags.map((t) => t.tag));
+  for (const entry of expected) {
+    if (createdTags.has(entry.tag)) continue;
+    if ((await resolveTagCommit({ github, owner, repo, tag: entry.tag })) === context.sha) {
+      candidates.push(entry);
+    }
   }
 
   const enabled = changelogsEnabled(workspace);
-  const existing = await github.paginate(github.rest.repos.listTags, {
-    owner,
-    repo,
-    per_page: 100
-  });
-  const allTags = [...new Set([...existing.map((t) => t.name), ...tags.map((t) => t.tag)])];
-
-  // Read and validate every changelog before creating any Release.
+  // Read and validate every changelog before creating any ref or Release.
   const pending = [];
-  for (const { tag, directory } of tags) {
+  for (const { tag, directory } of candidates) {
     const parsed = parseTag(tag);
     if (parsed === null) throw new Error(`${tag} is not a version tag`);
     const dir = packageDirectory({ workspace, directory });
     const changelog = dir === null ? null : path.join(dir, 'CHANGELOG.md');
     if (!enabled || changelog === null || !fs.existsSync(changelog)) {
       core.info(`${tag} has no CHANGELOG.md; no Release`);
+      continue;
+    }
+    if (await releaseExists({ github, owner, repo, tag })) {
+      core.info(`${tag} already has a Release`);
       continue;
     }
     const body = changelogSection({
@@ -153,17 +164,27 @@ async function tagAndRelease({ github, context, core, tagsFile, workspace }) {
     pending.push({ tag, body, version: parsed.version });
   }
 
+  for (const tag of refsToCreate) {
+    await github.rest.git.createRef({ owner, repo, ref: `refs/tags/${tag}`, sha: context.sha });
+    core.info(`Created tag ${tag}`);
+  }
+
+  const existing = await github.paginate(github.rest.repos.listTags, {
+    owner,
+    repo,
+    per_page: 100
+  });
+  const allTags = [...new Set([...existing.map((t) => t.name), ...candidates.map((t) => t.tag)])];
+
   const created = [];
   for (const { tag, body, version } of pending) {
-    if (await releaseExists({ github, owner, repo, tag })) {
-      core.info(`${tag} already has a Release`);
-      continue;
-    }
     const prerelease = version.includes('-');
     await github.rest.repos.createRelease({
       owner,
       repo,
       tag_name: tag,
+      // Pins the commit if the tag ref vanished since it was created above.
+      target_commitish: context.sha,
       name: tag,
       body,
       prerelease,

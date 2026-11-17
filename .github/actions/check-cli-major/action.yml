@@ -1,0 +1,22 @@
+name: Check CLI major
+description: >
+  Fails unless the given @changesets/cli major is exactly 2 or 3. It is a
+  plain Node script that reads one value and runs no repository code, so it can
+  sit in a job that holds or is about to mint a release credential.
+
+inputs:
+  major:
+    description: The major reported by the detector (a job output or a step output).
+    required: true
+
+runs:
+  using: composite
+  steps:
+    - name: Check the CLI major
+      shell: bash
+      env:
+        # Inputs and the action path are assigned to env vars before shell use
+        # to prevent expression injection.
+        ACTION_PATH: ${{ github.action_path }}
+        CLI_MAJOR: ${{ inputs.major }}
+      run: node "$ACTION_PATH/check-cli-major.mjs"

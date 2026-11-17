@@ -73,7 +73,14 @@ function workspaceGlobs(root) {
 const namesRoot = (glob) => /^\.\/*$/.test(glob);
 
 function listProjectsWithPnpm({ root, run }) {
-  const result = run('pnpm', ['ls', '-r', '--depth', '-1', '--json']);
+  const result = run('pnpm', [
+    'ls',
+    '-r',
+    '--depth',
+    '-1',
+    '--json',
+    '--config.ignore-pnpmfile=true'
+  ]);
   if (result.status !== 0) throw new Error('Could not list the workspace packages with pnpm.');
   return JSON.parse(result.stdout);
 }
@@ -141,7 +148,8 @@ function checkPrivatePackagesConfig({ root, listProjects, run }) {
  * `privatePackages` setting.
  */
 export function checkChangesetsCli({ run = defaultRun, root = '.', listProjects } = {}) {
-  const result = run('pnpm', ['exec', 'changeset', '--version']);
+  // pnpm options go before `exec`; anything after `changeset` is passed to the CLI.
+  const result = run('pnpm', ['--config.ignore-pnpmfile=true', 'exec', 'changeset', '--version']);
   const version = result.stdout.trim().split('\n').pop()?.trim() ?? '';
   const match = /^(\d+)\.\d+\.\d+/.exec(version);
   if (result.status !== 0 || !match) {

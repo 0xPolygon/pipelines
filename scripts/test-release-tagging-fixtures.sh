@@ -363,6 +363,49 @@ expect_rc "3.x conflict: end-state check fails" 1
 expect_out "3.x conflict: names the conflicting tag" "@fx/pub@1.0.0 (points at another commit)"
 expect_eq "3.x conflict: the remote tag is untouched" "$(git --git-dir "$REMOTE" rev-parse '@fx/pub@1.0.0^{commit}')" "$(git -C "$WS" rev-parse HEAD~1)"
 
+echo "-- 3.x: unreachable origin, unchanged package already tagged at an older commit"
+# A private caller has no git credential in the tagging job, so the CLI's remote
+# tag lookup fails and reads as "no such tag". With existing tags fetched into
+# the clone (fetch-tags), it skips them by local name; without them it would
+# create a tag again for an unchanged package, which the end-state check reports.
+unreachable_origin() {
+  git -C "$WS" remote set-url origin https://127.0.0.1:9/fixture.git
+}
+new_workspace 3 multi "$(config_json '[]' "$PRIV_ON")" @fx/old 1.0.0 false @fx/new 1.0.0 false
+git -C "$WS" tag -a "@fx/old@1.0.0" -m old
+git -C "$WS" push -q origin "refs/tags/@fx/old@1.0.0"
+add_commit "second"
+printf '%s\n' '{"name":"@fx/new","version":"2.0.0"}' >"$WS/packages/new/package.json"
+git -C "$WS" add -A
+git -C "$WS" commit -q -m "bump new"
+unreachable_origin
+collect3
+expect_rc "3.x unreachable origin, old tag fetched: tags artifact validates" 0
+expect_eq "3.x unreachable origin, old tag fetched: only the bumped package is tagged" "$(tag_names)" "@fx/new@2.0.0"
+expect_eq "3.x unreachable origin, old tag fetched: both tags are expected" "$(expected_names)" "@fx/new@2.0.0,@fx/old@1.0.0"
+git -C "$WS" remote set-url origin "$REMOTE"
+push_tags @fx/new@2.0.0
+check 3 "$TAGS_FILE"
+expect_rc "3.x unreachable origin, old tag fetched: end-state check passes" 0
+
+echo "-- 3.x: unreachable origin, the old tag is NOT in the clone (the falsification of fetch-tags: without the fetched tags the run must not end green)"
+new_workspace 3 multi "$(config_json '[]' "$PRIV_ON")" @fx/old 1.0.0 false @fx/new 1.0.0 false
+git -C "$WS" tag -a "@fx/old@1.0.0" -m old
+git -C "$WS" push -q origin "refs/tags/@fx/old@1.0.0"
+git -C "$WS" tag -d "@fx/old@1.0.0" >/dev/null
+add_commit "second"
+printf '%s\n' '{"name":"@fx/new","version":"2.0.0"}' >"$WS/packages/new/package.json"
+git -C "$WS" add -A
+git -C "$WS" commit -q -m "bump new"
+unreachable_origin
+collect3
+expect_eq "3.x unreachable origin, old tag absent: the CLI creates both tags" "$(tag_names)" "@fx/new@2.0.0,@fx/old@1.0.0"
+git -C "$WS" remote set-url origin "$REMOTE"
+push_tags @fx/new@2.0.0
+check 3 "$TAGS_FILE"
+expect_rc "3.x unreachable origin, old tag absent (no fetch-tags): the run does not end green" 1
+expect_out "3.x unreachable origin, old tag absent: names the conflict" "@fx/old@1.0.0 (points at another commit)"
+
 echo "-- 3.x: an artifact entry that disagrees with the checkout"
 new_workspace 3 multi "$(config_json '[]' "$PRIV_ON")" @fx/pub 1.0.0 false
 collect3

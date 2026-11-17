@@ -62,7 +62,8 @@ system state automatically.
 | `actions/tag-and-release` | `@changesets/cli` 3.x: run `changeset git-tag` with no token in the `collect-tags` job, validate the resulting tags file with plain Node, then push the tags and create a GitHub Release for each in `finalize`; holds no publish credential | No — dependency-free Node script |
 | `actions/check-version-script` | When the version hook is enabled, fail unless the root `package.json` defines `ci:version` | No — dependency-free Node script |
 | `actions/release-guard` | Fail unless the run is a push to the repository's default branch | No — dependency-free Node script |
-| `actions/check-release-tags` | Confirm every package in `manifest.json` has a git tag and a GitHub Release, read through the GitHub REST API | No — dependency-free Node script |
+| `actions/check-release-tags` | Confirm the end state of a release run, read through the GitHub REST API: every package in `manifest.json` and every created tag has its git tag and, where a changelog applies, a GitHub Release; on `@changesets/cli` 3.x also every expected tag, and a package published in the run must be tagged at the run's commit | No — dependency-free Node script |
+| `actions/check-cli-major` | Fail unless the detected `@changesets/cli` major is exactly 2 or 3, so an empty or unexpected detector output cannot select no arm | No — dependency-free Node script |
 | `actions/release-conformance` | Check a repository's npm release workflow files against the shared release standard; reads files only | Yes — ncc bundle |
 | `actions/slack-notify` | Post Slack Block Kit message from `pr.json` | Yes — ncc bundle |
 | `actions/upsert-changeset-comment` | Post or remove changeset nag comment on a PR | Yes — ncc bundle |
@@ -198,7 +199,9 @@ skips `publish` and is tagged by `finalize` without any approval.
   from the changelog and none without it. The release fails when it had
   something to tag and a tag or Release is missing, also when nothing was
   published. Re-running the `finalize` job is safe: it passes once the tags
-  and Releases exist.
+  and Releases exist. Re-running the failed job is the safe recovery: on 3.x a
+  re-run also creates a Release that is missing for a tag already at the run's
+  commit, and the end-state check fails while one is still missing.
 - **`publishConfig.access`.** Set it to `public` on every public package. A
   public package that resolves to restricted access fails the pack step.
 - **Public npm registry only.** Every registry lookup and publish names
@@ -328,6 +331,18 @@ CLI, so a repository moves by changing its own dependencies and config.
   a read-only token and uploads the tags it created. The `finalize` job
   validates that file against the checkout with plain Node, then
   `actions/tag-and-release` pushes the tags and creates the GitHub Releases.
+  The collect step fetches existing tags into its clone, so a package an
+  earlier release already tagged is not tagged again on a private repository.
+  The validation also holds the file to the repository's configuration, read as
+  data: every created tag is also an expected tag, every entry is a workspace
+  package, and a package named literally under `ignore`, or a private package
+  when `privatePackages` does not turn tagging on, is refused.
+- **Repository code while the release token exists.** The `version` job runs
+  the repository's release tooling (the changesets CLI and its changelog
+  plugin) with the release token available, as it does today, on either CLI
+  major. The tag list is produced by a job that runs the repository's
+  dependencies; `finalize` validates every entry against the repository before
+  creating tags.
 
 ### Release workflow conformance
 

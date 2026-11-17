@@ -334,9 +334,13 @@ const armGuard = "needs.version.outputs.cli_major == '2'";
 const codeSteps = fin.filter((st) => /pnpm (install|exec)|changeset(?!s)/.test(String(st.run ?? '')) || stepUses(st)?.endsWith('/check-changesets-cli') || stepUses(st) === 'changesets/action');
 check('finalize: every step that installs, runs pnpm or changeset, or detects the CLI runs only on the 2.x arm', codeSteps.length === 3 && codeSteps.every((st) => norm(st.if) === armGuard), json(codeSteps.map((st) => [st.name ?? st.uses ?? st.run, st.if])));
 check('finalize: arm conditions read needs.version.outputs.cli_major and no step output of the detector', !/steps\.cli\./.test(json(fin)) && !/steps\.cli\./.test(norm(jobs.finalize?.if)));
-const majorCheck = fin.findIndex((st) => /CLI_MAJOR/.test(json(st.env ?? {})));
+const majorCheck = fin.findIndex((st) => stepUses(st)?.endsWith('/check-cli-major'));
 const finInstall = fin.findIndex((st) => /^pnpm install/.test(norm(st.run ?? '')));
-check('finalize: a plain run step rejects any major but 2 or 3 before the install, using no repository code', majorCheck >= 0 && majorCheck < finInstall && fin[majorCheck].env.CLI_MAJOR === '${{ needs.version.outputs.cli_major }}' && !/\b(pnpm|node|changeset)\b/.test(String(fin[majorCheck].run)) && /2\|3\)/.test(String(fin[majorCheck].run)), String(majorCheck));
+const finGuard = fin.findIndex((st) => stepUses(st)?.endsWith('/release-guard'));
+check('finalize: a plain-node action rejects any major but 2 or 3 after the guard and before the install, unconditionally, fed only the version job output', majorCheck > finGuard && majorCheck >= 0 && majorCheck < finInstall && stepUses(fin[majorCheck]) === './.pipelines-guard/.github/actions/check-cli-major' && !('if' in fin[majorCheck]) && !('run' in fin[majorCheck]) && json(fin[majorCheck].with) === json({ major: '${{ needs.version.outputs.cli_major }}' }), String(majorCheck));
+check('finalize: no inline shell case for the major remains in the workflow', !/case "\$CLI_MAJOR"/.test(fs.readFileSync(relPath, 'utf8')) && !fin.some((st) => /CLI_MAJOR/.test(json(st.env ?? {}))));
+const finPnpm = fin.findIndex((st) => stepUses(st) === 'pnpm/action-setup');
+check('finalize: pnpm/action-setup runs only on the 2.x arm and setup-node stays unconditional', finPnpm >= 0 && norm(fin[finPnpm]?.if) === "needs.version.outputs.cli_major == '2'" && fin.filter((st) => stepUses(st) === 'actions/setup-node').every((st) => !('if' in st)) && fin.some((st) => stepUses(st) === 'actions/setup-node'), norm(fin[finPnpm]?.if));
 check('version job exposes cli_major from the detector', norm(jobs.version?.outputs?.cli_major) === '${{ steps.cli.outputs.major }}', norm(jobs.version?.outputs?.cli_major));
 check('collect-tags permissions are exactly contents: read', json(jobs['collect-tags']?.permissions) === json({ contents: 'read' }), json(jobs['collect-tags']?.permissions));
 check('collect-tags has no app token, no secret, no id-token and no env', !/create-github-app-token|secrets\.|id-token|app-token/.test(json(jobs['collect-tags'])) && !('env' in (jobs['collect-tags'] ?? {})) && ct.every((st) => !('env' in st)));
@@ -368,6 +372,63 @@ check('the Latest correction is the last finalize step', fix === fin.length - 1,
 const shared = fin.map((st, i) => ({ st, i })).filter(({ st, i }) => stepUses(st) === 'actions/checkout' && st.with?.path === '.pipelines' && i > act && i < fix).pop();
 const sparse = String(shared?.st.with?.['sparse-checkout'] ?? '').split('\n').map((l) => l.trim());
 check('finalize: the .pipelines checkout before the correction has no if and lists check-release-tags, correct-latest-release and tag-and-release, before the tag-and-release step', shared !== undefined && !('if' in shared.st) && sparse.includes('.github/actions/check-release-tags') && sparse.includes('.github/actions/correct-latest-release') && sparse.includes('.github/actions/tag-and-release') && shared.i < tagRel, json(shared?.st));
+// Exact ordered allowlists for finalize and collect-tags, in the form the
+// version job has: a step is identified by its action or its run text, and by
+// its `if:`. A step that is not on the list (a new local action, a run step, a
+// third-party action) fails, wherever it sits.
+const sigOf = (st) => (typeof st.run === 'string' ? `run:${norm(st.run)}` : stepUses(st));
+const sigIf = (st) => `${sigOf(st)} if:${norm(st.if ?? '')}`;
+const finWant = [
+  'actions/checkout if:',
+  './.pipelines-guard/.github/actions/release-guard if:',
+  './.pipelines-guard/.github/actions/check-cli-major if:',
+  'actions/checkout if:',
+  "pnpm/action-setup if:needs.version.outputs.cli_major == '2'",
+  'actions/setup-node if:',
+  "run:pnpm install --frozen-lockfile --ignore-scripts if:needs.version.outputs.cli_major == '2'",
+  'actions/checkout if:',
+  "./.pipelines/.github/actions/check-changesets-cli if:needs.version.outputs.cli_major == '2'",
+  'actions/github-script if:',
+  "actions/download-artifact if:needs.version.outputs.cli_major == '3'",
+  "run:node ./.pipelines/.github/actions/tag-and-release/validate-tags.mjs if:needs.version.outputs.cli_major == '3'",
+  'run:rm -rf .pipelines if:',
+  'actions/create-github-app-token if:',
+  "changesets/action if:needs.version.outputs.cli_major == '2'",
+  "actions/download-artifact if:needs.publish.result == 'success'",
+  'actions/checkout if:',
+  "actions/github-script if:needs.version.outputs.cli_major == '3'",
+  './.pipelines/.github/actions/check-release-tags if:',
+  "actions/github-script if:steps.changesets.outputs.published == 'true' || steps.tag-and-release.outputs.releases-created == 'true'"
+];
+const finHave = fin.map(sigIf);
+check('finalize steps are exactly the allowlist, with their conditions, in order', json(finHave) === json(finWant), json(finHave));
+// After the token exists, the 3.x arm may run only these: artifact download,
+// the checkout of this workflow's own commit, the two github-script steps that
+// load files from this workflow's checkout, and the dependency-free check.
+const postMint3 = fin.slice(mint + 1).filter((st) => norm(st.if) !== "needs.version.outputs.cli_major == '2'");
+const postOk = (st) => !('run' in st) && (['actions/download-artifact', 'actions/checkout', 'actions/github-script'].includes(stepUses(st)) || stepUses(st) === './.pipelines/.github/actions/check-release-tags');
+check('finalize (3.x arm): after the app token is minted, no run step and no local action other than check-release-tags', postMint3.length > 0 && postMint3.every(postOk), json(postMint3.filter((st) => !postOk(st)).map(sigIf)));
+const requires = (st) => [...String(st.with?.script ?? '').matchAll(/require\('([^']+)'\)/g)].map((m) => m[1]);
+const finScripts = fin.filter((st) => stepUses(st) === 'actions/github-script').map(requires);
+check('finalize github-script steps require exactly the two pipelines scripts, in order', json(finScripts) === json([['./.pipelines/.github/actions/correct-latest-release/correct-latest-release.cjs'], ['./.pipelines/.github/actions/tag-and-release/tag-and-release.cjs'], ['./.pipelines/.github/actions/correct-latest-release/correct-latest-release.cjs']]), json(finScripts));
+const ctWant = [
+  'actions/checkout if:',
+  './.pipelines-guard/.github/actions/release-guard if:',
+  'actions/checkout if:',
+  'pnpm/action-setup if:',
+  'actions/setup-node if:',
+  'run:pnpm install --frozen-lockfile --ignore-scripts if:',
+  'actions/checkout if:',
+  './.pipelines/.github/actions/check-changesets-cli if:',
+  "./.pipelines/.github/actions/tag-and-release if:steps.cli.outputs.major == '3'",
+  "actions/upload-artifact if:steps.cli.outputs.major == '3'"
+];
+const ctHave = ct.map(sigIf);
+check('collect-tags steps are exactly the allowlist, with their conditions, in order', json(ctHave) === json(ctWant), json(ctHave));
+// The checkout of the caller's repository must see existing tags (so the CLI
+// skips them on a private caller) and must not persist the job token.
+const ctRepo = ct.filter((st) => stepUses(st) === 'actions/checkout' && !('repository' in (st.with ?? {})));
+check('collect-tags: the one repository checkout fetches tags and does not persist credentials', ctRepo.length === 1 && ctRepo[0].with['fetch-tags'] === true && ctRepo[0].with['persist-credentials'] === false && ctRepo[0].with['fetch-depth'] === 1, json(ctRepo.map((st) => st.with)));
 check('finalize permissions stay contents: write only', json(jobs.finalize?.permissions) === json({ contents: 'write' }), json(jobs.finalize?.permissions));
 
 const art = Object.values(jobs.build?.steps ?? []).find((st) => stepUses(st) === 'actions/upload-artifact');
@@ -403,6 +464,7 @@ const vwant = [
   'run:pnpm install --frozen-lockfile --ignore-scripts',
   'actions/checkout',
   './.pipelines/.github/actions/check-changesets-cli',
+  './.pipelines/.github/actions/check-cli-major',
   'run:rm -rf .pipelines',
   'actions/create-github-app-token',
   'changesets/action',
@@ -423,6 +485,8 @@ const vinst = vsteps.findIndex((st) => /^pnpm install/.test(norm(st.run ?? '')))
 const vtok = vsteps.findIndex((st) => stepUses(st) === 'actions/create-github-app-token');
 const vrm = vsteps.findIndex((st, i) => i > vdet && norm(st.run ?? '') === 'rm -rf .pipelines');
 check('version job: @changesets/cli major is detected after the install, before the token and changesets/action, unconditionally', vdet > vinst && vinst >= 0 && vtok > vdet && vact > vdet && !('if' in vsteps[vdet]) && vsteps[vdet]?.id === 'cli', `install ${vinst} detect ${vdet} token ${vtok} action ${vact}`);
+const vmaj = vsteps.findIndex((st) => stepUses(st)?.endsWith('/check-cli-major'));
+check('version job: the detector output is checked to be 2 or 3 by a plain step after the detector and before the token mint, unconditionally', vmaj > vdet && vdet >= 0 && vmaj < vtok && !('if' in vsteps[vmaj]) && json(vsteps[vmaj]?.with) === json({ major: '${{ steps.cli.outputs.major }}' }), `detect ${vdet} check ${vmaj} token ${vtok}`);
 check('version job: the pipelines checkout is removed between the detector and changesets/action', vdet >= 0 && vrm > vdet && vrm < vact, `detect ${vdet} rm ${vrm} action ${vact}`);
 check('finalize: the @changesets/cli detector step has id cli', fin[cli]?.id === 'cli', String(fin[cli]?.id));
 check('version job has no job-level defaults', !('defaults' in (jobs.version ?? {})), json(jobs.version?.defaults));
@@ -443,6 +507,21 @@ check('version job: 3.x version-script is pnpm run ci:version only under version
 check('version job: the has_changesets output reads both arms', norm(wf.jobs?.version?.outputs?.has_changesets) === "${{ steps.changesets.outputs.hasChangesets || steps.changesets3.outputs['has-changesets'] }}", norm(wf.jobs?.version?.outputs?.has_changesets));
 check('version job: no id-token permission', isMap(jobs.version?.permissions) && !('id-token' in jobs.version.permissions));
 check('version job: permissions are exactly contents: write and pull-requests: write', json(jobs.version?.permissions) === json({ contents: 'write', 'pull-requests': 'write' }), json(jobs.version?.permissions));
+// pnpm loads a repository's .pnpmfile.cjs, which is repository code. Every
+// pnpm invocation in the scripts finalize runs (the end-state check, and the
+// detector on the 2.x arm) must pass the ignore flag. Calls are found as
+// `'pnpm',` argument lists and read up to the closing bracket.
+const pnpmScripts = ['.github/actions/check-release-tags/check-release-tags.mjs', '.github/actions/check-changesets-cli/check-changesets-cli.mjs'];
+const pnpmBad = [];
+let pnpmCalls = 0;
+for (const f of pnpmScripts) {
+  const text = fs.readFileSync(path.join(repoRoot, f), 'utf8');
+  for (const m of text.matchAll(/'pnpm',\s*\[([^\]]*)\]/g)) {
+    pnpmCalls += 1;
+    if (!m[1].includes("'--config.ignore-pnpmfile=true'")) pnpmBad.push(`${f}: ${m[1].trim()}`);
+  }
+}
+check('every pnpm call in the finalize scripts passes --config.ignore-pnpmfile=true (no repository .pnpmfile.cjs loads)', pnpmCalls >= 3 && pnpmBad.length === 0, json(pnpmBad));
 console.log(out.join('\n'));
 NODE
   if [ $? -ne 0 ]; then

@@ -181,6 +181,7 @@ describe('check-release-tags', () => {
   });
 
   describe('tags at HEAD in the local clone', () => {
+    const pnpmCalls = [];
     const HEAD = 'a'.repeat(40);
     const OTHER = 'b'.repeat(40);
 
@@ -191,6 +192,7 @@ describe('check-release-tags', () => {
         if (command === 'git' && args[0] === 'rev-parse') return { status: 0, stdout: `${HEAD}\n` };
         if (command === 'git' && args[0] === 'tag') return { status: 0, stdout: tags.join('\n') };
         if (command === 'pnpm') {
+          pnpmCalls.push(args);
           return {
             status: 0,
             stdout: JSON.stringify(packages.map((p) => ({ ...p, path: join(dir, p.directory) })))
@@ -227,6 +229,18 @@ describe('check-release-tags', () => {
     };
 
     const pkgA = { name: '@s/a', version: '1.0.0', directory: 'pkgs/a' };
+
+    it('every pnpm call passes --config.ignore-pnpmfile=true, so no repository .pnpmfile.cjs loads', async () => {
+      pnpmCalls.length = 0;
+      await runLocal({
+        fetchImpl: refFetch({ commits: { '@s/a@1.0.0': HEAD } }),
+        run: gitRun({ tags: ['@s/a@1.0.0'], packages: [pkgA] }),
+        withManifest: false
+      });
+      assert.ok(pnpmCalls.length > 0);
+      for (const args of pnpmCalls)
+        assert.ok(args.includes('--config.ignore-pnpmfile=true'), args.join(' '));
+    });
 
     it('passes with nothing to tag', async () => {
       const { code, logs } = await runLocal({
@@ -432,7 +446,7 @@ describe('tags file (@changesets/cli 3.x arm)', () => {
   it('passes when every expected tag is on the remote, at any commit', async () => {
     const { code, logs } = await runWith({
       file: expectedFile([entry('@s/a', '1.0.0'), entry('b', '2.0.0')]),
-      fetchImpl: fakeFetch({ tags: ['@s/a@1.0.0', 'b@2.0.0'] }).fetchImpl
+      fetchImpl: refFetch({ commits: { '@s/a@1.0.0': OTHER, 'b@2.0.0': SHA } })
     });
     assert.equal(code, 0);
     assert.match(logs.join('\n'), /2 expected tag/);
@@ -442,7 +456,7 @@ describe('tags file (@changesets/cli 3.x arm)', () => {
     writeManifest([{ name: 'm', version: '1.0.0' }]);
     const { code, logs } = await runWith({
       file: expectedFile([entry('@s/a', '1.0.0'), entry('@s/b', '1.0.0')]),
-      fetchImpl: fakeFetch({ tags: ['@s/a@1.0.0'] }).fetchImpl,
+      fetchImpl: refFetch({ commits: { '@s/a@1.0.0': SHA } }),
       withManifest: true
     });
     assert.equal(code, 1);
@@ -464,7 +478,7 @@ describe('tags file (@changesets/cli 3.x arm)', () => {
   it('accepts the v<version> tag form for a root package entry', async () => {
     const { code } = await runWith({
       file: expectedFile([{ ...entry('root', '1.2.3'), tag: 'v1.2.3', directory: '.' }]),
-      fetchImpl: fakeFetch({ tags: ['v1.2.3'] }).fetchImpl
+      fetchImpl: refFetch({ commits: { 'v1.2.3': SHA } })
     });
     assert.equal(code, 0);
   });
@@ -508,6 +522,74 @@ describe('tags file (@changesets/cli 3.x arm)', () => {
     const { code } = await runWith({
       file: expectedFile([entry('@s/a', '1.0.0')]),
       fetchImpl: refFetch({ commits: { '@s/a@1.0.0': OTHER } })
+    });
+    assert.equal(code, 0);
+  });
+
+  it('re-run after tags pushed but Release creation failed: an expected tag at the run commit without its Release fails', async () => {
+    mkdirSync(join(dir, 'packages', 'a'), { recursive: true });
+    writeFileSync(join(dir, 'packages', 'a', 'CHANGELOG.md'), '# a\n\n## 1.0.0\n\nN\n');
+    const file = expectedFile([entry('@s/a', '1.0.0')]);
+    const missingRelease = await runWith({
+      file,
+      fetchImpl: refFetch({ commits: { '@s/a@1.0.0': SHA } })
+    });
+    assert.equal(missingRelease.code, 1);
+    assert.match(missingRelease.logs.join('\n'), /@s\/a@1\.0\.0 \(GitHub Release\)/);
+    const created = await runWith({
+      file,
+      fetchImpl: refFetch({ commits: { '@s/a@1.0.0': SHA }, releases: ['@s/a@1.0.0'] })
+    });
+    assert.equal(created.code, 0);
+    // An earlier release keeps its tag at another commit and needs no Release now.
+    const earlier = await runWith({
+      file,
+      fetchImpl: refFetch({ commits: { '@s/a@1.0.0': OTHER } })
+    });
+    assert.equal(earlier.code, 0);
+  });
+
+  it('an expected tag at the run commit needs no Release when changelogs are off or absent', async () => {
+    const file = expectedFile([entry('@s/a', '1.0.0')]);
+    const noChangelog = await runWith({
+      file,
+      fetchImpl: refFetch({ commits: { '@s/a@1.0.0': SHA } })
+    });
+    assert.equal(noChangelog.code, 0);
+    mkdirSync(join(dir, 'packages', 'a'), { recursive: true });
+    writeFileSync(join(dir, 'packages', 'a', 'CHANGELOG.md'), '# a\n');
+    mkdirSync(join(dir, '.changeset'), { recursive: true });
+    writeFileSync(join(dir, '.changeset', 'config.json'), JSON.stringify({ changelog: false }));
+    const off = await runWith({ file, fetchImpl: refFetch({ commits: { '@s/a@1.0.0': SHA } }) });
+    assert.equal(off.code, 0);
+  });
+
+  it('a version published in this run whose tag points at another commit fails with the actionable message', async () => {
+    writeManifest([{ name: '@s/a', version: '1.0.0' }]);
+    const file = expectedFile([entry('@s/a', '1.0.0')]);
+    const moved = await runWith({
+      file,
+      withManifest: true,
+      fetchImpl: refFetch({ commits: { '@s/a@1.0.0': OTHER } })
+    });
+    assert.equal(moved.code, 1);
+    const message = moved.logs.join('\n');
+    assert.match(message, /@s\/a@1\.0\.0 \(points at another commit\)/);
+    assert.match(message, /delete it in the repository and re-run the failed job/);
+    const ok = await runWith({
+      file,
+      withManifest: true,
+      fetchImpl: refFetch({ commits: { '@s/a@1.0.0': SHA } })
+    });
+    assert.equal(ok.code, 0);
+  });
+
+  it('a package published in an earlier run keeps its earlier tag when it is not in this run manifest', async () => {
+    writeManifest([{ name: 'other', version: '1.0.0' }]);
+    const { code } = await runWith({
+      file: expectedFile([entry('@s/a', '1.0.0')]),
+      withManifest: true,
+      fetchImpl: refFetch({ commits: { '@s/a@1.0.0': OTHER, 'other@1.0.0': SHA } })
     });
     assert.equal(code, 0);
   });

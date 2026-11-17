@@ -24,8 +24,11 @@
 // cannot pass as "nothing to tag". The file is read as data and its shape is
 // checked again here; the finalize job has already validated it against the
 // checkout. Each expected tag must exist on the remote, at any commit: a
-// package released in an earlier run keeps its earlier tag. The 2.x arm is
-// unchanged.
+// package released in an earlier run keeps its earlier tag. An expected tag at
+// the run's commit also needs its GitHub Release where a changelog applies, so
+// a re-run after the refs were pushed and the Release was not created cannot
+// pass. A package published in this run (the manifest) must have its tag at
+// the run's commit. The 2.x arm is unchanged.
 
 import { spawnSync } from 'node:child_process';
 import { existsSync, readFileSync } from 'node:fs';
@@ -116,7 +119,9 @@ export async function tagExists({ apiUrl, repository, tag, token, fetchImpl = fe
 
 /**
  * Returns descriptions of what is missing: `<name>@<version>` ids with no tag
- * in an accepted form, and `<tag> (Release)` for a tag with no GitHub Release.
+ * in an accepted form, `<tag> (points at another commit)` for a tag at a
+ * commit other than `head` (checked only when `head` is given), and
+ * `<tag> (GitHub Release)` for a tag with no GitHub Release.
  */
 export async function findMissing({
   manifest,
@@ -125,7 +130,8 @@ export async function findMissing({
   token,
   fetchImpl,
   singlePackage = false,
-  requiresRelease = () => true
+  requiresRelease = () => true,
+  head
 }) {
   const missing = [];
   for (const entry of manifest) {
@@ -138,6 +144,12 @@ export async function findMissing({
     }
     if (foundTag === undefined) {
       missing.push(`${entry.name}@${entry.version}`);
+    } else if (
+      head !== undefined &&
+      (await remoteTagCommit({ apiUrl, repository, tag: foundTag, token, fetchImpl })) !== head
+    ) {
+      // A version published from this run's commit must be tagged at it.
+      missing.push(`${foundTag} (points at another commit)`);
     } else if (
       requiresRelease(entry) &&
       !(await releaseExists({ apiUrl, repository, tag: foundTag, token, fetchImpl }))
@@ -202,11 +214,33 @@ export function readReleaseArtifact(file) {
   };
 }
 
-/** Expected tags with no tag on the remote (at any commit). */
-export async function findMissingExpected({ expected, apiUrl, repository, token, fetchImpl }) {
+/**
+ * Expected tags that are missing: a tag absent from the remote, or one at the
+ * run's commit (`head`) with no GitHub Release where a changelog applies. A
+ * package released in an earlier run keeps its earlier tag, at any commit,
+ * and needs no Release from this run.
+ */
+export async function findMissingExpected({
+  expected,
+  head,
+  apiUrl,
+  repository,
+  token,
+  fetchImpl,
+  requiresRelease = () => false
+}) {
   const missing = [];
-  for (const { tag } of expected) {
-    if (!(await tagExists({ apiUrl, repository, tag, token, fetchImpl }))) missing.push(tag);
+  for (const { tag, packageName, directory } of expected) {
+    const commit = await remoteTagCommit({ apiUrl, repository, tag, token, fetchImpl });
+    if (commit === undefined) {
+      missing.push(tag);
+    } else if (
+      commit === head &&
+      requiresRelease({ name: packageName, directory }) &&
+      !(await releaseExists({ apiUrl, repository, tag, token, fetchImpl }))
+    ) {
+      missing.push(`${tag} (GitHub Release)`);
+    }
   }
   return missing;
 }
@@ -233,7 +267,15 @@ export function localTagsAtHead({ workspace, run = defaultRun }) {
 
 /** Workspace packages as `{ name, version, directory }`, directory relative to the workspace. */
 export function workspacePackages({ workspace, run = defaultRun }) {
-  const result = run('pnpm', ['ls', '-r', '--depth', '-1', '--json'], { cwd: workspace });
+  // --config.ignore-pnpmfile=true (the plain flag is rejected by `ls`): pnpm would otherwise load the repository's
+  // .pnpmfile.cjs, which is repository code, in a job holding a write token.
+  const result = run(
+    'pnpm',
+    ['ls', '-r', '--depth', '-1', '--json', '--config.ignore-pnpmfile=true'],
+    {
+      cwd: workspace
+    }
+  );
   if (result.status !== 0) throw new Error('Could not list the workspace packages with pnpm.');
   const root = resolve(workspace);
   return JSON.parse(result.stdout)
@@ -371,7 +413,9 @@ export async function main({
         repository,
         token,
         fetchImpl,
-        singlePackage: isSinglePackageRepo({ manifest, workspace })
+        singlePackage: isSinglePackageRepo({ manifest, workspace }),
+        // 3.x: head is the run's commit; 2.x keeps its any-commit rule.
+        head: artifact === undefined ? undefined : head
       })
     );
     for (const item of await findMissingLocal({
@@ -387,10 +431,12 @@ export async function main({
     }
     for (const tag of await findMissingExpected({
       expected,
+      head,
       apiUrl,
       repository,
       token,
-      fetchImpl
+      fetchImpl,
+      requiresRelease
     })) {
       missing.add(tag);
     }

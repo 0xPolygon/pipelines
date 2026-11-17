@@ -13,8 +13,10 @@ description: >
   error listing what is missing. Safe to re-run: it only reads. On
   @changesets/cli 3.x it reads the tags file the tagging job wrote and also
   checks its `expected` list (the tag every non-ignored package's current
-  version should have), failing on any malformed entry or missing tag; no
-  repository code runs in that arm.
+  version should have), failing on any malformed entry or missing tag, on an
+  expected tag at the run's commit that lacks its GitHub Release, and on a
+  package published in this run whose tag is at another commit; no repository
+  code runs in that arm.
 
 inputs:
   directory:
