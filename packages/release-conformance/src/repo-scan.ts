@@ -234,6 +234,11 @@ const splitCommandParts = (line: string): string[] => {
       (line[at - 1] === '>' || line[at - 1] === '<' || line[at + 1] === '>')
     ) {
       current += char;
+    } else if (char === '|' && line[at + 1] === '|') {
+      // `||` is the "or" list separator, not a pipe: nothing is piped into the next command.
+      parts.push(current, '||');
+      current = '';
+      at += 1;
     } else if (char === ';' || char === '&' || char === '|') {
       parts.push(current, char);
       current = '';
@@ -293,8 +298,12 @@ const redirectsStdout = (part: string): boolean => {
 
 /** The Claude CLI's deny-list flag, in the two spellings it has. Any other spelling is read normally. */
 const DENY_FLAG = /^--disallowed(?:Tools|-tools)(?:=|$)/;
-/** What a deny entry may not hold: anything the shell or the workflow expands before the CLI sees it. */
-const EXPANDS = /\$\(|`|\$\{/;
+/**
+ * What a deny entry may not hold: anything the shell or the workflow expands before the CLI sees it
+ * (any `$`, a backtick, process substitution), and any quote character, which can break the entry
+ * apart so that a part of it is read as shell.
+ */
+const EXPANDS = /["'`$]|<\(|>\(/;
 
 /** Whitespace-separated words of a text with their offsets, quoted strings kept whole. */
 const positionedWords = (text: string): { start: number; end: number }[] => {
@@ -318,11 +327,56 @@ const positionedWords = (text: string): { start: number; end: number }[] => {
   return words;
 };
 
+const LIST_FLAG = /^--(?:disallowed|allowed)(?:Tools|-tools)(?:=|$)/;
+/** Flags that take no value, so the word after one is the next argument. */
+const BOOLEAN_FLAGS = new Set(['-p', '--print', '-c', '--continue', '--verbose']);
+
+/**
+ * True when the deny-list flag at `index` is read by the Claude CLI as a flag, and not as the value of the
+ * option before it (`--system-prompt --disallowedTools "Bash(npx x)"` makes the entry a prompt) or as text
+ * after `--`. Fail closed: only a flag right after `claude`, after another deny or allow list, or after a
+ * boolean flag (with at most the prompt word between) is known to be one.
+ */
+const flagIsAtArgumentPosition = ({
+  segment,
+  words,
+  index
+}: {
+  segment: string;
+  words: { start: number; end: number }[];
+  index: number;
+}): boolean => {
+  const at = (position: number): string => {
+    const word = words[position];
+    return word === undefined ? '' : segment.slice(word.start, word.end);
+  };
+  const isCommand = (word: string): boolean => word.replace(/^.*\//, '') === 'claude';
+  const startsArguments = (word: string): boolean => isCommand(word) || BOOLEAN_FLAGS.has(word);
+  const checked = (position: number): boolean => {
+    if (position <= 0) return true;
+    const before = at(position - 1);
+    if (startsArguments(before)) return true;
+    if (LIST_FLAG.test(before) && before.endsWith('=')) return false;
+    if (/^--(?:disallowed|allowed)(?:Tools|-tools)=./.test(before)) return checked(position - 1);
+    if (before.startsWith('-')) return false;
+    // A word that is not a flag is the value of the list flag before it, or the prompt after `claude -p`.
+    const earlier = at(position - 2);
+    if (/^--(?:disallowed|allowed)(?:Tools|-tools)$/.test(earlier)) return checked(position - 2);
+    return startsArguments(earlier);
+  };
+  return checked(index);
+};
+
 /** Ranges of the balanced `Bash(…)` entries in a deny-list argument, or undefined when any is not safe to skip. */
 const denyEntries = (value: string): [number, number][] | undefined => {
   const ranges: [number, number][] = [];
   let from = value.indexOf('Bash(');
   while (from >= 0) {
+    // An entry starts at the start of the argument, after a comma or after whitespace: `mcp__x__Bash(…)` is not one.
+    if (from > 0 && !/[,\s]/.test(value[from - 1] ?? '')) {
+      from = value.indexOf('Bash(', from + 1);
+      continue;
+    }
     let depth = 0;
     let end = -1;
     for (let at = from + 4; at < value.length; at += 1) {
@@ -357,7 +411,7 @@ const blankDeniedTools = (segment: string): string => {
     const word = words[index];
     if (word === undefined) continue;
     const flag = DENY_FLAG.exec(segment.slice(word.start, word.end));
-    if (flag === null) continue;
+    if (flag === null || !flagIsAtArgumentPosition({ segment, words, index })) continue;
     let start: number;
     let end: number;
     if (flag[0].endsWith('=')) {
@@ -383,6 +437,86 @@ const blankDeniedTools = (segment: string): string => {
 
 /** The words of a command part with shell syntax kept in them, split on whitespace. */
 const wordsOfPart = (part: string): string[] => part.split(/\s+/).filter((word) => word !== '');
+
+/** Trims quote characters from both ends of a word, by index so the cost is linear in its length. */
+const unquoted = (word: string): string => {
+  let start = 0;
+  let end = word.length;
+  while (start < end && QUOTES.has(word[start] ?? '')) start += 1;
+  while (end > start && QUOTES.has(word[end - 1] ?? '')) end -= 1;
+  return word.slice(start, end);
+};
+const QUOTES = new Set(['"', "'", '`']);
+
+/**
+ * The words that follow a package manager's name in text that may be a command line or code that builds
+ * one: a `@version` glued to the name (`pnpm@9.1.0`) is skipped, and quotes, commas and brackets around
+ * words are dropped, so `["npm","exec","foo"]` and `('pnpm', ['dlx', 'foo'])` read as `npm exec foo`.
+ */
+const wordsAfterManager = (text: string): string[] => {
+  const glued = text.startsWith('@') ? text.search(/[\s"',[\]()]|$/) : 0;
+  return text
+    .slice(glued)
+    .split(/[\s,[\]]+/)
+    .map(unquoted)
+    .filter((word) => word !== '');
+};
+
+/**
+ * Tracks whether the command being read is at the top level of the script: not inside `{ }`, `( )`,
+ * `$( )`, a backtick pair, a loop, an `if`, a `case`, or a function body. An echo or a search inside any
+ * of them can have its output written or piped by the enclosing construct, which closes on a later
+ * word, so none of them is excused. One counter over the whole text; unbalanced closers never go below zero.
+ */
+interface Nesting {
+  depth: number;
+  cases: number;
+  backtick: boolean;
+}
+const OPEN_WORDS = new Set(['{', '(', 'if', 'while', 'until', 'for', 'select']);
+const CLOSE_WORDS = new Set(['}', ')', 'fi', 'done']);
+const NEUTRAL_WORDS = new Set(['then', 'else', 'elif', 'do', '!', 'time']);
+
+/** Reads one command part in order, moves the nesting state past it, and says whether its command word is at the top level. */
+const enterPart = ({ state, part }: { state: Nesting; part: string }): boolean => {
+  const words = wordsOfPart(part);
+  let index = 0;
+  for (; index < words.length; index += 1) {
+    let word = words[index] ?? '';
+    while (word.startsWith('(')) {
+      state.depth += 1;
+      word = word.slice(1);
+    }
+    words[index] = word;
+    if (word === '' || NEUTRAL_WORDS.has(word) || /^[A-Za-z_][A-Za-z0-9_]*=/.test(word)) {
+      // An assignment may open a substitution on this line (`X=$(`): its characters are counted below.
+      if (word !== '' && /^[A-Za-z_]/.test(word) && !NEUTRAL_WORDS.has(word)) break;
+      continue;
+    }
+    if (word === 'case') state.cases += 1;
+    else if (word === 'esac') state.cases = Math.max(0, state.cases - 1);
+    else if (OPEN_WORDS.has(word)) state.depth += 1;
+    else if (CLOSE_WORDS.has(word)) state.depth = Math.max(0, state.depth - 1);
+    else break;
+  }
+  const topLevel = state.depth === 0 && state.cases === 0 && !state.backtick;
+  // Parentheses and backticks outside quotes in the rest of the part. Inside a `case` the `)` of every
+  // pattern would unbalance the count, and nothing in a `case` is excused anyway.
+  let quote = '';
+  const rest = words.slice(index).join(' ');
+  for (let at = 0; at < rest.length; at += 1) {
+    const char = rest[at] ?? '';
+    if (quote !== '') {
+      if (char === '\\' && quote === '"') at += 1;
+      else if (char === quote) quote = '';
+    } else if (char === '\\') at += 1;
+    else if (char === '"' || char === "'") quote = char;
+    else if (char === '`') state.backtick = !state.backtick;
+    else if (state.cases === 0 && char === '(') state.depth += 1;
+    else if (state.cases === 0 && char === ')') state.depth = Math.max(0, state.depth - 1);
+  }
+  return topLevel;
+};
 
 /**
  * Runner named by a package manager's words: after the manager's name come any number of flags (with
@@ -453,6 +587,7 @@ export const textRunnerHits = (
   { claudeArgs = false }: { claudeArgs?: boolean } = {}
 ): { runner: string; line: string }[] => {
   const hits: { runner: string; line: string }[] = [];
+  const nesting: Nesting = { depth: 0, cases: 0, backtick: false };
   for (const line of normalizeShell(text).split('\n')) {
     const lineRuns = RUNNER_LINE_RUNS.test(line);
     const parts = splitCommandParts(claudeArgs ? blankDeniedTools(line) : line);
@@ -462,7 +597,8 @@ export const textRunnerHits = (
       const part =
         segmentCommand(wordsOfPart(rawPart)) === 'claude' ? blankDeniedTools(rawPart) : rawPart;
       const separator = parts[at + 1];
-      const textOnly = !lineRuns && separator !== '|' && !redirectsStdout(part);
+      const topLevel = enterPart({ state: nesting, part: rawPart });
+      const textOnly = topLevel && !lineRuns && separator !== '|' && !redirectsStdout(part);
       if (textOnly && PRINTERS.has(segmentCommand(wordsOfPart(part)))) continue;
       const searched = textOnly ? blankSearchPatterns(part) : part;
       for (const match of searched.matchAll(RUNNER_BINARY_WORD))
@@ -471,7 +607,7 @@ export const textRunnerHits = (
         const manager = match[1] ?? '';
         const runner = managerRunner({
           manager,
-          words: wordsOfPart(searched.slice((match.index ?? 0) + manager.length))
+          words: wordsAfterManager(searched.slice((match.index ?? 0) + manager.length))
         });
         if (runner !== undefined) hits.push({ runner, line });
       }

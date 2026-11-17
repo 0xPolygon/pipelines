@@ -158,7 +158,8 @@ const CODE_SUBCOMMANDS = new Set([
   'lint',
   'install-test',
   'it',
-  'rebuild'
+  'rebuild',
+  'rb'
 ]);
 const CODE_SCRIPTS = /^(?:build|test|lint|prepublishOnly|prepublish|prepare|prepack)(?::.*)?$/;
 const RUN_SUBCOMMANDS = new Set(['run', 'run-script']);
@@ -480,15 +481,24 @@ const unquoteWords = (raw: string[]): string[] => {
 /** An environment assignment that turns lifecycle scripts off for the package manager it prefixes. */
 const IGNORE_SCRIPTS_ENV = /^npm_config_ignore_scripts=["']?(?:true|1)["']?$/i;
 const IGNORE_SCRIPTS_FLAG = /^--ignore-scripts(?:=(?:true|1))?$/;
+/** Any later word that can switch the setting back on, so an install that also says so is read. */
+const IGNORE_SCRIPTS_OVERRIDE_ENV = /^npm_config_ignore_scripts=/i;
+const IGNORE_SCRIPTS_OVERRIDE_FLAG = /^(?:--no-ignore-scripts|--ignore-scripts=(?!(?:true|1)$).*)$/;
 
 /**
  * Words with `--ignore-scripts` placed after a package manager's name, for a command that carried
  * `npm_config_ignore_scripts=true` in its environment: the install then reads no lifecycle script.
  */
-const withIgnoreScripts = (words: string[]): string[] => {
+const withIgnoreScripts = ({
+  words,
+  overridden
+}: {
+  words: string[];
+  overridden: boolean;
+}): string[] => {
   const [first, ...rest] = words;
   return first !== undefined && PACKAGE_MANAGERS.has(stripVersion(basename(first)))
-    ? [first, '--ignore-scripts', ...rest]
+    ? [first, '--ignore-scripts', ...(overridden ? ['--no-ignore-scripts'] : []), ...rest]
     : words;
 };
 
@@ -501,6 +511,7 @@ const commandWords = (segment: string): string[] => {
     .filter((token) => token !== '');
   let index = 0;
   let ignoreScripts = false;
+  let overridden = false;
   while (index < raw.length) {
     const token = raw[index] ?? '';
     if (SHELL_KEYWORDS.has(token)) {
@@ -509,13 +520,14 @@ const commandWords = (segment: string): string[] => {
     }
     if (ASSIGNMENT.test(token)) {
       if (IGNORE_SCRIPTS_ENV.test(token)) ignoreScripts = true;
+      else if (IGNORE_SCRIPTS_OVERRIDE_ENV.test(token)) overridden = true;
       index = skipAssignment({ words: raw, index });
       continue;
     }
     break;
   }
   const words = unquoteWords(raw.slice(index));
-  return ignoreScripts ? withIgnoreScripts(words) : words;
+  return ignoreScripts ? withIgnoreScripts({ words, overridden }) : words;
 };
 
 const basename = (word: string): string => word.replace(/^.*\//, '');
@@ -535,6 +547,7 @@ const wrappedCommand = ({ name, rest }: { name: string; rest: string[] }): strin
   let index = 0;
   let sawDuration = false;
   let ignoreScripts = false;
+  let overridden = false;
   while (index < rest.length) {
     const token = rest[index] ?? '';
     if (token === '--') {
@@ -550,6 +563,7 @@ const wrappedCommand = ({ name, rest }: { name: string; rest: string[] }): strin
       ASSIGNMENT.test(token)
     ) {
       if (IGNORE_SCRIPTS_ENV.test(token)) ignoreScripts = true;
+      else if (IGNORE_SCRIPTS_OVERRIDE_ENV.test(token)) overridden = true;
       index = skipAssignment({ words: rest, index });
       continue;
     }
@@ -561,7 +575,7 @@ const wrappedCommand = ({ name, rest }: { name: string; rest: string[] }): strin
     break;
   }
   const words = rest.slice(index);
-  return ignoreScripts ? withIgnoreScripts(words) : words;
+  return ignoreScripts ? withIgnoreScripts({ words, overridden }) : words;
 };
 
 /** `bash -c "<command>"`: the words after the `-c` flag are the command it runs. */
@@ -676,6 +690,11 @@ const onlyReportsVersion = (rest: string[]): boolean =>
 /** Install-style subcommands that add to the repository's dependencies, so their lifecycle hooks can run. */
 const INSTALL_SUBCOMMANDS = new Set(['install', 'i', 'ci', 'add', 'install-test', 'it']);
 const TEST_SUBCOMMANDS = new Set(['test', 't', 'install-test', 'it']);
+/**
+ * `rebuild` runs the install lifecycle scripts of every workspace package, like an install, and does not
+ * honour the `--ignore-scripts` of an earlier install: `npm install --ignore-scripts && npm rebuild` runs them.
+ */
+const REBUILD_SUBCOMMANDS = new Set(['rebuild', 'rb']);
 
 const firstWord = (tokens: string[]): string | undefined => tokens.find((t) => !t.startsWith('-'));
 
@@ -733,6 +752,7 @@ const classifyManager = ({
   const words: string[] = [];
   let global = false;
   let ignoreScripts = false;
+  let overridden = false;
   let subIndex = -1;
   for (let index = 0; index < rest.length; index += 1) {
     const token = rest[index] ?? '';
@@ -741,6 +761,7 @@ const classifyManager = ({
       if (WIDE_FLAGS.has(flag) || (flag === '-w' && manager === 'npm') || flag === '--workspace')
         wide = true;
       if (IGNORE_SCRIPTS_FLAG.test(token)) ignoreScripts = true;
+      if (IGNORE_SCRIPTS_OVERRIDE_FLAG.test(token)) overridden = true;
       if (flag === '-g' || flag === '--global' || (flag === '--location' && inline === 'global'))
         global = true;
       let value = inline;
@@ -755,6 +776,8 @@ const classifyManager = ({
     words.push(token);
   }
   const [sub, second, third] = words;
+  // An install that says both "ignore scripts" and "do not" is read: it is not known which one wins.
+  if (overridden) ignoreScripts = false;
   const where = [...flagDirs, ...dirs];
   const isPublish = publishWordTest(manager);
   if (sub === undefined) {
@@ -814,8 +837,13 @@ const classifyManager = ({
     const hooks = [
       ...(TEST_SUBCOMMANDS.has(sub) ? ['test'] : []),
       // `--ignore-scripts` (or its environment form) means the install runs no lifecycle script at all.
-      ...(INSTALL_SUBCOMMANDS.has(sub) && !ignoreScripts ? ['install', 'prepare'] : []),
-      ...(!INSTALL_SUBCOMMANDS.has(sub) && !TEST_SUBCOMMANDS.has(sub) && manager !== 'npm'
+      ...((INSTALL_SUBCOMMANDS.has(sub) || REBUILD_SUBCOMMANDS.has(sub)) && !ignoreScripts
+        ? ['install', 'prepare']
+        : []),
+      ...(!INSTALL_SUBCOMMANDS.has(sub) &&
+      !TEST_SUBCOMMANDS.has(sub) &&
+      !REBUILD_SUBCOMMANDS.has(sub) &&
+      manager !== 'npm'
         ? [sub]
         : [])
     ];
@@ -826,7 +854,7 @@ const classifyManager = ({
         name,
         optional: true,
         dirs: where,
-        wide: wide || INSTALL_SUBCOMMANDS.has(sub)
+        wide: wide || INSTALL_SUBCOMMANDS.has(sub) || REBUILD_SUBCOMMANDS.has(sub)
       });
     return facts;
   }

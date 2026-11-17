@@ -9394,7 +9394,8 @@ const CODE_SUBCOMMANDS = new Set([
     'lint',
     'install-test',
     'it',
-    'rebuild'
+    'rebuild',
+    'rb'
 ]);
 const CODE_SCRIPTS = /^(?:build|test|lint|prepublishOnly|prepublish|prepare|prepack)(?::.*)?$/;
 const RUN_SUBCOMMANDS = new Set(['run', 'run-script']);
@@ -9707,14 +9708,17 @@ const unquoteWords = (raw) => {
 /** An environment assignment that turns lifecycle scripts off for the package manager it prefixes. */
 const IGNORE_SCRIPTS_ENV = /^npm_config_ignore_scripts=["']?(?:true|1)["']?$/i;
 const IGNORE_SCRIPTS_FLAG = /^--ignore-scripts(?:=(?:true|1))?$/;
+/** Any later word that can switch the setting back on, so an install that also says so is read. */
+const IGNORE_SCRIPTS_OVERRIDE_ENV = /^npm_config_ignore_scripts=/i;
+const IGNORE_SCRIPTS_OVERRIDE_FLAG = /^(?:--no-ignore-scripts|--ignore-scripts=(?!(?:true|1)$).*)$/;
 /**
  * Words with `--ignore-scripts` placed after a package manager's name, for a command that carried
  * `npm_config_ignore_scripts=true` in its environment: the install then reads no lifecycle script.
  */
-const withIgnoreScripts = (words) => {
+const withIgnoreScripts = ({ words, overridden }) => {
     const [first, ...rest] = words;
     return first !== undefined && PACKAGE_MANAGERS.has(stripVersion(basename(first)))
-        ? [first, '--ignore-scripts', ...rest]
+        ? [first, '--ignore-scripts', ...(overridden ? ['--no-ignore-scripts'] : []), ...rest]
         : words;
 };
 /** Words of one command with leading shell keywords, variable assignments and wrappers removed. */
@@ -9726,6 +9730,7 @@ const commandWords = (segment) => {
         .filter((token) => token !== '');
     let index = 0;
     let ignoreScripts = false;
+    let overridden = false;
     while (index < raw.length) {
         const token = raw[index] ?? '';
         if (SHELL_KEYWORDS.has(token)) {
@@ -9735,13 +9740,15 @@ const commandWords = (segment) => {
         if (shell_commands_ASSIGNMENT.test(token)) {
             if (IGNORE_SCRIPTS_ENV.test(token))
                 ignoreScripts = true;
+            else if (IGNORE_SCRIPTS_OVERRIDE_ENV.test(token))
+                overridden = true;
             index = skipAssignment({ words: raw, index });
             continue;
         }
         break;
     }
     const words = unquoteWords(raw.slice(index));
-    return ignoreScripts ? withIgnoreScripts(words) : words;
+    return ignoreScripts ? withIgnoreScripts({ words, overridden }) : words;
 };
 const basename = (word) => word.replace(/^.*\//, '');
 const tooDeepFacts = () => ({
@@ -9758,6 +9765,7 @@ const wrappedCommand = ({ name, rest }) => {
     let index = 0;
     let sawDuration = false;
     let ignoreScripts = false;
+    let overridden = false;
     while (index < rest.length) {
         const token = rest[index] ?? '';
         if (token === '--') {
@@ -9772,6 +9780,8 @@ const wrappedCommand = ({ name, rest }) => {
             shell_commands_ASSIGNMENT.test(token)) {
             if (IGNORE_SCRIPTS_ENV.test(token))
                 ignoreScripts = true;
+            else if (IGNORE_SCRIPTS_OVERRIDE_ENV.test(token))
+                overridden = true;
             index = skipAssignment({ words: rest, index });
             continue;
         }
@@ -9783,7 +9793,7 @@ const wrappedCommand = ({ name, rest }) => {
         break;
     }
     const words = rest.slice(index);
-    return ignoreScripts ? withIgnoreScripts(words) : words;
+    return ignoreScripts ? withIgnoreScripts({ words, overridden }) : words;
 };
 /** `bash -c "<command>"`: the words after the `-c` flag are the command it runs. */
 const shellCommandString = (rest) => {
@@ -9892,6 +9902,11 @@ const onlyReportsVersion = (rest) => rest.length === 1 && ['--version', '-v', '-
 /** Install-style subcommands that add to the repository's dependencies, so their lifecycle hooks can run. */
 const INSTALL_SUBCOMMANDS = new Set(['install', 'i', 'ci', 'add', 'install-test', 'it']);
 const TEST_SUBCOMMANDS = new Set(['test', 't', 'install-test', 'it']);
+/**
+ * `rebuild` runs the install lifecycle scripts of every workspace package, like an install, and does not
+ * honour the `--ignore-scripts` of an earlier install: `npm install --ignore-scripts && npm rebuild` runs them.
+ */
+const REBUILD_SUBCOMMANDS = new Set(['rebuild', 'rb']);
 const firstWord = (tokens) => tokens.find((t) => !t.startsWith('-'));
 /** `<runner> [flags] <command ...>`: runs another command, which is repository code unless it only publishes. */
 const classifyExec = ({ rest, dirs, depth, runner }) => {
@@ -9927,6 +9942,7 @@ const classifyManager = ({ manager, rest, dirs, depth }) => {
     const words = [];
     let global = false;
     let ignoreScripts = false;
+    let overridden = false;
     let subIndex = -1;
     for (let index = 0; index < rest.length; index += 1) {
         const token = rest[index] ?? '';
@@ -9936,6 +9952,8 @@ const classifyManager = ({ manager, rest, dirs, depth }) => {
                 wide = true;
             if (IGNORE_SCRIPTS_FLAG.test(token))
                 ignoreScripts = true;
+            if (IGNORE_SCRIPTS_OVERRIDE_FLAG.test(token))
+                overridden = true;
             if (flag === '-g' || flag === '--global' || (flag === '--location' && inline === 'global'))
                 global = true;
             let value = inline;
@@ -9952,6 +9970,9 @@ const classifyManager = ({ manager, rest, dirs, depth }) => {
         words.push(token);
     }
     const [sub, second, third] = words;
+    // An install that says both "ignore scripts" and "do not" is read: it is not known which one wins.
+    if (overridden)
+        ignoreScripts = false;
     const where = [...flagDirs, ...dirs];
     const isPublish = publishWordTest(manager);
     if (sub === undefined) {
@@ -10014,8 +10035,13 @@ const classifyManager = ({ manager, rest, dirs, depth }) => {
         const hooks = [
             ...(TEST_SUBCOMMANDS.has(sub) ? ['test'] : []),
             // `--ignore-scripts` (or its environment form) means the install runs no lifecycle script at all.
-            ...(INSTALL_SUBCOMMANDS.has(sub) && !ignoreScripts ? ['install', 'prepare'] : []),
-            ...(!INSTALL_SUBCOMMANDS.has(sub) && !TEST_SUBCOMMANDS.has(sub) && manager !== 'npm'
+            ...((INSTALL_SUBCOMMANDS.has(sub) || REBUILD_SUBCOMMANDS.has(sub)) && !ignoreScripts
+                ? ['install', 'prepare']
+                : []),
+            ...(!INSTALL_SUBCOMMANDS.has(sub) &&
+                !TEST_SUBCOMMANDS.has(sub) &&
+                !REBUILD_SUBCOMMANDS.has(sub) &&
+                manager !== 'npm'
                 ? [sub]
                 : [])
         ];
@@ -10026,7 +10052,7 @@ const classifyManager = ({ manager, rest, dirs, depth }) => {
                 name,
                 optional: true,
                 dirs: where,
-                wide: wide || INSTALL_SUBCOMMANDS.has(sub)
+                wide: wide || INSTALL_SUBCOMMANDS.has(sub) || REBUILD_SUBCOMMANDS.has(sub)
             });
         return facts;
     }
@@ -10823,6 +10849,12 @@ const splitCommandParts = (line) => {
             (line[at - 1] === '>' || line[at - 1] === '<' || line[at + 1] === '>')) {
             current += char;
         }
+        else if (char === '|' && line[at + 1] === '|') {
+            // `||` is the "or" list separator, not a pipe: nothing is piped into the next command.
+            parts.push(current, '||');
+            current = '';
+            at += 1;
+        }
         else if (char === ';' || char === '&' || char === '|') {
             parts.push(current, char);
             current = '';
@@ -10890,8 +10922,12 @@ const redirectsStdout = (part) => {
 };
 /** The Claude CLI's deny-list flag, in the two spellings it has. Any other spelling is read normally. */
 const DENY_FLAG = /^--disallowed(?:Tools|-tools)(?:=|$)/;
-/** What a deny entry may not hold: anything the shell or the workflow expands before the CLI sees it. */
-const EXPANDS = /\$\(|`|\$\{/;
+/**
+ * What a deny entry may not hold: anything the shell or the workflow expands before the CLI sees it
+ * (any `$`, a backtick, process substitution), and any quote character, which can break the entry
+ * apart so that a part of it is read as shell.
+ */
+const EXPANDS = /["'`$]|<\(|>\(/;
 /** Whitespace-separated words of a text with their offsets, quoted strings kept whole. */
 const positionedWords = (text) => {
     const words = [];
@@ -10919,11 +10955,52 @@ const positionedWords = (text) => {
     }
     return words;
 };
+const LIST_FLAG = /^--(?:disallowed|allowed)(?:Tools|-tools)(?:=|$)/;
+/** Flags that take no value, so the word after one is the next argument. */
+const BOOLEAN_FLAGS = new Set(['-p', '--print', '-c', '--continue', '--verbose']);
+/**
+ * True when the deny-list flag at `index` is read by the Claude CLI as a flag, and not as the value of the
+ * option before it (`--system-prompt --disallowedTools "Bash(npx x)"` makes the entry a prompt) or as text
+ * after `--`. Fail closed: only a flag right after `claude`, after another deny or allow list, or after a
+ * boolean flag (with at most the prompt word between) is known to be one.
+ */
+const flagIsAtArgumentPosition = ({ segment, words, index }) => {
+    const at = (position) => {
+        const word = words[position];
+        return word === undefined ? '' : segment.slice(word.start, word.end);
+    };
+    const isCommand = (word) => word.replace(/^.*\//, '') === 'claude';
+    const startsArguments = (word) => isCommand(word) || BOOLEAN_FLAGS.has(word);
+    const checked = (position) => {
+        if (position <= 0)
+            return true;
+        const before = at(position - 1);
+        if (startsArguments(before))
+            return true;
+        if (LIST_FLAG.test(before) && before.endsWith('='))
+            return false;
+        if (/^--(?:disallowed|allowed)(?:Tools|-tools)=./.test(before))
+            return checked(position - 1);
+        if (before.startsWith('-'))
+            return false;
+        // A word that is not a flag is the value of the list flag before it, or the prompt after `claude -p`.
+        const earlier = at(position - 2);
+        if (/^--(?:disallowed|allowed)(?:Tools|-tools)$/.test(earlier))
+            return checked(position - 2);
+        return startsArguments(earlier);
+    };
+    return checked(index);
+};
 /** Ranges of the balanced `Bash(…)` entries in a deny-list argument, or undefined when any is not safe to skip. */
 const denyEntries = (value) => {
     const ranges = [];
     let from = value.indexOf('Bash(');
     while (from >= 0) {
+        // An entry starts at the start of the argument, after a comma or after whitespace: `mcp__x__Bash(…)` is not one.
+        if (from > 0 && !/[,\s]/.test(value[from - 1] ?? '')) {
+            from = value.indexOf('Bash(', from + 1);
+            continue;
+        }
         let depth = 0;
         let end = -1;
         for (let at = from + 4; at < value.length; at += 1) {
@@ -10960,7 +11037,7 @@ const blankDeniedTools = (segment) => {
         if (word === undefined)
             continue;
         const flag = DENY_FLAG.exec(segment.slice(word.start, word.end));
-        if (flag === null)
+        if (flag === null || !flagIsAtArgumentPosition({ segment, words, index }))
             continue;
         let start;
         let end;
@@ -10989,6 +11066,87 @@ const blankDeniedTools = (segment) => {
 };
 /** The words of a command part with shell syntax kept in them, split on whitespace. */
 const wordsOfPart = (part) => part.split(/\s+/).filter((word) => word !== '');
+/** Trims quote characters from both ends of a word, by index so the cost is linear in its length. */
+const unquoted = (word) => {
+    let start = 0;
+    let end = word.length;
+    while (start < end && repo_scan_QUOTES.has(word[start] ?? ''))
+        start += 1;
+    while (end > start && repo_scan_QUOTES.has(word[end - 1] ?? ''))
+        end -= 1;
+    return word.slice(start, end);
+};
+const repo_scan_QUOTES = new Set(['"', "'", '`']);
+/**
+ * The words that follow a package manager's name in text that may be a command line or code that builds
+ * one: a `@version` glued to the name (`pnpm@9.1.0`) is skipped, and quotes, commas and brackets around
+ * words are dropped, so `["npm","exec","foo"]` and `('pnpm', ['dlx', 'foo'])` read as `npm exec foo`.
+ */
+const wordsAfterManager = (text) => {
+    const glued = text.startsWith('@') ? text.search(/[\s"',[\]()]|$/) : 0;
+    return text
+        .slice(glued)
+        .split(/[\s,[\]]+/)
+        .map(unquoted)
+        .filter((word) => word !== '');
+};
+const OPEN_WORDS = new Set(['{', '(', 'if', 'while', 'until', 'for', 'select']);
+const CLOSE_WORDS = new Set(['}', ')', 'fi', 'done']);
+const NEUTRAL_WORDS = new Set(['then', 'else', 'elif', 'do', '!', 'time']);
+/** Reads one command part in order, moves the nesting state past it, and says whether its command word is at the top level. */
+const enterPart = ({ state, part }) => {
+    const words = wordsOfPart(part);
+    let index = 0;
+    for (; index < words.length; index += 1) {
+        let word = words[index] ?? '';
+        while (word.startsWith('(')) {
+            state.depth += 1;
+            word = word.slice(1);
+        }
+        words[index] = word;
+        if (word === '' || NEUTRAL_WORDS.has(word) || /^[A-Za-z_][A-Za-z0-9_]*=/.test(word)) {
+            // An assignment may open a substitution on this line (`X=$(`): its characters are counted below.
+            if (word !== '' && /^[A-Za-z_]/.test(word) && !NEUTRAL_WORDS.has(word))
+                break;
+            continue;
+        }
+        if (word === 'case')
+            state.cases += 1;
+        else if (word === 'esac')
+            state.cases = Math.max(0, state.cases - 1);
+        else if (OPEN_WORDS.has(word))
+            state.depth += 1;
+        else if (CLOSE_WORDS.has(word))
+            state.depth = Math.max(0, state.depth - 1);
+        else
+            break;
+    }
+    const topLevel = state.depth === 0 && state.cases === 0 && !state.backtick;
+    // Parentheses and backticks outside quotes in the rest of the part. Inside a `case` the `)` of every
+    // pattern would unbalance the count, and nothing in a `case` is excused anyway.
+    let quote = '';
+    const rest = words.slice(index).join(' ');
+    for (let at = 0; at < rest.length; at += 1) {
+        const char = rest[at] ?? '';
+        if (quote !== '') {
+            if (char === '\\' && quote === '"')
+                at += 1;
+            else if (char === quote)
+                quote = '';
+        }
+        else if (char === '\\')
+            at += 1;
+        else if (char === '"' || char === "'")
+            quote = char;
+        else if (char === '`')
+            state.backtick = !state.backtick;
+        else if (state.cases === 0 && char === '(')
+            state.depth += 1;
+        else if (state.cases === 0 && char === ')')
+            state.depth = Math.max(0, state.depth - 1);
+    }
+    return topLevel;
+};
 /**
  * Runner named by a package manager's words: after the manager's name come any number of flags (with
  * or without a value) and then the subcommand. A word after a flag that has no `=` is read both ways,
@@ -11050,6 +11208,7 @@ const runnerToolName = (token) => toolName(token).replace(/^.*\//, '');
  */
 const textRunnerHits = (text, { claudeArgs = false } = {}) => {
     const hits = [];
+    const nesting = { depth: 0, cases: 0, backtick: false };
     for (const line of normalizeShell(text).split('\n')) {
         const lineRuns = RUNNER_LINE_RUNS.test(line);
         const parts = splitCommandParts(claudeArgs ? blankDeniedTools(line) : line);
@@ -11058,7 +11217,8 @@ const textRunnerHits = (text, { claudeArgs = false } = {}) => {
             // Arguments of a command whose program word is `claude` (or a path ending in `/claude`).
             const part = segmentCommand(wordsOfPart(rawPart)) === 'claude' ? blankDeniedTools(rawPart) : rawPart;
             const separator = parts[at + 1];
-            const textOnly = !lineRuns && separator !== '|' && !redirectsStdout(part);
+            const topLevel = enterPart({ state: nesting, part: rawPart });
+            const textOnly = topLevel && !lineRuns && separator !== '|' && !redirectsStdout(part);
             if (textOnly && PRINTERS.has(segmentCommand(wordsOfPart(part))))
                 continue;
             const searched = textOnly ? blankSearchPatterns(part) : part;
@@ -11068,7 +11228,7 @@ const textRunnerHits = (text, { claudeArgs = false } = {}) => {
                 const manager = match[1] ?? '';
                 const runner = managerRunner({
                     manager,
-                    words: wordsOfPart(searched.slice((match.index ?? 0) + manager.length))
+                    words: wordsAfterManager(searched.slice((match.index ?? 0) + manager.length))
                 });
                 if (runner !== undefined)
                     hits.push({ runner, line });
