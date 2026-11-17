@@ -218,6 +218,8 @@ skips `publish` and is tagged by `finalize` without any approval.
   `--ignore-scripts`. Packing happens with nothing in the workspace but the
   repository: the workflow's own checkout is removed first, and the pack step
   fails if a tarball contains a `.pipelines/` path.
+- **`ignore` (3.x).** On `@changesets/cli` 3.x, packages listed under `ignore` in
+  `.changeset/config.json` are neither packed nor tagged; on 2.x `ignore` does not change the pack.
 - **`npm-publish` environment.** Create it in the repository with required
   reviewers, "prevent self-review" on, administrator bypass off, and
   deployment branches limited to the default branch. The workflow does not

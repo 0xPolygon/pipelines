@@ -325,6 +325,7 @@ check('the git-tag step holds no secret or app token in env or with', !/secrets\
 check('the tag-and-release step runs only on major 3, after the token mint and before the tag check and the Latest correction, with its inputs through env', tagRel > mint && tagRel > act && norm(fin[tagRel]?.if) === "steps.cli.outputs.major == '3'" && fin[tagRel]?.with?.['github-token'] === '${{ steps.app-token.outputs.token }}' && fin[tagRel]?.with?.retries === 3 && !/\$\{\{/.test(String(fin[tagRel]?.with?.script ?? '')) && /tag-collect\.outputs\.tags-file/.test(fin[tagRel]?.env?.TAGS_FILE ?? ''), json(fin[tagRel]));
 const tagCheck = fin.findIndex((st) => stepUses(st)?.endsWith('/check-release-tags'));
 check('finalize checks release tags after both tagging arms and before the Latest correction', tagCheck > act && tagCheck > tagRel && tagCheck < fix, `check-release-tags at ${tagCheck}, correction at ${fix}`);
+check('the tag check receives the detected major and the tagging step output as inputs, with no expression in a script', fin[tagCheck]?.with?.major === '${{ steps.cli.outputs.major }}' && /^\$\{\{ steps\.tag-collect\.outputs\.tags-file \}\}$/.test(String(fin[tagCheck]?.with?.['expected-tags-file'] ?? '')), json(fin[tagCheck]?.with));
 // The end-state check runs on every run; only the artifact download depends
 // on the publish job (the artifact exists only when publish ran).
 const tagDl = fin.map((st, i) => ({ st, i })).filter(({ st, i }) => stepUses(st) === 'actions/download-artifact' && i < tagCheck).pop();

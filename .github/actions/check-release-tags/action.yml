@@ -9,13 +9,29 @@ description: >
   API. A manifest tag is accepted as `<name>@<version>`, or as `v<version>`
   when the manifest has one entry and it is the repository's root package. A
   run with nothing to tag passes, whether or not a publish ran. Fails with one
-  error listing what is missing. Safe to re-run: it only reads.
+  error listing what is missing. Safe to re-run: it only reads. On
+  @changesets/cli 3.x it also checks the expected-tags list the tagging step
+  wrote (the tag every non-ignored package's current version should have),
+  validating it strictly and failing on any malformed entry or missing tag.
 
 inputs:
   directory:
     description: >
       Directory holding the manifest.json written by the pack action. Leave
       empty when no publish ran; only the tags at HEAD are then checked.
+    required: false
+    default: ''
+  major:
+    description: >
+      The resolved @changesets/cli major ('2' or '3'). On '3' the expected-tags
+      list is read from `expected-tags-file` and required. Empty or '2' checks
+      the manifest and the tags at HEAD only.
+    required: false
+    default: ''
+  expected-tags-file:
+    description: >
+      JSON file written by the 3.x tagging step, holding the `expected` list.
+      Read as data only. Required when `major` is '3'.
     required: false
     default: ''
   token:
@@ -33,4 +49,6 @@ runs:
         ACTION_PATH: ${{ github.action_path }}
         TARBALL_DIRECTORY: ${{ inputs.directory }}
         GITHUB_TOKEN: ${{ inputs.token }}
+        CLI_MAJOR: ${{ inputs.major }}
+        EXPECTED_TAGS_FILE: ${{ inputs.expected-tags-file }}
       run: node "$ACTION_PATH/check-release-tags.mjs"

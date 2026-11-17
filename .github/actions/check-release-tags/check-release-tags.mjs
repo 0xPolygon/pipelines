@@ -15,6 +15,14 @@
 // changelog section and creates none otherwise. A 404 means missing; any other API failure throws and
 // is never read as "missing". Only reads, so a re-run after the tags and
 // Releases exist succeeds.
+//
+// On @changesets/cli 3.x the set to check also includes an expected list: the
+// tags the repository's current package versions should have, written by the
+// tagging step from the repository's config (see collect-tags.mjs), so a CLI
+// that tagged nothing cannot pass as "nothing to tag". The list is read as
+// data and validated strictly; any malformed entry fails the check. Each
+// expected tag must exist on the remote, at any commit: a package released in
+// an earlier run keeps its earlier tag. The 2.x arm is unchanged.
 
 import { spawnSync } from 'node:child_process';
 import { existsSync, readFileSync } from 'node:fs';
@@ -137,6 +145,62 @@ export async function findMissing({
   return missing;
 }
 
+const NPM_NAME = /^(?:@[a-z0-9~-][a-z0-9._~-]*\/)?[a-z0-9~-][a-z0-9._~-]*$/;
+const SEMVER =
+  /^(0|[1-9]\d*)\.(0|[1-9]\d*)\.(0|[1-9]\d*)(?:-(?:0|[1-9]\d*|\d*[a-zA-Z-][0-9a-zA-Z-]*)(?:\.(?:0|[1-9]\d*|\d*[a-zA-Z-][0-9a-zA-Z-]*))*)?(?:\+[0-9a-zA-Z-]+(?:\.[0-9a-zA-Z-]+)*)?$/;
+const EXPECTED_KEYS = ['directory', 'name', 'tag', 'version'];
+const MAX_EXPECTED = 5000;
+
+/**
+ * Reads the expected-tags list from the tags file written by the tagging step
+ * and validates every entry: exactly `name`, `version`, `tag` and `directory`;
+ * an npm package name, a semver version, a tag that is `<name>@<version>` or
+ * `v<version>`, and no duplicate tag. Throws on anything else, including a
+ * missing file or list.
+ */
+export function readExpectedTags(file) {
+  let parsed;
+  try {
+    parsed = JSON.parse(readFileSync(resolve(file), 'utf8'));
+  } catch (err) {
+    throw new Error(`Could not read the expected tags file: ${err.message}`);
+  }
+  const list = parsed?.expected;
+  if (!Array.isArray(list) || list.length > MAX_EXPECTED) {
+    throw new Error('The expected tags file has no valid "expected" list.');
+  }
+  const seen = new Set();
+  for (const entry of list) {
+    const keys =
+      entry !== null && typeof entry === 'object' && !Array.isArray(entry)
+        ? Object.keys(entry).sort()
+        : [];
+    const valid =
+      keys.join() === EXPECTED_KEYS.join() &&
+      EXPECTED_KEYS.every((key) => typeof entry[key] === 'string') &&
+      entry.name.length <= 214 &&
+      NPM_NAME.test(entry.name) &&
+      SEMVER.test(entry.version) &&
+      (entry.tag === `${entry.name}@${entry.version}` || entry.tag === `v${entry.version}`) &&
+      entry.directory !== '' &&
+      !seen.has(entry.tag);
+    if (!valid) {
+      throw new Error(`The expected tags file has a malformed entry: ${JSON.stringify(entry)}`);
+    }
+    seen.add(entry.tag);
+  }
+  return list;
+}
+
+/** Expected tags with no tag on the remote (at any commit). */
+export async function findMissingExpected({ expected, apiUrl, repository, token, fetchImpl }) {
+  const missing = [];
+  for (const { tag } of expected) {
+    if (!(await tagExists({ apiUrl, repository, tag, token, fetchImpl }))) missing.push(tag);
+  }
+  return missing;
+}
+
 function defaultRun(command, args, { cwd } = {}) {
   const result = spawnSync(command, args, { encoding: 'utf8', cwd, maxBuffer: 64 * 1024 * 1024 });
   return { status: result.status ?? 1, stdout: result.stdout ?? '' };
@@ -249,7 +313,13 @@ export async function main({
     }
   }
   const apiUrl = env.GITHUB_API_URL || 'https://api.github.com';
+  const major = env.CLI_MAJOR ?? '';
+  if (!['', '2', '3'].includes(major)) {
+    log(`::error::CLI_MAJOR must be empty, 2 or 3, got "${major}"`);
+    return 1;
+  }
   try {
+    const expected = major === '3' ? readExpectedTags(env.EXPECTED_TAGS_FILE ?? '') : [];
     const workspace = env.GITHUB_WORKSPACE || process.cwd();
     const manifest =
       directory && existsSync(resolve(directory, 'manifest.json')) ? readManifest(directory) : [];
@@ -262,7 +332,7 @@ export async function main({
         ? []
         : [{ tag, entry: { name: pkg.name, directory: pkg.directory } }];
     });
-    if (manifest.length === 0 && tags.length === 0) {
+    if (manifest.length === 0 && tags.length === 0 && expected.length === 0) {
       log('Nothing to tag: no published packages and no tags at HEAD');
       return 0;
     }
@@ -290,16 +360,25 @@ export async function main({
     })) {
       missing.add(item);
     }
+    for (const tag of await findMissingExpected({
+      expected,
+      apiUrl,
+      repository,
+      token,
+      fetchImpl
+    })) {
+      missing.add(tag);
+    }
     if (missing.size > 0) {
       log(
         `::error title=Release tags missing::No git tag or GitHub Release found for: ${[...missing].join(', ')}. ` +
           "Every package published or tagged by this run needs a tag at the run's commit and, where a " +
-          'changelog exists, a GitHub Release. Re-running the job is safe: it only reads.'
+          'changelog exists, a GitHub Release; on @changesets/cli 3.x every package that should be tagged needs its tag. Re-running the job is safe: it only reads.'
       );
       return 1;
     }
     log(
-      `All ${manifest.length} published package(s) and ${tags.length} tag(s) at HEAD have a release tag (and a GitHub Release where a changelog exists)`
+      `All ${manifest.length} published package(s), ${tags.length} tag(s) at HEAD and ${expected.length} expected tag(s) have a release tag (and a GitHub Release where a changelog exists)`
     );
     return 0;
   } catch (err) {

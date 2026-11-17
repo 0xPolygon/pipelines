@@ -359,3 +359,150 @@ describe('check-release-tags', () => {
     });
   });
 });
+
+describe('expected tags (@changesets/cli 3.x arm)', () => {
+  const noGit = () => ({ status: 1, stdout: '' });
+  const entry = (name, version, extra = {}) => ({
+    name,
+    version,
+    tag: `${name}@${version}`,
+    directory: `packages/${name.replace(/^@s\//, '')}`,
+    ...extra
+  });
+  const expectedFile = (expected) => {
+    const file = join(dir, 'tags.json');
+    writeFileSync(file, JSON.stringify({ tags: [], expected }));
+    return file;
+  };
+  const runWith = ({ major = '3', file, fetchImpl, withManifest }) => {
+    const logs = [];
+    const env = {
+      GITHUB_REPOSITORY: 'o/r',
+      GITHUB_TOKEN: 't',
+      GITHUB_WORKSPACE: dir,
+      CLI_MAJOR: major
+    };
+    if (file !== undefined) env.EXPECTED_TAGS_FILE = file;
+    if (withManifest) env.TARBALL_DIRECTORY = dir;
+    return main({ env, fetchImpl, run: noGit, log: (m) => logs.push(m) }).then((code) => ({
+      code,
+      logs
+    }));
+  };
+
+  it('fails a tag-only private caller whose CLI created no tags (empty manifest, no local tags)', async () => {
+    writeManifest([]);
+    const { code, logs } = await runWith({
+      file: expectedFile([entry('@s/priv', '1.0.0')]),
+      fetchImpl: fakeFetch().fetchImpl,
+      withManifest: true
+    });
+    assert.equal(code, 1);
+    assert.match(logs.join('\n'), /Release tags missing.*@s\/priv@1\.0\.0/);
+  });
+
+  it('passes when every expected tag is on the remote, at any commit', async () => {
+    const { code, logs } = await runWith({
+      file: expectedFile([entry('@s/a', '1.0.0'), entry('b', '2.0.0')]),
+      fetchImpl: fakeFetch({ tags: ['@s/a@1.0.0', 'b@2.0.0'] }).fetchImpl
+    });
+    assert.equal(code, 0);
+    assert.match(logs.join('\n'), /2 expected tag/);
+  });
+
+  it('reports every missing expected tag together with other missing tags', async () => {
+    writeManifest([{ name: 'm', version: '1.0.0' }]);
+    const { code, logs } = await runWith({
+      file: expectedFile([entry('@s/a', '1.0.0'), entry('@s/b', '1.0.0')]),
+      fetchImpl: fakeFetch({ tags: ['@s/a@1.0.0'] }).fetchImpl,
+      withManifest: true
+    });
+    assert.equal(code, 1);
+    const message = logs.join('\n');
+    assert.match(message, /m@1\.0\.0/);
+    assert.match(message, /@s\/b@1\.0\.0/);
+    assert.doesNotMatch(message, /@s\/a@1\.0\.0/);
+  });
+
+  it('accepts an empty expected list as nothing to tag', async () => {
+    const { code } = await runWith({
+      file: expectedFile([]),
+      fetchImpl: fakeFetch().fetchImpl
+    });
+    assert.equal(code, 0);
+  });
+
+  it('accepts the v<version> tag form for a root package entry', async () => {
+    const { code } = await runWith({
+      file: expectedFile([{ ...entry('root', '1.2.3'), tag: 'v1.2.3', directory: '.' }]),
+      fetchImpl: fakeFetch({ tags: ['v1.2.3'] }).fetchImpl
+    });
+    assert.equal(code, 0);
+  });
+
+  it('the 2.x arm and an empty major ignore the expected list, even a missing file', async () => {
+    const file = expectedFile([entry('@s/priv', '1.0.0')]);
+    for (const major of ['2', '']) {
+      for (const f of [file, join(dir, 'absent.json'), undefined]) {
+        const { code } = await runWith({ major, file: f, fetchImpl: fakeFetch().fetchImpl });
+        assert.equal(code, 0);
+      }
+    }
+  });
+
+  it('fails closed on 3.x without a readable expected list', async () => {
+    const bad = join(dir, 'bad.json');
+    writeFileSync(bad, '{not json');
+    const noList = join(dir, 'nolist.json');
+    writeFileSync(noList, JSON.stringify({ tags: [] }));
+    for (const file of [undefined, '', join(dir, 'absent.json'), bad, noList]) {
+      const { code, logs } = await runWith({ file, fetchImpl: fakeFetch().fetchImpl });
+      assert.equal(code, 1, String(file));
+      assert.match(logs.join('\n'), /expected tags file/);
+    }
+  });
+
+  it('fails closed on any malformed expected entry', async () => {
+    const good = entry('@s/a', '1.0.0');
+    const bad = [
+      { ...good, name: 'UPPER' },
+      { ...good, name: '../x', tag: '../x@1.0.0' },
+      { ...good, version: '1.0' },
+      { ...good, version: '01.0.0', tag: '@s/a@01.0.0' },
+      { ...good, tag: '@s/a@2.0.0' },
+      { ...good, tag: 'v9.9.9' },
+      { ...good, directory: '' },
+      { ...good, directory: 7 },
+      { ...good, extra: 'x' },
+      { name: good.name, version: good.version, tag: good.tag },
+      'not an object',
+      null,
+      [good]
+    ];
+    for (const item of bad) {
+      const { code, logs } = await runWith({
+        file: expectedFile([item]),
+        fetchImpl: fakeFetch({ tags: ['@s/a@1.0.0'] }).fetchImpl
+      });
+      assert.equal(code, 1, JSON.stringify(item));
+      assert.match(logs.join('\n'), /malformed entry/);
+    }
+    const dup = await runWith({
+      file: expectedFile([good, good]),
+      fetchImpl: fakeFetch({ tags: ['@s/a@1.0.0'] }).fetchImpl
+    });
+    assert.equal(dup.code, 1);
+  });
+
+  it('fails on an API error while looking up an expected tag, and on an unknown major', async () => {
+    const api = await runWith({
+      file: expectedFile([entry('@s/a', '1.0.0')]),
+      fetchImpl: fakeFetch({ status: 500 }).fetchImpl
+    });
+    assert.equal(api.code, 1);
+    assert.match(api.logs.join('\n'), /HTTP 500/);
+    const unknown = await runWith({ major: '4', fetchImpl: fakeFetch().fetchImpl });
+    assert.equal(unknown.code, 1);
+    assert.match(unknown.logs.join('\n'), /CLI_MAJOR/);
+  });
+});

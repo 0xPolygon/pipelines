@@ -1,6 +1,9 @@
 // Part A of the 3.x finalize tagging: creates the local git tags for every
 // package that needs one and writes the list of tags it created, for the step
-// that publishes them (tag-and-release.cjs).
+// that publishes them (tag-and-release.cjs). It also writes `expected`: the
+// tags the CLI should leave for the repository's current package versions,
+// derived from the repository's config without asking `git-tag`, so the end
+// state check can tell "tagged nothing" from "nothing to tag".
 //
 // This script runs with no token in its environment and never reads one: the
 // CLI it starts loads the repository's dependency code. It only runs
@@ -11,8 +14,11 @@
 
 import { spawnSync } from 'node:child_process';
 import { mkdirSync, readFileSync, writeFileSync } from 'node:fs';
-import { dirname, relative, resolve } from 'node:path';
-import { fileURLToPath } from 'node:url';
+import { createRequire } from 'node:module';
+import { dirname, join, relative, resolve } from 'node:path';
+import { fileURLToPath, pathToFileURL } from 'node:url';
+
+const readJson = (path) => JSON.parse(readFileSync(path, 'utf8'));
 
 export function defaultRun(command, args, { env } = {}) {
   const result = spawnSync(command, args, {
@@ -51,6 +57,72 @@ function parseNdjson(text) {
     entries.push({ tag: parsed.tag, packageName: parsed.packageName });
   }
   return entries;
+}
+
+const parseMajor = (output) => {
+  const match = /^(\d+)\.\d+\.\d+/.exec(String(output).trim().split('\n').pop()?.trim() ?? '');
+  return match ? Number(match[1]) : undefined;
+};
+
+// Reads the repository's changesets config through its own installed
+// `@changesets/cli`: the config package, and the workspace reader, that CLI
+// depends on are resolved from the CLI's own package. `ignore` therefore comes
+// back expanded exactly as that CLI expands it (globs and `!` negation
+// included), with no matcher of this script's own. Only a step that holds no
+// credential runs this. Any failure throws, so a config that cannot be
+// read never packs more than the CLI would tag.
+//
+// Mirrored from npm-pack/pack-packages.mjs: each job checks out single action
+// directories, so a shared module is not reachable.
+export async function loadChangesetsContext({
+  root,
+  importModule = (file) => import(pathToFileURL(file).href)
+}) {
+  const workspace = resolve(root);
+  let cliPackagePath;
+  try {
+    cliPackagePath = createRequire(join(workspace, 'package.json')).resolve(
+      '@changesets/cli/package.json'
+    );
+  } catch (cause) {
+    throw new Error('Could not resolve the installed @changesets/cli from the repository.', {
+      cause
+    });
+  }
+  const cliRequire = createRequire(cliPackagePath);
+  const cliMajor = parseMajor(readJson(cliPackagePath).version);
+  let configModule;
+  let manypkg;
+  try {
+    configModule = await importModule(cliRequire.resolve('@changesets/config'));
+    manypkg = await importModule(cliRequire.resolve('@manypkg/get-packages'));
+  } catch (cause) {
+    throw new Error('Could not load the changesets config reader of the installed CLI.', {
+      cause
+    });
+  }
+  // `readConfig` in @changesets/config 4 returns { config, warnings, errors };
+  // `read` in earlier majors returns the config itself.
+  const readConfig = configModule.readConfig ?? configModule.read;
+  if (typeof readConfig !== 'function' || typeof manypkg.getPackages !== 'function') {
+    throw new Error('The installed @changesets/cli does not expose the expected config reader.');
+  }
+  const packages = await manypkg.getPackages(workspace);
+  const result = await readConfig(packages.rootDir, packages);
+  const wrapped =
+    result !== null && typeof result === 'object' && ('config' in result || 'errors' in result);
+  if (wrapped && Array.isArray(result.errors) && result.errors.length > 0) {
+    throw new Error(`.changeset/config.json is invalid: ${result.errors.join('; ')}`);
+  }
+  const config = wrapped ? result.config : result;
+  if (
+    !Array.isArray(config?.ignore) ||
+    !config.ignore.every((name) => typeof name === 'string') ||
+    typeof config.privatePackages?.tag !== 'boolean'
+  ) {
+    throw new Error('The changesets config reader returned an unexpected shape.');
+  }
+  return { cliMajor, config, packages };
 }
 
 // Package directories (relative to `root`) by name, from the workspace list.
@@ -107,7 +179,61 @@ export function collectTags({ run = defaultRun, ndjsonPath, root = '.' }) {
   };
 }
 
-export function main({ env = process.env, run = defaultRun, log = console.log } = {}) {
+/**
+ * The tags `changeset git-tag` leaves for the current package versions: every
+ * workspace package that is not under `ignore`, has a version, and is public
+ * (private only when `privatePackages.tag` is true), named `<name>@<version>`,
+ * or `v<version>` for the root package of a single-package repository. It is
+ * the selection `git-tag` makes in @changesets/cli 3.x (its `shouldSkipPackage`
+ * filter and tag naming), read from the same config the CLI reads.
+ */
+export function expectedTagsFor({ packages, config, root = '.' }) {
+  const single = packages.tool?.type === 'root';
+  return packages.packages
+    .filter((pkg) => {
+      const { name, version, private: isPrivate } = pkg.packageJson;
+      if (config.ignore.includes(name)) return false;
+      if (isPrivate && !config.privatePackages.tag) return false;
+      return Boolean(version);
+    })
+    .map((pkg) => {
+      const { name, version } = pkg.packageJson;
+      return {
+        name,
+        version,
+        tag: single ? `v${version}` : `${name}@${version}`,
+        directory: relative(resolve(root), resolve(pkg.dir)) || '.'
+      };
+    });
+}
+
+/** Loads the repository's CLI and returns its expected tags. 3.x only; any mismatch throws. */
+export async function expectedTags({
+  run = defaultRun,
+  root = '.',
+  loadContext = loadChangesetsContext
+}) {
+  const major = parseMajor(run('pnpm', ['exec', 'changeset', '--version']).stdout);
+  if (major !== 3) {
+    throw new Error(
+      `Expected @changesets/cli major 3 to derive the tags; found ${major ?? 'none'}.`
+    );
+  }
+  const context = await loadContext({ root });
+  if (context.cliMajor !== major) {
+    throw new Error(
+      `@changesets/cli reports major ${major} but the installed package is major ${context.cliMajor}.`
+    );
+  }
+  return expectedTagsFor({ packages: context.packages, config: context.config, root });
+}
+
+export async function main({
+  env = process.env,
+  run = defaultRun,
+  log = console.log,
+  loadContext
+} = {}) {
   const tagsFile = env.TAGS_FILE;
   if (!tagsFile) {
     log('::error::TAGS_FILE is not set');
@@ -116,7 +242,8 @@ export function main({ env = process.env, run = defaultRun, log = console.log } 
   try {
     mkdirSync(dirname(tagsFile), { recursive: true });
     const result = collectTags({ run, ndjsonPath: `${tagsFile}.ndjson` });
-    writeFileSync(tagsFile, JSON.stringify(result));
+    const expected = await expectedTags({ run, loadContext });
+    writeFileSync(tagsFile, JSON.stringify({ ...result, expected }));
     log(
       result.tags.length === 0
         ? 'Nothing to tag'
@@ -130,5 +257,5 @@ export function main({ env = process.env, run = defaultRun, log = console.log } 
 }
 
 if (process.argv[1] && resolve(process.argv[1]) === fileURLToPath(import.meta.url)) {
-  process.exit(main());
+  process.exit(await main());
 }

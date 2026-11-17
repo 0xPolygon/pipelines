@@ -521,6 +521,9 @@ jobs:
         with:
           # Empty when no publish ran (nothing was downloaded).
           directory: ${{ needs.publish.result == 'success' && format('{0}/npm-tarballs', runner.temp) || '' }}
+          major: ${{ steps.cli.outputs.major }}
+          # Empty on 2.x, where the tagging step does not run.
+          expected-tags-file: ${{ steps.tag-collect.outputs.tags-file }}
           token: ${{ github.token }}
 
       # Moves Latest off a Release that is not the highest stable version of

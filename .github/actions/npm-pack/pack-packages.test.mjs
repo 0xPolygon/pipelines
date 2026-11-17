@@ -12,12 +12,14 @@ import {
   assertPublicAccess,
   buildManifestEntry,
   discoverPackages,
+  loadChangesetsContext,
   main,
   packSelected,
   readConfigAccess,
   readPreState,
   resolveAccess,
   resolveDistTag,
+  resolveIgnoredNames,
   selectUnpublished
 } from './pack-packages.mjs';
 
@@ -496,5 +498,269 @@ describe('workspace with no matching members', () => {
       found.map((p) => p.name),
       ['r']
     );
+  });
+});
+
+describe('ignore (applies on @changesets/cli 3.x only)', () => {
+  const makeWs = ({ ignore, names }) => {
+    const root = mkdtempSync(join(tmpdir(), 'pack-ignore-'));
+    mkdirSync(join(root, '.changeset'));
+    writeFileSync(join(root, 'package.json'), JSON.stringify({ name: 'r', private: true }));
+    const config = { access: 'public' };
+    if (ignore !== undefined) config.ignore = ignore;
+    writeFileSync(join(root, '.changeset', 'config.json'), JSON.stringify(config));
+    const projects = [{ path: root }];
+    names.forEach((name, i) => {
+      const dir = join(root, 'packages', `p${i}`);
+      mkdirSync(dir, { recursive: true });
+      writeFileSync(
+        join(dir, 'package.json'),
+        JSON.stringify({ name, version: '1.0.0', publishConfig: { access: 'public' } })
+      );
+      projects.push({ path: dir });
+    });
+    return { root, listProjects: async () => projects };
+  };
+
+  // The expansions below are what @changesets/cli 3.0.3 produced for the same
+  // `ignore` entries over packages @s/alpha, @s/keep, @t/gamma and delta.
+  const cliExpansion = {
+    '["@s/*"]': ['@s/alpha', '@s/keep'],
+    '["@s/*","!@s/keep"]': ['@s/alpha'],
+    '["@t/gam*","delta"]': ['@t/gamma', 'delta']
+  };
+  const loadFor =
+    (ignore, cliMajor = 3) =>
+    async () => ({
+      cliMajor,
+      config: { ignore: cliExpansion[JSON.stringify(ignore)], privatePackages: { tag: false } }
+    });
+  const versionRun =
+    (version) =>
+    async ({ args }) => {
+      if (args[0] === 'pack') return '';
+      return args.includes('--version') ? `${version}\n` : '';
+    };
+  const packedNames = async ({ root, listProjects, ignore, version, cliMajor }) => {
+    const out = join(root, 'out');
+    const manifest = await main({
+      root,
+      env: { PACK_OUT_DIR: out },
+      listProjects,
+      lookupVersions: async () => null,
+      listEntries: async () => ['package/package.json'],
+      loadContext: loadFor(ignore, cliMajor),
+      run: async (call) => {
+        if (call.args[0] === 'pack') {
+          const file = `${call.cwd.split('/').pop()}-1.0.0.tgz`;
+          writeFileSync(join(out, file), 'x');
+          return `${file}\n`;
+        }
+        return versionRun(version)(call);
+      }
+    });
+    return manifest.map((entry) => entry.name);
+  };
+  const names = ['@s/alpha', '@s/keep', '@t/gamma', 'delta', 'plain'];
+
+  it('an ignored public package is not packed on 3.x, by exact name and by glob', async () => {
+    const ignore = ['@t/gam*', 'delta'];
+    const ws = makeWs({ ignore, names });
+    assert.deepEqual(await packedNames({ ...ws, ignore, version: '3.0.3' }), [
+      '@s/alpha',
+      '@s/keep',
+      'plain'
+    ]);
+  });
+
+  it('a scope glob ignores every package in the scope on 3.x', async () => {
+    const ignore = ['@s/*'];
+    const ws = makeWs({ ignore, names });
+    assert.deepEqual(await packedNames({ ...ws, ignore, version: '3.0.3' }), [
+      '@t/gamma',
+      'delta',
+      'plain'
+    ]);
+  });
+
+  it('a negated entry keeps the negated package on 3.x', async () => {
+    const ignore = ['@s/*', '!@s/keep'];
+    const ws = makeWs({ ignore, names });
+    assert.deepEqual(await packedNames({ ...ws, ignore, version: '3.0.3' }), [
+      '@s/keep',
+      '@t/gamma',
+      'delta',
+      'plain'
+    ]);
+  });
+
+  it('2.x still packs an ignored public package, because 2.x publish does not skip it', async () => {
+    const ignore = ['@s/*'];
+    const ws = makeWs({ ignore, names });
+    let loaded = false;
+    const out = join(ws.root, 'out');
+    const manifest = await main({
+      root: ws.root,
+      env: { PACK_OUT_DIR: out },
+      listProjects: ws.listProjects,
+      lookupVersions: async () => null,
+      listEntries: async () => ['package/package.json'],
+      loadContext: async () => {
+        loaded = true;
+        return loadFor(ignore)();
+      },
+      run: async (call) => {
+        if (call.args[0] === 'pack') {
+          const file = `${call.cwd.split('/').pop()}-1.0.0.tgz`;
+          writeFileSync(join(out, file), 'x');
+          return `${file}\n`;
+        }
+        return versionRun('2.30.0')(call);
+      }
+    });
+    assert.equal(manifest.length, names.length);
+    assert.equal(loaded, false);
+  });
+
+  it('no ignore key and an empty ignore list pack as before without reading the CLI', async () => {
+    for (const ignore of [undefined, []]) {
+      const ws = makeWs({ ignore, names: ['a', 'b'] });
+      const out = join(ws.root, 'out');
+      const manifest = await main({
+        root: ws.root,
+        env: { PACK_OUT_DIR: out },
+        listProjects: ws.listProjects,
+        lookupVersions: async () => null,
+        listEntries: async () => ['package/package.json'],
+        loadContext: async () => assert.fail('the CLI config must not be read'),
+        run: async (call) => {
+          assert.equal(call.args.includes('--version'), false);
+          if (call.args[0] !== 'pack') return '';
+          const file = `${call.cwd.split('/').pop()}-1.0.0.tgz`;
+          writeFileSync(join(out, file), 'x');
+          return `${file}\n`;
+        }
+      });
+      assert.equal(manifest.length, 2);
+    }
+  });
+
+  it('fails when the CLI major cannot be determined or disagrees with the installed package', async () => {
+    const ws = makeWs({ ignore: ['@s/*'], names: ['a'] });
+    await assert.rejects(
+      resolveIgnoredNames({ root: ws.root, run: async () => '', loadContext: loadFor(['@s/*']) }),
+      /Could not determine the version/
+    );
+    await assert.rejects(
+      resolveIgnoredNames({
+        root: ws.root,
+        run: versionRun('3.0.3'),
+        loadContext: loadFor(['@s/*'], 2)
+      }),
+      /reports major 3 but the installed package is major 2/
+    );
+    await assert.rejects(
+      resolveIgnoredNames({ root: ws.root, run: versionRun('4.0.0') }),
+      /not supported/
+    );
+  });
+
+  it('fails when the CLI config cannot be loaded', async () => {
+    const ws = makeWs({ ignore: ['@s/*'], names: ['a'] });
+    await assert.rejects(
+      resolveIgnoredNames({ root: ws.root, run: versionRun('3.0.3') }),
+      /Could not resolve the installed @changesets\/cli/
+    );
+    await assert.rejects(
+      resolveIgnoredNames({
+        root: ws.root,
+        run: versionRun('3.0.3'),
+        loadContext: async () => {
+          throw new Error('read failed');
+        }
+      }),
+      /read failed/
+    );
+  });
+
+  describe('loadChangesetsContext', () => {
+    const writePackage = (dir, name, source, extra = {}) => {
+      mkdirSync(dir, { recursive: true });
+      writeFileSync(
+        join(dir, 'package.json'),
+        JSON.stringify({
+          name,
+          version: '1.0.0',
+          type: 'module',
+          exports: { '.': './index.js', './package.json': './package.json' },
+          ...extra
+        })
+      );
+      writeFileSync(join(dir, 'index.js'), source);
+    };
+    // A CLI package on disk whose own dependencies provide the config reader,
+    // so the loader resolves them from the CLI, not from the repository.
+    const fakeCli = ({ version, configSource }) => {
+      const root = mkdtempSync(join(tmpdir(), 'pack-cli-'));
+      writeFileSync(join(root, 'package.json'), JSON.stringify({ name: 'r', private: true }));
+      const cli = join(root, 'node_modules', '@changesets', 'cli');
+      writePackage(cli, '@changesets/cli', 'export {};', { version });
+      writePackage(
+        join(cli, 'node_modules', '@changesets', 'config'),
+        '@changesets/config',
+        configSource
+      );
+      writePackage(
+        join(cli, 'node_modules', '@manypkg', 'get-packages'),
+        '@manypkg/get-packages',
+        `export const getPackages = async (dir) => ({ rootDir: dir, packages: [] });`
+      );
+      return root;
+    };
+
+    it('unwraps the { config, warnings, errors } result of @changesets/config 4', async () => {
+      const root = fakeCli({
+        version: '3.0.3',
+        configSource: `export const readConfig = async () => ({ config: { ignore: ['@s/alpha'], privatePackages: { version: true, tag: true } }, warnings: [] });`
+      });
+      const context = await loadChangesetsContext({ root });
+      assert.equal(context.cliMajor, 3);
+      assert.deepEqual(context.config.ignore, ['@s/alpha']);
+    });
+
+    it('accepts the bare config returned by `read` in earlier majors', async () => {
+      const root = fakeCli({
+        version: '2.30.0',
+        configSource: `export const read = async () => ({ ignore: ['a'], privatePackages: { version: false, tag: false } });`
+      });
+      const context = await loadChangesetsContext({ root });
+      assert.equal(context.cliMajor, 2);
+      assert.deepEqual(context.config.ignore, ['a']);
+    });
+
+    it('fails on config errors, an unexpected shape, or a missing reader', async () => {
+      const bad = {
+        errors: `export const readConfig = async () => ({ errors: ['bad ignore'], warnings: [] });`,
+        shape: `export const readConfig = async () => ({ config: { ignore: 'x' }, warnings: [] });`,
+        throws: `export const readConfig = async () => { throw new Error('boom'); };`,
+        none: `export const other = 1;`
+      };
+      const expected = {
+        errors: /config.json is invalid: bad ignore/,
+        shape: /unexpected shape/,
+        throws: /boom/,
+        none: /does not expose/
+      };
+      for (const [key, configSource] of Object.entries(bad)) {
+        const root = fakeCli({ version: '3.0.3', configSource });
+        await assert.rejects(loadChangesetsContext({ root }), expected[key]);
+      }
+    });
+
+    it('fails when the CLI cannot be resolved from the repository', async () => {
+      const root = mkdtempSync(join(tmpdir(), 'pack-nocli-'));
+      writeFileSync(join(root, 'package.json'), JSON.stringify({ name: 'r' }));
+      await assert.rejects(loadChangesetsContext({ root }), /Could not resolve the installed/);
+    });
   });
 });

@@ -4,7 +4,7 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { after, describe, it } from 'node:test';
 
-import { collectTags, main } from './collect-tags.mjs';
+import { collectTags, expectedTags, expectedTagsFor, main } from './collect-tags.mjs';
 
 const scratch = mkdtempSync(join(tmpdir(), 'collect-tags-'));
 after(() => rmSync(scratch, { recursive: true, force: true }));
@@ -17,11 +17,19 @@ const line = (tag, packageName) => JSON.stringify({ type: 'git-tag', tag, packag
  * Fake command runner. `existing` tags are at HEAD before the CLI runs;
  * `cli` decides what the CLI writes and which tags it creates.
  */
-function fakeRun({ existing = [], created = [], written, cliStatus = 0, projects = [] }) {
+function fakeRun({
+  existing = [],
+  created = [],
+  written,
+  cliStatus = 0,
+  projects = [],
+  version = '3.0.3'
+}) {
   const calls = [];
   let tags = [...existing];
   const run = (command, args, options = {}) => {
     calls.push({ command, args, env: options.env });
+    if (args.includes('--version')) return { status: 0, stdout: `${version}\n`, stderr: '' };
     if (command === 'git') return { status: 0, stdout: tags.join('\n'), stderr: '' };
     if (args[0] === 'ls') return { status: 0, stdout: JSON.stringify(projects), stderr: '' };
     writeFileSync(
@@ -112,13 +120,130 @@ describe('collect-tags', () => {
     assert.throws(() => collectTags({ run, ndjsonPath: ndjson(), root }), /not in the workspace/);
   });
 
-  it('main writes the tags file and fails without TAGS_FILE', () => {
+  it('main writes the tags file with the expected set and fails without TAGS_FILE', async () => {
     const { run } = fakeRun({ created: [['v1.0.0', 'root']], projects });
     const logs = [];
     const tagsFile = join(scratch, 'sub', 'tags.json');
-    assert.equal(main({ env: { TAGS_FILE: tagsFile }, run, log: (m) => logs.push(m) }), 0);
+    const loadContext = async () => ({ cliMajor: 3, config: config(), packages: workspace() });
+    assert.equal(
+      await main({ env: { TAGS_FILE: tagsFile }, run, log: (m) => logs.push(m), loadContext }),
+      0
+    );
     assert.ok(existsSync(tagsFile));
-    assert.equal(JSON.parse(readFileSync(tagsFile, 'utf8')).tags[0].tag, 'v1.0.0');
-    assert.equal(main({ env: {}, run, log: (m) => logs.push(m) }), 1);
+    const written = JSON.parse(readFileSync(tagsFile, 'utf8'));
+    assert.equal(written.tags[0].tag, 'v1.0.0');
+    assert.deepEqual(
+      written.expected.map((e) => e.tag),
+      ['@s/pub@1.0.0']
+    );
+    assert.equal(await main({ env: {}, run, log: (m) => logs.push(m) }), 1);
+  });
+
+  it('main fails, and writes nothing, when the expected set cannot be derived', async () => {
+    const { run } = fakeRun({ created: [], projects });
+    const tagsFile = join(scratch, 'none', 'tags.json');
+    const logs = [];
+    const loadContext = async () => {
+      throw new Error('read failed');
+    };
+    assert.equal(
+      await main({ env: { TAGS_FILE: tagsFile }, run, log: (m) => logs.push(m), loadContext }),
+      1
+    );
+    assert.equal(existsSync(tagsFile), false);
+    assert.match(logs.join('\n'), /read failed/);
+  });
+});
+
+const pkgEntry = (name, version, extra = {}) => ({
+  dir: `/repo/packages/${name.replace(/^@s\//, '')}`,
+  packageJson: { name, version, ...extra }
+});
+const workspace = (packages = [pkgEntry('@s/pub', '1.0.0')], type = 'pnpm') => ({
+  tool: { type },
+  packages
+});
+const config = ({ ignore = [], tag = false } = {}) => ({ ignore, privatePackages: { tag } });
+
+describe('expectedTagsFor', () => {
+  const all = [
+    pkgEntry('@s/pub', '1.0.0'),
+    pkgEntry('@s/ign', '2.0.0'),
+    pkgEntry('@s/priv', '3.0.0', { private: true }),
+    pkgEntry('@s/noversion', undefined)
+  ];
+
+  it('expects public packages that are not ignored and have a version', () => {
+    const out = expectedTagsFor({
+      packages: workspace(all),
+      config: config({ ignore: ['@s/ign'] }),
+      root: '/repo'
+    });
+    assert.deepEqual(out, [
+      { name: '@s/pub', version: '1.0.0', tag: '@s/pub@1.0.0', directory: 'packages/pub' }
+    ]);
+  });
+
+  it('expects a private package only when privatePackages.tag is true', () => {
+    const names = (cfg) =>
+      expectedTagsFor({ packages: workspace(all), config: cfg, root: '/repo' }).map((e) => e.name);
+    assert.deepEqual(names(config({ ignore: ['@s/ign'] })), ['@s/pub']);
+    assert.deepEqual(names(config({ ignore: ['@s/ign'], tag: true })), ['@s/pub', '@s/priv']);
+  });
+
+  // Ignore lists below are what @changesets/cli 3.0.3 expanded for the same
+  // entries over @s/alpha, @s/keep, @t/gamma and delta.
+  it('uses the CLI-expanded ignore list: scope glob, negation, glob and exact name', () => {
+    const four = [
+      pkgEntry('@s/alpha', '1.0.0'),
+      pkgEntry('@s/keep', '1.0.0'),
+      pkgEntry('@t/gamma', '1.0.0'),
+      pkgEntry('delta', '1.0.0')
+    ];
+    const names = (ignore) =>
+      expectedTagsFor({ packages: workspace(four), config: config({ ignore }), root: '/repo' }).map(
+        (e) => e.name
+      );
+    assert.deepEqual(names(['@s/alpha', '@s/keep']), ['@t/gamma', 'delta']);
+    assert.deepEqual(names(['@s/alpha']), ['@s/keep', '@t/gamma', 'delta']);
+    assert.deepEqual(names(['@t/gamma', 'delta']), ['@s/alpha', '@s/keep']);
+  });
+
+  it('names the single-package root tag v<version>', () => {
+    const out = expectedTagsFor({
+      packages: workspace(
+        [{ dir: '/repo', packageJson: { name: 'root', version: '1.2.3' } }],
+        'root'
+      ),
+      config: config(),
+      root: '/repo'
+    });
+    assert.deepEqual(out, [{ name: 'root', version: '1.2.3', tag: 'v1.2.3', directory: '.' }]);
+  });
+});
+
+describe('expectedTags', () => {
+  it('fails closed unless the CLI is major 3 and agrees with the installed package', async () => {
+    const loadContext = async () => ({ cliMajor: 3, config: config(), packages: workspace() });
+    assert.equal(
+      (await expectedTags({ run: fakeRun({}).run, root: '/repo', loadContext })).length,
+      1
+    );
+    await assert.rejects(
+      expectedTags({ run: fakeRun({ version: '2.30.0' }).run, root: '/repo', loadContext }),
+      /major 3/
+    );
+    await assert.rejects(
+      expectedTags({ run: fakeRun({ version: '' }).run, root: '/repo', loadContext }),
+      /found none/
+    );
+    await assert.rejects(
+      expectedTags({
+        run: fakeRun({}).run,
+        root: '/repo',
+        loadContext: async () => ({ cliMajor: 2, config: config(), packages: workspace() })
+      }),
+      /installed package is major 2/
+    );
   });
 });
