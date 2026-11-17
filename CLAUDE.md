@@ -42,7 +42,7 @@ the legacy ECS or GCP-pipeline workflows, see the root `README.md`.
   and contains logic only. Each trigger file (`apps-*-trigger.yml`) is
   the canonical example of how a consuming repo wires the event.
 - **`.github/actions/`** — Custom GitHub Actions consumed via `uses:
-  0xPolygon/pipelines/.github/actions/<name>@main` (or `./.github/actions/<name>`
+  0xPolygon/pipelines/.github/actions/<name>@<40-hex-sha> # main` (or `./.github/actions/<name>`
   when called from this repo). Contains only `action.yml` and — for
   compiled actions — the committed `dist/` bundle.
 - **`packages/`** — Source packages (pnpm workspace) that compile into
@@ -93,8 +93,9 @@ called workflow's jobs declare. GitHub enforces this at startup — mismatches
 produce an immediate `startup_failure` before any step runs.
 
 When writing a trigger file, read the called workflow's job-level `permissions:`
-block and mirror those scopes in the trigger. The canonical examples in
-`apps-team-ts-template` already have the correct permissions for each workflow.
+block and mirror those scopes in the trigger. The canonical examples in this
+repository's own `.github/workflows/apps-*-trigger.yml` files already have the
+correct permissions for each workflow.
 
 ## Adding a new reusable workflow
 
@@ -146,7 +147,7 @@ steps:
   - name: Start Firestore emulator
     run: docker compose up -d --wait  # or -f path/to/docker-compose.yml
   - id: docker-test
-    uses: 0xPolygon/pipelines/.github/actions/docker-test@main
+    uses: 0xPolygon/pipelines/.github/actions/docker-test@<40-hex-sha> # main
     with:
       test_vars: FIRESTORE_EMULATOR_HOST GOOGLE_CLOUD_PROJECT_ID FIRESTORE_DATABASE_ID ...
 ```
@@ -175,9 +176,8 @@ See `pos-airdrop` and `lst-api` for reference implementations.
 6. Add the action to `apps-build-actions.yml` so `dist/` is automatically rebuilt and committed
    whenever `packages/<name>/src/index.ts` changes on `main`.
 
-Actions are used locally within reusable workflows via `uses: ./.github/actions/<name>`
-and externally via `uses: 0xPolygon/pipelines/.github/actions/<name>@main`. There is no
-external versioning or tagging — the action is always consumed at the caller's chosen ref.
+Actions are used locally within reusable workflows via `uses: ./.github/actions/<name>`. An external
+caller consumes the action at the commit it pins; see README "Pinning callers".
 
 ## GitHub script helpers
 

@@ -1,3 +1,4 @@
+# Consumer form, step-level: 0xPolygon/pipelines/.github/actions/ci@<40-hex-sha> # main (SHA kept current by Dependabot)
 name: CI Trigger
 
 on:

@@ -40,13 +40,19 @@ in its own separate GitHub Actions job with its own runner.
 | `apps-claude.yml` | Interactive Claude Code agent (triggered by @claude mentions) | `CLAUDE_API_KEY` |
 
 Trigger file examples for each of the above live alongside them as
-`apps-*-trigger.yml` and also serve as canonical templates for consuming
-repos.
+`apps-*-trigger.yml` (for example `apps-changeset-check-trigger.yml`) and also
+serve as canonical templates for consuming repos.
+
+The trigger files here call workflows and actions by local `./.github/...`
+paths because they also run in this repository. A consuming repository
+replaces each local path with the `0xPolygon/pipelines/...` form.
 
 ### Composite actions
 
-Called via `uses: 0xPolygon/pipelines/.github/actions/<name>@main` as a
-**step** inside a job. Composite actions run in the calling job's
+Called via `uses: 0xPolygon/pipelines/.github/actions/<name>@<40-hex-sha> # main` as a
+**step** inside a job, pinned to a full commit SHA that Dependabot's
+`github-actions` updates keep current (monthly, grouped). A fix to a composite
+action reaches consumers at their next bump; an urgent fix is a coordinated bump. Composite actions run in the calling job's
 environment — they inherit the job's `env:` block, runners, and file
 system state automatically.
 
@@ -81,7 +87,7 @@ jobs:
     env:
       MY_RPC: https://rpc.example.com?token=${{ secrets.MY_TOKEN }}
     steps:
-      - uses: 0xPolygon/pipelines/.github/actions/ci@main
+      - uses: 0xPolygon/pipelines/.github/actions/ci@<40-hex-sha> # main
 ```
 
 Repositories with no test env var requirements omit the `env:` block entirely.
@@ -145,7 +151,7 @@ jobs:
       # ... other env vars
     steps:
       - id: gate
-        uses: 0xPolygon/pipelines/.github/actions/check-dockerfile@main
+        uses: 0xPolygon/pipelines/.github/actions/check-dockerfile@<40-hex-sha> # main
         with:
           tag: ${{ inputs.tag || '' }}
 
@@ -154,7 +160,7 @@ jobs:
 
       - id: docker-test
         if: steps.gate.outputs.has_dockerfile == 'true'
-        uses: 0xPolygon/pipelines/.github/actions/docker-test@main
+        uses: 0xPolygon/pipelines/.github/actions/docker-test@<40-hex-sha> # main
         with:
           tag: ${{ inputs.tag || '' }}
           test_vars: FIRESTORE_EMULATOR_HOST # ...
@@ -439,7 +445,7 @@ jobs:
       # ... other outputs
     steps:
       - id: docker-test
-        uses: 0xPolygon/pipelines/.github/actions/docker-test@main
+        uses: 0xPolygon/pipelines/.github/actions/docker-test@<40-hex-sha> # main
         with:
           tag: ${{ inputs.tag || '' }}
           # test_vars: MY_RPC   # space-separated env var names to forward to container
@@ -458,36 +464,31 @@ See [Adding a new composite action with compiled dist](#adding-a-new-composite-a
 
 ## Pinning callers
 
-The examples above use `@main` for brevity. `@main` is a moving target: every
-merge here is picked up by every caller on its next run, including workflows
-that receive secrets and run with `id-token`/`contents: write`. Callers should
-pin to an immutable ref instead, for both reusable workflows and composite
-actions:
+A composite action called from a step runs inside the caller's job: pin it to a
+full commit SHA with a trailing comment, and let Dependabot's `github-actions`
+updates move the pin. A reusable workflow runs this repository's composite
+actions from the same commit as itself.
 
 ```yaml
-jobs:
-  check:
-    # Prefer a full commit SHA; keep a human-readable comment with the version
-    uses: 0xPolygon/pipelines/.github/workflows/apps-ci.yml@<full-40-char-sha> # <tag or date>
+steps:
+  # Full commit SHA; the comment names the branch the pinned commit came from
+  - uses: 0xPolygon/pipelines/.github/actions/<name>@<40-hex-sha> # main
 ```
 
-- **Full commit SHA** is the only ref that cannot be moved. Prefer it.
-- **A release tag** (`@vX.Y.Z`) is acceptable when it is protected against
-  re-pointing. Tags are only as immutable as the repo's tag protection.
-- Bump the pin deliberately (Dependabot's `github-actions` ecosystem or
-  Renovate can open the PRs) rather than tracking `@main`.
-- Pin the `uses:` of every job and step in the trigger file. A pinned
-  reusable workflow runs this repo's composite actions from the same commit:
-  each reusable workflow checks out `${{ job.workflow_repository }}` at
+- **Full commit SHA** is the only ref that cannot be moved. Use it for every
+  composite action called from a step.
+- The `# main` comment names the branch the pinned commit came from; Dependabot
+  keeps the SHA current.
+- **A release tag** (`@vX.Y.Z`) is only as immutable as the repo's tag
+  protection. A step-level composite action is always pinned to a full commit
+  SHA.
+- A reusable workflow checks out `${{ job.workflow_repository }}` at
   `${{ job.workflow_sha }}` into `.pipelines/` and calls
-  `./.pipelines/.github/actions/<name>`, never `@main`. Composite actions
-  you call directly from a trigger file are pinned by your own `uses:` ref.
-  (`job.workflow_*` is not available on GitHub Enterprise Server.)
+  `./.pipelines/.github/actions/<name>`, never `@main`. (`job.workflow_*` is
+  not available on GitHub Enterprise Server.)
 
-> **Status:** this repo does not yet publish release tags that contain the
-> current `apps-*` workflows (the existing `v1`–`v3` tags predate them), so the
-> trigger templates in this repo still show `@main`. Until a tag is cut,
-> callers should pin to a commit SHA of this repo.
+> **Status:** this repo does not publish release tags that contain the current
+> `apps-*` workflows (the existing `v1`–`v3` tags predate them).
 
 ---
 
