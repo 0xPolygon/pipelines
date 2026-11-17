@@ -145,6 +145,41 @@ const merge = (into: ShellFacts, from: ShellFacts): void => {
 };
 
 const PACKAGE_MANAGERS = new Set(['npm', 'pnpm', 'yarn', 'bun', 'lerna']);
+/**
+ * npm's documented command aliases, taken from the `aliases:` line of each page under
+ * `docs/content/commands/` (npm 11.20): npm-init, npm-install, npm-ci, npm-install-ci-test,
+ * npm-install-test, npm-run, npm-test and npm-exec. Each alias reads exactly as its command does, so the
+ * parser and the text test both go through `canonicalNpmSub` and cannot drift apart. `create`, the other
+ * alias of `init`, is left out on purpose: it is a runner even without an argument, `init` is not.
+ */
+const NPM_ALIASES: Record<string, readonly string[]> = {
+  init: ['innit'],
+  install: [
+    'add',
+    'i',
+    'in',
+    'ins',
+    'inst',
+    'insta',
+    'instal',
+    'isnt',
+    'isnta',
+    'isntal',
+    'isntall'
+  ],
+  ci: ['clean-install', 'ic', 'install-clean', 'isntall-clean'],
+  'install-test': ['it', 'install-ci-test', 'cit', 'clean-install-test', 'sit'],
+  run: ['run-script', 'rum', 'urn'],
+  test: ['tst', 't'],
+  exec: ['x']
+};
+const NPM_CANONICAL = new Map(
+  Object.entries(NPM_ALIASES).flatMap(([command, aliases]) =>
+    aliases.map((alias) => [alias, command] as const)
+  )
+);
+/** The command an npm subcommand word names, with documented aliases resolved. */
+export const canonicalNpmSub = (sub: string): string => NPM_CANONICAL.get(sub) ?? sub;
 /** Runs a package binary that is not installed yet: the command that follows is the real one. */
 const BINARY_RUNNERS = new Set(['npx', 'pnpx', 'bunx']);
 const CODE_SUBCOMMANDS = new Set([
@@ -187,7 +222,7 @@ export const registryRunner = ({
   // `<manager> create <x>` runs the `create-<x>` package; `npm init <x>` is the same thing. A bare
   // `npm init` only writes a package.json, so it needs a package argument. pnpm, yarn and bun init do not fetch.
   if (sub === 'create' && PACKAGE_MANAGER_CREATORS.has(manager)) return `${manager} create`;
-  if (manager === 'npm' && sub === 'init' && arg !== undefined) return 'npm init';
+  if (manager === 'npm' && canonicalNpmSub(sub) === 'init' && arg !== undefined) return 'npm init';
   return undefined;
 };
 const PACKAGE_MANAGER_CREATORS = new Set(['npm', 'pnpm', 'yarn', 'bun']);
@@ -480,6 +515,10 @@ const unquoteWords = (raw: string[]): string[] => {
 
 /** An environment assignment that turns lifecycle scripts off for the package manager it prefixes. */
 const IGNORE_SCRIPTS_ENV = /^npm_config_ignore_scripts=["']?(?:true|1)["']?$/i;
+/** The word after a bare `--ignore-scripts` that switches it off: false, 0, no, quoted or not, or not a plain word. */
+const IGNORE_SCRIPTS_OFF_VALUE = /^["']?(?:false|0|no)["']?$/i;
+/** A value built by the shell (`$X`, a substitution) is not known to be `true`. */
+const isShellBuilt = (word: string): boolean => /[$`(]/.test(word);
 const IGNORE_SCRIPTS_FLAG = /^--ignore-scripts(?:=(?:true|1))?$/;
 /** Any later word that can switch the setting back on, so an install that also says so is read. */
 const IGNORE_SCRIPTS_OVERRIDE_ENV = /^npm_config_ignore_scripts=/i;
@@ -762,6 +801,12 @@ const classifyManager = ({
         wide = true;
       if (IGNORE_SCRIPTS_FLAG.test(token)) ignoreScripts = true;
       if (IGNORE_SCRIPTS_OVERRIDE_FLAG.test(token)) overridden = true;
+      // `--ignore-scripts false` as two words turns the flag off in npm and pnpm; a value that is not a
+      // plain word (`$X`, a substitution) is not known to be `true`, so it is read too.
+      if (token === '--ignore-scripts') {
+        const next = rest[index + 1] ?? '';
+        if (IGNORE_SCRIPTS_OFF_VALUE.test(next) || isShellBuilt(next)) overridden = true;
+      }
       if (flag === '-g' || flag === '--global' || (flag === '--location' && inline === 'global'))
         global = true;
       let value = inline;
@@ -775,7 +820,8 @@ const classifyManager = ({
     if (words.length === 0) subIndex = index;
     words.push(token);
   }
-  const [sub, second, third] = words;
+  const [rawSub, second, third] = words;
+  const sub = rawSub !== undefined && manager === 'npm' ? canonicalNpmSub(rawSub) : rawSub;
   // An install that says both "ignore scripts" and "do not" is read: it is not known which one wins.
   if (overridden) ignoreScripts = false;
   const where = [...flagDirs, ...dirs];
