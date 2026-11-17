@@ -1,17 +1,23 @@
 name: Check release tags
 description: >
-  Confirms that every package listed in `<directory>/manifest.json` has a git
-  tag on the remote repository, and a GitHub Release for that tag when
-  changelogs are enabled and the package has a CHANGELOG.md in the checked-out
-  repository, read through the GitHub REST API. A tag is accepted as `<name>@<version>`, or as
-  `v<version>` when the manifest has one entry and it is the repository's root
-  package. Fails with one error listing what is missing. Safe to re-run: it
-  only reads.
+  Confirms the end state of a release run on either @changesets/cli major.
+  Everything the run had to tag is checked: each package in
+  `<directory>/manifest.json` (when given) and each tag pointing at the local
+  clone's HEAD. Each needs a git tag on the remote repository (for a tag from
+  the clone, at the run's commit) and a GitHub Release when changelogs are
+  enabled and the package has a CHANGELOG.md, read through the GitHub REST
+  API. A manifest tag is accepted as `<name>@<version>`, or as `v<version>`
+  when the manifest has one entry and it is the repository's root package. A
+  run with nothing to tag passes, whether or not a publish ran. Fails with one
+  error listing what is missing. Safe to re-run: it only reads.
 
 inputs:
   directory:
-    description: Directory holding the manifest.json written by the pack action.
-    required: true
+    description: >
+      Directory holding the manifest.json written by the pack action. Leave
+      empty when no publish ran; only the tags at HEAD are then checked.
+    required: false
+    default: ''
   token:
     description: Token with read access to the repository's git refs and Releases.
     required: true

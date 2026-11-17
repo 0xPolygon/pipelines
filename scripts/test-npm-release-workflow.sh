@@ -325,6 +325,12 @@ check('the git-tag step holds no secret or app token in env or with', !/secrets\
 check('the tag-and-release step runs only on major 3, after the token mint and before the tag check and the Latest correction, with its inputs through env', tagRel > mint && tagRel > act && norm(fin[tagRel]?.if) === "steps.cli.outputs.major == '3'" && fin[tagRel]?.with?.['github-token'] === '${{ steps.app-token.outputs.token }}' && fin[tagRel]?.with?.retries === 3 && !/\$\{\{/.test(String(fin[tagRel]?.with?.script ?? '')) && /tag-collect\.outputs\.tags-file/.test(fin[tagRel]?.env?.TAGS_FILE ?? ''), json(fin[tagRel]));
 const tagCheck = fin.findIndex((st) => stepUses(st)?.endsWith('/check-release-tags'));
 check('finalize checks release tags after both tagging arms and before the Latest correction', tagCheck > act && tagCheck > tagRel && tagCheck < fix, `check-release-tags at ${tagCheck}, correction at ${fix}`);
+// The end-state check runs on every run; only the artifact download depends
+// on the publish job (the artifact exists only when publish ran).
+const tagDl = fin.map((st, i) => ({ st, i })).filter(({ st, i }) => stepUses(st) === 'actions/download-artifact' && i < tagCheck).pop();
+const condOnPublish = fin.filter((st) => /needs\.publish\.result/.test(String(st.if ?? '')) && stepUses(st) !== undefined && !/correct/.test(String(st.if ?? '')));
+check('end-state check is unconditional and follows both arms', tagCheck > act && tagCheck > tagRel && !('if' in (fin[tagCheck] ?? { if: 1 })) && tagDl !== undefined && norm(tagDl.st.if) === "needs.publish.result == 'success'" && condOnPublish.length === 1 && condOnPublish[0] === tagDl.st && fin[tagCheck]?.with?.token === '${{ github.token }}' && !/app-token/.test(json(fin[tagCheck])), json([fin[tagCheck], tagDl?.st.if]));
+check('the Latest correction is the last finalize step', fix === fin.length - 1, `correction at ${fix} of ${fin.length}`);
 // The checkout the correction loads its script from is unconditional (a
 // release with nothing public skips publish, and the correction still runs)
 // and must carry both actions' files.

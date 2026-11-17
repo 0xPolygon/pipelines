@@ -470,12 +470,14 @@ jobs:
         env:
           GITHUB_TOKEN: ${{ steps.app-token.outputs.token }}
 
-      # Verifies the end state rather than the action's outputs: every
-      # package that was published has a git tag and a GitHub Release. Fails when a
-      # repo's @changesets/cli prints tags in a format changesets/action
-      # cannot read (it reads `New tag:` lines), and passes on a re-run after
-      # the tags already exist. Runs before the Latest correction below so a
-      # failure of that cosmetic step cannot hide a missing tag or Release.
+      # Verifies the end state rather than the action's outputs, on either
+      # @changesets/cli major and whether or not a publish ran: every package
+      # published or tagged in this run has a git tag at this commit and a
+      # GitHub Release where a changelog exists. A run with nothing to tag
+      # passes, and a re-run after the tags exist passes. Runs before the
+      # Latest correction below so a failure of that cosmetic step cannot hide
+      # a missing tag or Release. Only the artifact download depends on the
+      # publish job having run; the tags it checks are in this job's clone.
       - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
         if: needs.publish.result == 'success'
         with:
@@ -516,9 +518,9 @@ jobs:
             });
 
       - uses: ./.pipelines/.github/actions/check-release-tags
-        if: needs.publish.result == 'success'
         with:
-          directory: ${{ runner.temp }}/npm-tarballs
+          # Empty when no publish ran (nothing was downloaded).
+          directory: ${{ needs.publish.result == 'success' && format('{0}/npm-tarballs', runner.temp) || '' }}
           token: ${{ github.token }}
 
       # Moves Latest off a Release that is not the highest stable version of

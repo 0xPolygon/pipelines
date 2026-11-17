@@ -1,5 +1,10 @@
-// Checks that each package in <directory>/manifest.json has a tag on the
-// remote, using the GitHub REST API (git/ref/tags/<tag>).
+// Checks the end state of a release run with the GitHub REST API: everything
+// the run had to tag has a tag on the remote, and a Release where one is due.
+// "Had something to tag" is the union of the publish manifest (when a
+// directory with a manifest.json is given) and the tags pointing at the
+// local clone's HEAD, which both @changesets/cli majors create before this
+// runs. A tag from the clone must point at the run's commit on the remote. A
+// run with nothing to tag passes, whether or not anything was published.
 //
 // changesets names a tag `<name>@<version>` in a multi-package repo and
 // `v<version>` for the root package of a single-package repo. The `v` form is
@@ -11,6 +16,7 @@
 // is never read as "missing". Only reads, so a re-run after the tags and
 // Releases exist succeeds.
 
+import { spawnSync } from 'node:child_process';
 import { existsSync, readFileSync } from 'node:fs';
 import { relative, resolve, isAbsolute, sep } from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -131,12 +137,109 @@ export async function findMissing({
   return missing;
 }
 
-export async function main({ env = process.env, fetchImpl = fetch, log = console.log } = {}) {
+function defaultRun(command, args, { cwd } = {}) {
+  const result = spawnSync(command, args, { encoding: 'utf8', cwd, maxBuffer: 64 * 1024 * 1024 });
+  return { status: result.status ?? 1, stdout: result.stdout ?? '' };
+}
+
+/**
+ * The tags pointing at the clone's HEAD and the HEAD commit. Empty when the
+ * workspace has no git commit to inspect.
+ */
+export function localTagsAtHead({ workspace, run = defaultRun }) {
+  const head = run('git', ['rev-parse', 'HEAD'], { cwd: workspace });
+  if (head.status !== 0) return { head: undefined, tags: [] };
+  const listed = run('git', ['tag', '--points-at', 'HEAD'], { cwd: workspace });
+  if (listed.status !== 0) throw new Error('Could not list the tags at HEAD.');
+  return {
+    head: head.stdout.trim(),
+    tags: listed.stdout.split('\n').filter((line) => line !== '')
+  };
+}
+
+/** Workspace packages as `{ name, version, directory }`, directory relative to the workspace. */
+export function workspacePackages({ workspace, run = defaultRun }) {
+  const result = run('pnpm', ['ls', '-r', '--depth', '-1', '--json'], { cwd: workspace });
+  if (result.status !== 0) throw new Error('Could not list the workspace packages with pnpm.');
+  const root = resolve(workspace);
+  return JSON.parse(result.stdout)
+    .filter(
+      (p) =>
+        typeof p?.name === 'string' && typeof p?.version === 'string' && typeof p?.path === 'string'
+    )
+    .map((p) => ({
+      name: p.name,
+      version: p.version,
+      directory: relative(root, resolve(p.path)) || '.'
+    }));
+}
+
+/**
+ * Maps a tag to the workspace package it names: `<name>@<version>`, or
+ * `v<version>` for the root package. Undefined for any other tag.
+ */
+export function packageForTag({ tag, packages }) {
+  return packages.find(
+    (p) => tag === `${p.name}@${p.version}` || (p.directory === '.' && tag === `v${p.version}`)
+  );
+}
+
+/** The commit a remote tag points at (annotated tags dereferenced), or undefined on 404. */
+export async function remoteTagCommit({ apiUrl, repository, tag, token, fetchImpl = fetch }) {
+  let url = `${apiUrl}/repos/${repository}/git/ref/tags/${encodeURIComponent(tag)}`;
+  for (let depth = 0; depth < 5; depth += 1) {
+    const response = await githubGet({ url, token, fetchImpl });
+    if (response.status === 404) return undefined;
+    if (response.status !== 200) {
+      throw new Error(`tag lookup for ${tag} failed with HTTP ${response.status}`);
+    }
+    const { object } = await response.json();
+    if (object?.type !== 'tag') return object?.sha;
+    url = `${apiUrl}/repos/${repository}/git/tags/${object.sha}`;
+  }
+  throw new Error(`tag ${tag} is nested too deeply to resolve to a commit`);
+}
+
+/**
+ * Returns descriptions of what is missing for the tags in the local clone:
+ * the tag, `<tag> (points at another commit)`, or `<tag> (GitHub Release)`.
+ */
+export async function findMissingLocal({
+  tags,
+  head,
+  apiUrl,
+  repository,
+  token,
+  fetchImpl,
+  requiresRelease = () => true
+}) {
+  const missing = [];
+  for (const { tag, entry } of tags) {
+    const commit = await remoteTagCommit({ apiUrl, repository, tag, token, fetchImpl });
+    if (commit === undefined) {
+      missing.push(tag);
+    } else if (commit !== head) {
+      missing.push(`${tag} (points at another commit)`);
+    } else if (
+      requiresRelease(entry) &&
+      !(await releaseExists({ apiUrl, repository, tag, token, fetchImpl }))
+    ) {
+      missing.push(`${tag} (GitHub Release)`);
+    }
+  }
+  return missing;
+}
+
+export async function main({
+  env = process.env,
+  fetchImpl = fetch,
+  log = console.log,
+  run = defaultRun
+} = {}) {
   const directory = env.TARBALL_DIRECTORY;
   const repository = env.GITHUB_REPOSITORY;
   const token = env.GITHUB_TOKEN;
   for (const [key, value] of [
-    ['TARBALL_DIRECTORY', directory],
     ['GITHUB_REPOSITORY', repository],
     ['GITHUB_TOKEN', token]
   ]) {
@@ -147,32 +250,56 @@ export async function main({ env = process.env, fetchImpl = fetch, log = console
   }
   const apiUrl = env.GITHUB_API_URL || 'https://api.github.com';
   try {
-    const manifest = readManifest(directory);
     const workspace = env.GITHUB_WORKSPACE || process.cwd();
-    const singlePackage = isSinglePackageRepo({
-      manifest,
-      workspace
+    const manifest =
+      directory && existsSync(resolve(directory, 'manifest.json')) ? readManifest(directory) : [];
+    const { head, tags: localTags } = localTagsAtHead({ workspace, run });
+    const packages = localTags.length > 0 ? workspacePackages({ workspace, run }) : [];
+    // A tag at HEAD that names no workspace package is not ours to check.
+    const tags = localTags.flatMap((tag) => {
+      const pkg = packageForTag({ tag, packages });
+      return pkg === undefined
+        ? []
+        : [{ tag, entry: { name: pkg.name, directory: pkg.directory } }];
     });
+    if (manifest.length === 0 && tags.length === 0) {
+      log('Nothing to tag: no published packages and no tags at HEAD');
+      return 0;
+    }
     const enabled = changelogsEnabled(workspace);
-    const missing = await findMissing({
-      requiresRelease: (entry) => expectsRelease({ entry, workspace, enabled }),
-      manifest,
+    const requiresRelease = (entry) => expectsRelease({ entry, workspace, enabled });
+    const missing = new Set(
+      await findMissing({
+        requiresRelease,
+        manifest,
+        apiUrl,
+        repository,
+        token,
+        fetchImpl,
+        singlePackage: isSinglePackageRepo({ manifest, workspace })
+      })
+    );
+    for (const item of await findMissingLocal({
+      tags,
+      head,
       apiUrl,
       repository,
       token,
       fetchImpl,
-      singlePackage
-    });
-    if (missing.length > 0) {
+      requiresRelease
+    })) {
+      missing.add(item);
+    }
+    if (missing.size > 0) {
       log(
-        `::error title=Release tags missing::No git tag or GitHub Release found for: ${missing.join(', ')}. ` +
-          'The repo\'s @changesets/cli must print "New tag:" lines from `changeset tag` ' +
-          '(2.x does; 3.x does not), or the tags and Releases must be created by hand.'
+        `::error title=Release tags missing::No git tag or GitHub Release found for: ${[...missing].join(', ')}. ` +
+          "Every package published or tagged by this run needs a tag at the run's commit and, where a " +
+          'changelog exists, a GitHub Release. Re-running the job is safe: it only reads.'
       );
       return 1;
     }
     log(
-      `All ${manifest.length} published package(s) have a release tag (and a GitHub Release where a changelog exists)`
+      `All ${manifest.length} published package(s) and ${tags.length} tag(s) at HEAD have a release tag (and a GitHub Release where a changelog exists)`
     );
     return 0;
   } catch (err) {

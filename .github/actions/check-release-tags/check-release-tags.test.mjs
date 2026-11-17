@@ -179,4 +179,183 @@ describe('check-release-tags', () => {
     assert.equal(code, 1);
     assert.match(logs.join('\n'), /release lookup.*HTTP 502/);
   });
+
+  describe('tags at HEAD in the local clone', () => {
+    const HEAD = 'a'.repeat(40);
+    const OTHER = 'b'.repeat(40);
+
+    /** A command stub: HEAD and its tags, plus the pnpm workspace package list. */
+    const gitRun =
+      ({ tags = [], packages = [] } = {}) =>
+      (command, args) => {
+        if (command === 'git' && args[0] === 'rev-parse') return { status: 0, stdout: `${HEAD}\n` };
+        if (command === 'git' && args[0] === 'tag') return { status: 0, stdout: tags.join('\n') };
+        if (command === 'pnpm') {
+          return {
+            status: 0,
+            stdout: JSON.stringify(packages.map((p) => ({ ...p, path: join(dir, p.directory) })))
+          };
+        }
+        throw new Error(`unexpected command ${command}`);
+      };
+
+    /** Fetch stub for refs (`commits`: tag → commit) and Releases. */
+    const refFetch =
+      ({ commits = {}, releases = [], status } = {}) =>
+      async (url) => {
+        if (status) return { status };
+        if (url.includes('/releases/tags/')) {
+          const tag = decodeURIComponent(url.split('/releases/tags/')[1]);
+          return { status: releases.includes(tag) ? 200 : 404 };
+        }
+        const tag = decodeURIComponent(url.split('/git/ref/tags/')[1]);
+        if (!(tag in commits)) return { status: 404 };
+        return {
+          status: 200,
+          json: async () => ({ object: { type: 'commit', sha: commits[tag] } })
+        };
+      };
+
+    const runLocal = ({ fetchImpl, run, withManifest = true }) => {
+      const logs = [];
+      const env = { GITHUB_REPOSITORY: 'o/r', GITHUB_TOKEN: 't', GITHUB_WORKSPACE: dir };
+      if (withManifest) env.TARBALL_DIRECTORY = dir;
+      return main({ env, fetchImpl, run, log: (m) => logs.push(m) }).then((code) => ({
+        code,
+        logs
+      }));
+    };
+
+    const pkgA = { name: '@s/a', version: '1.0.0', directory: 'pkgs/a' };
+
+    it('passes with nothing to tag', async () => {
+      const { code, logs } = await runLocal({
+        fetchImpl: refFetch(),
+        run: gitRun(),
+        withManifest: false
+      });
+      assert.equal(code, 0);
+      assert.match(logs.join('\n'), /Nothing to tag/);
+    });
+
+    it('ignores a tag at HEAD that names no workspace package', async () => {
+      const { code } = await runLocal({
+        fetchImpl: refFetch(),
+        run: gitRun({ tags: ['nightly'], packages: [pkgA] }),
+        withManifest: false
+      });
+      assert.equal(code, 0);
+    });
+
+    it('fails a private-only run whose local tag is missing on the remote', async () => {
+      const { code, logs } = await runLocal({
+        fetchImpl: refFetch(),
+        run: gitRun({ tags: ['@s/a@1.0.0'], packages: [pkgA] }),
+        withManifest: false
+      });
+      assert.equal(code, 1);
+      assert.match(logs.join('\n'), /Release tags missing.*@s\/a@1\.0\.0/);
+    });
+
+    it('passes a private-only run whose tag is at the run commit and has a Release', async () => {
+      mkdirSync(join(dir, 'pkgs', 'a'), { recursive: true });
+      writeFileSync(join(dir, 'pkgs', 'a', 'CHANGELOG.md'), '# a\n');
+      const { code } = await runLocal({
+        fetchImpl: refFetch({
+          commits: { '@s/a@1.0.0': HEAD },
+          releases: ['@s/a@1.0.0']
+        }),
+        run: gitRun({ tags: ['@s/a@1.0.0'], packages: [pkgA] }),
+        withManifest: false
+      });
+      assert.equal(code, 0);
+    });
+
+    it('fails a local tag that exists on the remote at another commit', async () => {
+      const { code, logs } = await runLocal({
+        fetchImpl: refFetch({ commits: { '@s/a@1.0.0': OTHER } }),
+        run: gitRun({ tags: ['@s/a@1.0.0'], packages: [pkgA] }),
+        withManifest: false
+      });
+      assert.equal(code, 1);
+      assert.match(logs.join('\n'), /@s\/a@1\.0\.0 \(points at another commit\)/);
+    });
+
+    it('follows an annotated tag to the commit it points at', async () => {
+      const tagObject = 'c'.repeat(40);
+      const fetchImpl = async (url) => {
+        if (url.includes('/git/tags/')) {
+          return { status: 200, json: async () => ({ object: { type: 'commit', sha: HEAD } }) };
+        }
+        return { status: 200, json: async () => ({ object: { type: 'tag', sha: tagObject } }) };
+      };
+      const { code } = await runLocal({
+        fetchImpl,
+        run: gitRun({ tags: ['@s/a@1.0.0'], packages: [pkgA] }),
+        withManifest: false
+      });
+      assert.equal(code, 0);
+    });
+
+    it('fails a published manifest entry with no tag even when no local tag exists', async () => {
+      writeManifest([{ name: 'p', version: '1.0.0' }]);
+      const { code, logs } = await runLocal({ fetchImpl: refFetch(), run: gitRun() });
+      assert.equal(code, 1);
+      assert.match(logs.join('\n'), /p@1\.0\.0/);
+    });
+
+    it('passes a mixed published and private run when every tag is present', async () => {
+      writeManifest([{ name: 'p', version: '1.0.0' }]);
+      const { code } = await runLocal({
+        fetchImpl: refFetch({ commits: { 'p@1.0.0': HEAD, '@s/a@1.0.0': HEAD } }),
+        run: gitRun({
+          tags: ['p@1.0.0', '@s/a@1.0.0'],
+          packages: [pkgA, { name: 'p', version: '1.0.0', directory: 'pkgs/p' }]
+        })
+      });
+      assert.equal(code, 0);
+    });
+
+    it('fails when the tag is present but its Release is missing where a changelog exists', async () => {
+      mkdirSync(join(dir, 'pkgs', 'a'), { recursive: true });
+      writeFileSync(join(dir, 'pkgs', 'a', 'CHANGELOG.md'), '# a\n');
+      const { code, logs } = await runLocal({
+        fetchImpl: refFetch({ commits: { '@s/a@1.0.0': HEAD } }),
+        run: gitRun({ tags: ['@s/a@1.0.0'], packages: [pkgA] }),
+        withManifest: false
+      });
+      assert.equal(code, 1);
+      assert.match(logs.join('\n'), /@s\/a@1\.0\.0 \(GitHub Release\)/);
+    });
+
+    it('maps v<version> at HEAD to the root package', async () => {
+      const root = { name: 'solo', version: '2.0.0', directory: '.' };
+      const { code } = await runLocal({
+        fetchImpl: refFetch({ commits: { 'v2.0.0': HEAD } }),
+        run: gitRun({ tags: ['v2.0.0'], packages: [root] }),
+        withManifest: false
+      });
+      assert.equal(code, 0);
+    });
+
+    it('does not throw when no manifest directory is given (publish skipped)', async () => {
+      const { code } = await runLocal({
+        fetchImpl: refFetch(),
+        run: gitRun(),
+        withManifest: false
+      });
+      assert.equal(code, 0);
+    });
+
+    it('throws on an HTTP 500 while looking up a local tag', async () => {
+      const { code, logs } = await runLocal({
+        fetchImpl: refFetch({ status: 500 }),
+        run: gitRun({ tags: ['@s/a@1.0.0'], packages: [pkgA] }),
+        withManifest: false
+      });
+      assert.equal(code, 1);
+      assert.match(logs.join('\n'), /HTTP 500/);
+      assert.doesNotMatch(logs.join('\n'), /Release tags missing/);
+    });
+  });
 });
