@@ -1,17 +1,44 @@
 name: Check release tags
 description: >
-  Confirms that every package listed in `<directory>/manifest.json` has a git
-  tag on the remote repository, and a GitHub Release for that tag when
-  changelogs are enabled and the package has a CHANGELOG.md in the checked-out
-  repository, read through the GitHub REST API. A tag is accepted as `<name>@<version>`, or as
-  `v<version>` when the manifest has one entry and it is the repository's root
-  package. Fails with one error listing what is missing. Safe to re-run: it
-  only reads.
+  Confirms the end state of a release run on either @changesets/cli major.
+  Everything the run had to tag is checked: each package in
+  `<directory>/manifest.json` (when given) and each tag the run created (on 2.x
+  the tags pointing at the local clone's HEAD, on 3.x the `tags` list of the
+  tags file). Each needs a git tag on the remote repository (for a tag from
+  the clone, at the run's commit) and a GitHub Release when changelogs are
+  enabled and the package has a CHANGELOG.md, read through the GitHub REST
+  API. A manifest tag is accepted as `<name>@<version>`, or as `v<version>`
+  when the manifest has one entry and it is the repository's root package. A
+  run with nothing to tag passes, whether or not a publish ran. Fails with one
+  error listing what is missing. Safe to re-run: it only reads. On
+  @changesets/cli 3.x it reads the tags file the tagging job wrote and also
+  checks its `expected` list (the tag every non-ignored package's current
+  version should have), failing on any malformed entry or missing tag, on an
+  expected tag at the run's commit that lacks its GitHub Release, and on a
+  package published in this run whose tag is at another commit; no repository
+  code runs in that arm.
 
 inputs:
   directory:
-    description: Directory holding the manifest.json written by the pack action.
-    required: true
+    description: >
+      Directory holding the manifest.json written by the pack action. Leave
+      empty when no publish ran; only the tags at HEAD are then checked.
+    required: false
+    default: ''
+  major:
+    description: >
+      The resolved @changesets/cli major ('2' or '3'). On '3' the created and
+      expected tags are read from `tags-file` (required). Empty or '2' checks
+      the manifest and the tags at HEAD only.
+    required: false
+    default: ''
+  tags-file:
+    description: >
+      JSON file written by the 3.x tagging job and validated by the finalize
+      job, holding the `tags` and `expected` lists. Read as data only. Required
+      when `major` is '3'.
+    required: false
+    default: ''
   token:
     description: Token with read access to the repository's git refs and Releases.
     required: true
@@ -27,4 +54,6 @@ runs:
         ACTION_PATH: ${{ github.action_path }}
         TARBALL_DIRECTORY: ${{ inputs.directory }}
         GITHUB_TOKEN: ${{ inputs.token }}
+        CLI_MAJOR: ${{ inputs.major }}
+        TAGS_FILE: ${{ inputs.tags-file }}
       run: node "$ACTION_PATH/check-release-tags.mjs"

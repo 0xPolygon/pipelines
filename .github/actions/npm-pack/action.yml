@@ -13,6 +13,10 @@ description: >
   the step. The root package is packed only for a single-package repository
   or when the workspace globs list the root (`.`), as changesets does. Each
   manifest entry carries the package `directory` relative to the repository root.
+  With @changesets/cli 3.x, packages listed under `ignore` in
+  `.changeset/config.json` (expanded as that CLI expands it) are not packed,
+  matching what 3.x tags and publishes; on 2.x `ignore` does not change the
+  pack.
 
 inputs:
   out-dir:

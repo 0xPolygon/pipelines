@@ -33,6 +33,7 @@
     "test:release-conformance": "node --test \"packages/release-conformance/test/**/*.test.ts\"",
     "test:release-conformance-workflow": "bash scripts/test-release-conformance-workflow.sh",
     "test:claude-autofix-guards": "bash scripts/test-claude-autofix-guards.sh",
+    "test:release-tagging-fixtures": "bash scripts/test-release-tagging-fixtures.sh",
     "test": "pnpm run test:slack-pr-merged && pnpm run test:claude-autofix-guards && pnpm run test:actions && pnpm run test:publish-environment && pnpm run test:npm-release-workflow && pnpm run test:release-conformance && pnpm run test:release-conformance-workflow"
   },
   "devDependencies": {

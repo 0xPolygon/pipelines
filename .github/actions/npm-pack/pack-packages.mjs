@@ -14,6 +14,7 @@
 import { execFile } from 'node:child_process';
 import { createHash } from 'node:crypto';
 import { appendFileSync, existsSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs';
+import { createRequire } from 'node:module';
 import { basename, join, relative, resolve } from 'node:path';
 import { pathToFileURL } from 'node:url';
 import { promisify } from 'node:util';
@@ -23,6 +24,20 @@ const execFileAsync = promisify(execFile);
 const readJson = (path) => JSON.parse(readFileSync(path, 'utf8'));
 
 const readJsonIfExists = (path) => (existsSync(path) ? readJson(path) : undefined);
+
+// The changesets config is the one file a maintainer edits by hand, so a parse
+// error names it and says what to do instead of surfacing a bare JSON error.
+const readChangesetsConfig = (root) => {
+  try {
+    return readJsonIfExists(join(root, '.changeset', 'config.json'));
+  } catch (error) {
+    throw new Error(
+      `Could not parse .changeset/config.json: ${error.message}. ` +
+        'Fix the JSON syntax in .changeset/config.json and re-run.',
+      { cause: error }
+    );
+  }
+};
 
 // Workspace member globs the repository declares: the `packages:` list of
 // pnpm-workspace.yaml (block or flow list), or `workspaces` in package.json
@@ -100,6 +115,108 @@ async function listProjectsWithPnpm(root) {
   return JSON.parse(stdout);
 }
 
+const parseMajor = (output) => {
+  const match = /^(\d+)\.\d+\.\d+/.exec(String(output).trim().split('\n').pop()?.trim() ?? '');
+  return match ? Number(match[1]) : undefined;
+};
+
+// Reads the repository's changesets config through its own installed
+// `@changesets/cli`: the config package, and the workspace reader, that CLI
+// depends on are resolved from the CLI's own package. `ignore` therefore comes
+// back expanded exactly as that CLI expands it (globs and `!` negation
+// included), with no matcher of this script's own. Only the pack job runs this,
+// and it holds no credential. Any failure throws, so a config that cannot be
+// read never packs more than the CLI would tag.
+//
+// Mirrored in tag-and-release/collect-tags.mjs: each job checks out single
+// action directories, so a shared module is not reachable.
+export async function loadChangesetsContext({
+  root,
+  importModule = (file) => import(pathToFileURL(file).href)
+}) {
+  const workspace = resolve(root);
+  let cliPackagePath;
+  try {
+    cliPackagePath = createRequire(join(workspace, 'package.json')).resolve(
+      '@changesets/cli/package.json'
+    );
+  } catch (cause) {
+    throw new Error('Could not resolve the installed @changesets/cli from the repository.', {
+      cause
+    });
+  }
+  const cliRequire = createRequire(cliPackagePath);
+  const cliMajor = parseMajor(readJson(cliPackagePath).version);
+  let configModule;
+  let manypkg;
+  try {
+    configModule = await importModule(cliRequire.resolve('@changesets/config'));
+    manypkg = await importModule(cliRequire.resolve('@manypkg/get-packages'));
+  } catch (cause) {
+    throw new Error('Could not load the changesets config reader of the installed CLI.', {
+      cause
+    });
+  }
+  // `readConfig` in @changesets/config 4 returns { config, warnings, errors };
+  // `read` in earlier majors returns the config itself.
+  const readConfig = configModule.readConfig ?? configModule.read;
+  if (typeof readConfig !== 'function' || typeof manypkg.getPackages !== 'function') {
+    throw new Error('The installed @changesets/cli does not expose the expected config reader.');
+  }
+  const packages = await manypkg.getPackages(workspace);
+  const result = await readConfig(packages.rootDir, packages);
+  const wrapped =
+    result !== null && typeof result === 'object' && ('config' in result || 'errors' in result);
+  if (wrapped && Array.isArray(result.errors) && result.errors.length > 0) {
+    throw new Error(`.changeset/config.json is invalid: ${result.errors.join('; ')}`);
+  }
+  const config = wrapped ? result.config : result;
+  if (
+    !Array.isArray(config?.ignore) ||
+    !config.ignore.every((name) => typeof name === 'string') ||
+    typeof config.privatePackages?.tag !== 'boolean'
+  ) {
+    throw new Error('The changesets config reader returned an unexpected shape.');
+  }
+  return { cliMajor, config, packages };
+}
+
+// Package names to leave out of the pack. `ignore` is honoured on @changesets/cli
+// 3.x only: there both `git-tag` and `publish` skip ignored packages, while
+// 2.x `publish` publishes them whatever `ignore` says (2.x `tag` skips them),
+// so 2.x keeps packing exactly what it did. A config with no `ignore` entries
+// has nothing to skip on any major and loads nothing.
+export async function resolveIgnoredNames({
+  root,
+  run = runCommand,
+  loadContext = loadChangesetsContext
+}) {
+  const ignore = readChangesetsConfig(root)?.ignore;
+  if (ignore === undefined || (Array.isArray(ignore) && ignore.length === 0)) return [];
+  const major = parseMajor(
+    await run({ command: 'pnpm', args: ['exec', 'changeset', '--version'], cwd: root })
+  );
+  if (major === undefined) {
+    throw new Error(
+      'Could not determine the version of @changesets/cli to apply "ignore". ' +
+        "Install @changesets/cli 2.x or 3.x from the repository's lockfile."
+    );
+  }
+  if (major === 2) return [];
+  if (major !== 3)
+    throw new Error(
+      `@changesets/cli major ${major} is not supported. ` +
+        "Install @changesets/cli 2.x or 3.x from the repository's lockfile."
+    );
+  const context = await loadContext({ root });
+  if (context.cliMajor !== major) {
+    throw new Error(
+      `@changesets/cli reports major ${major} but the installed package is major ${context.cliMajor}.`
+    );
+  }
+  return context.config.ignore;
+}
+
 // Reads `.changeset/pre.json`. Its presence puts the repository in
 // pre-release mode (cli:917 treats any existing pre state that way).
 export function readPreState(root) {
@@ -109,7 +226,7 @@ export function readPreState(root) {
 // The `access` option from `.changeset/config.json`. When the option is
 // unset, changesets defaults it to "restricted".
 export function readConfigAccess(root) {
-  return readJsonIfExists(join(root, '.changeset', 'config.json'))?.access;
+  return readChangesetsConfig(root)?.access;
 }
 
 // Access for a package: its own `publishConfig.access`, else the changesets
@@ -366,14 +483,22 @@ export async function main({
   lookupVersions = lookupVersionsWithNpm,
   listProjects,
   run,
-  listEntries
+  listEntries,
+  loadContext
 } = {}) {
   const outDirInput = env.PACK_OUT_DIR;
   if (!outDirInput) throw new Error('PACK_OUT_DIR is required');
   const outDir = resolve(outDirInput);
   const override = env.PACK_DIST_TAG || undefined;
 
-  const packages = await discoverPackages({ root, listProjects });
+  const discovered = await discoverPackages({ root, listProjects });
+  const ignored = await resolveIgnoredNames({ root, run, loadContext });
+  const packages = discovered.filter((pkg) => !ignored.includes(pkg.name));
+  for (const pkg of discovered) {
+    if (!pkg.packageJson.private && ignored.includes(pkg.name)) {
+      console.log(`Skipped ${pkg.name}: listed under "ignore" in .changeset/config.json`);
+    }
+  }
   const preState = readPreState(root);
   const configAccess = readConfigAccess(root);
 
