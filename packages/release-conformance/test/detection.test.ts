@@ -64,8 +64,15 @@ const run = ({
     context: { defaultBranch: 'main', repository, today: '2026-11-16' }
   });
 
+/** Error ids other than the runner rules, which have their own tests: these probe the publish and code rules. */
 const errors = (result: CheckResult): string[] =>
-  [...new Set(result.findings.filter((f) => f.severity === 'error').map((f) => f.ruleId))].sort();
+  [
+    ...new Set(
+      result.findings
+        .filter((f) => f.severity === 'error' && !f.ruleId.startsWith('runner/'))
+        .map((f) => f.ruleId)
+    )
+  ].sort();
 const notices = (result: CheckResult): Finding[] =>
   result.findings.filter((f) => f.severity === 'notice');
 

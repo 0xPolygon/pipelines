@@ -8671,7 +8671,8 @@ const WAIVABLE_RULE_IDS = [
     // Waivable for now: a publishing workflow_dispatch may still be waived with a dated marker.
     'publisher/publishing-dispatch',
     'publisher/unreadable-local-action',
-    'publisher/possible-publish'
+    'publisher/possible-publish',
+    'runner/registry-fetch'
 ];
 /**
  * Rules that protect the publishing credential itself: untrusted triggers, inherited secrets, and
@@ -8685,7 +8686,9 @@ const NEVER_WAIVABLE_RULE_IDS = [
     'caller/publish-permission-scope',
     'publisher/pull-request-target',
     'publisher/id-token-with-code',
-    'publisher/token-with-code'
+    'publisher/token-with-code',
+    // A registry fetch at run time in a job holding a publishing credential runs code the lockfile never vouched for.
+    'runner/registry-fetch-with-credential'
 ];
 const DAY_MS = 86_400_000;
 const DATE_SHAPE = /^\d{4}-\d{2}-\d{2}$/;
@@ -9080,7 +9083,12 @@ const stripVersion = (word) => {
     const at = word.indexOf('@', 1);
     return at > 0 ? word.slice(0, at) : word;
 };
-const noFacts = () => ({ publishes: false, runsCode: false, scripts: [] });
+const noFacts = () => ({
+    publishes: false,
+    runsCode: false,
+    scripts: [],
+    registryRunners: []
+});
 const merge = (into, from) => {
     if (from.publishes)
         into.publishes = true;
@@ -9089,6 +9097,7 @@ const merge = (into, from) => {
     if (from.tooDeep)
         into.tooDeep = true;
     into.scripts.push(...from.scripts);
+    into.registryRunners.push(...from.registryRunners);
 };
 const PACKAGE_MANAGERS = new Set(['npm', 'pnpm', 'yarn', 'bun', 'lerna']);
 /** Runs a package binary that is not installed yet: the command that follows is the real one. */
@@ -9109,6 +9118,21 @@ const CODE_SUBCOMMANDS = new Set([
 const CODE_SCRIPTS = /^(?:build|test|lint|prepublishOnly|prepublish|prepare|prepack)(?::.*)?$/;
 const RUN_SUBCOMMANDS = new Set(['run', 'run-script']);
 const EXEC_SUBCOMMANDS = new Set(['exec', 'dlx', 'x']);
+/**
+ * The runner name when `<manager> <sub>` fetches from the registry at run time, else undefined.
+ * npm resolves any unambiguous prefix of a command name and `exe` is the only abbreviation of `exec`
+ * (`ex` also starts `explain` and `explore`); `x` is npm's and bun's alias. `pnpm exec` and `yarn exec`
+ * run what the lockfile installed, so they are not registry runners.
+ */
+const registryRunner = ({ manager, sub }) => {
+    if (manager === 'npm' && (sub === 'exec' || sub === 'exe' || sub === 'x'))
+        return `npm ${sub}`;
+    if (manager === 'bun' && sub === 'x')
+        return 'bun x';
+    if ((manager === 'pnpm' || manager === 'yarn') && sub === 'dlx')
+        return `${manager} dlx`;
+    return undefined;
+};
 /** Subcommands that wrap another command whose own words follow (`npm stage publish`, `yarn npm publish`). */
 const WRAPPING_SUBCOMMANDS = new Set([
     'stage',
@@ -9340,6 +9364,7 @@ const tooDeepFacts = () => ({
     publishes: true,
     runsCode: true,
     scripts: [],
+    registryRunners: [],
     tooDeep: true
 });
 /** The command a wrapper runs: its own flags (and their values), assignments and a leading duration skipped. */
@@ -9397,7 +9422,7 @@ const classify = ({ words, dirs, depth = 0 }) => {
     if (PACKAGE_MANAGERS.has(name))
         return classifyManager({ manager: name, rest, dirs, depth });
     if (BINARY_RUNNERS.has(name))
-        return classifyExec({ rest, dirs, depth });
+        return classifyExec({ rest, dirs, depth, runner: name });
     if (name === 'changeset' || name === 'changesets' || CHANGESETS_CLI.test(first)) {
         return { ...noFacts(), publishes: isPublishWord(firstWord(rest) ?? '') };
     }
@@ -9440,7 +9465,8 @@ const INSTALL_SUBCOMMANDS = new Set(['install', 'i', 'ci', 'add', 'install-test'
 const TEST_SUBCOMMANDS = new Set(['test', 't', 'install-test', 'it']);
 const firstWord = (tokens) => tokens.find((t) => !t.startsWith('-'));
 /** `<runner> [flags] <command ...>`: runs another command, which is repository code unless it only publishes. */
-const classifyExec = ({ rest, dirs, depth }) => {
+const classifyExec = ({ rest, dirs, depth, runner }) => {
+    const own = runner === undefined ? [] : [runner];
     let index = 0;
     while (index < rest.length) {
         const token = rest[index] ?? '';
@@ -9454,12 +9480,13 @@ const classifyExec = ({ rest, dirs, depth }) => {
     }
     const inner = rest.slice(index);
     if (inner.length === 0)
-        return { ...noFacts(), runsCode: true };
+        return { ...noFacts(), runsCode: true, registryRunners: own };
     const facts = classify({ words: inner, dirs, depth: depth + 1 });
     return {
         publishes: facts.publishes,
         runsCode: !facts.publishes || facts.tooDeep === true,
         scripts: facts.scripts,
+        registryRunners: [...own, ...facts.registryRunners],
         ...(facts.tooDeep ? { tooDeep: true } : {})
     };
 };
@@ -9522,8 +9549,14 @@ const classifyManager = ({ manager, rest, dirs, depth }) => {
         facts.runsCode = CODE_SCRIPTS.test(third);
         return facts;
     }
-    if (EXEC_SUBCOMMANDS.has(sub)) {
-        return classifyExec({ rest: rest.slice(subIndex + 1), dirs: where, depth });
+    if (EXEC_SUBCOMMANDS.has(sub) || (manager === 'npm' && sub === 'exe')) {
+        const runner = registryRunner({ manager, sub });
+        return classifyExec({
+            rest: rest.slice(subIndex + 1),
+            dirs: where,
+            depth,
+            ...(runner === undefined ? {} : { runner })
+        });
     }
     if (sub === 'global')
         return facts;
@@ -9557,6 +9590,7 @@ const classifyManager = ({ manager, rest, dirs, depth }) => {
         const ran = classify({ words, dirs: where, depth: depth + 1 });
         if (ran.publishes)
             facts.publishes = true;
+        facts.registryRunners.push(...ran.registryRunners);
         if (ran.tooDeep) {
             facts.tooDeep = true;
             facts.runsCode = true;
@@ -10163,9 +10197,11 @@ const readLocalAction = ({ root, path, calleeContext }) => {
             if (steps.some((step) => step.local))
                 return {
                     ok: false,
-                    reason: 'it uses a further local action, which the check does not follow'
+                    reason: 'it uses a further local action, which the check does not follow',
+                    steps,
+                    text
                 };
-            return { ok: true, steps };
+            return { ok: true, steps, text };
         }
         catch {
             return { ok: false, reason: 'it could not be parsed' };
@@ -10761,6 +10797,224 @@ const checkBespokePublisher = (params) => {
     ];
 };
 
+;// CONCATENATED MODULE: ./packages/release-conformance/src/rules/registry-runner.ts
+
+
+
+
+
+
+
+
+/** A registry-fetching runner anywhere a command can run. A dated in-file marker may waive it. */
+const REGISTRY_RUNNER_RULE = 'runner/registry-fetch';
+/**
+ * The same condition in a job that holds a credential. A separate id, because a marker
+ * waives by id and this one must never be waivable.
+ */
+const REGISTRY_RUNNER_CREDENTIAL_RULE = 'runner/registry-fetch-with-credential';
+const ACTIONS_DIR = '.github/actions';
+const MAX_ACTION_DEPTH = 4;
+const MAX_ACTION_DIRECTORIES = 400;
+/** Where the shared release workflow checks out its own repository, so its local actions resolve into this tree. */
+const registry_runner_CALLEE_CHECKOUT_PREFIX = '.pipelines/';
+/**
+ * Runners named by a piece of shell text, plus those in the body of a package script the text runs
+ * (one level down, the same lookup the publish detection uses).
+ */
+const runnersIn = ({ text, baseDirs, reader }) => {
+    const facts = shell_commands_analyzeShell({ text, baseDirs });
+    const hits = facts.registryRunners.map((runner) => ({ runner }));
+    for (const ref of facts.scripts) {
+        for (const body of reader.lookup(ref).bodies) {
+            for (const runner of shell_commands_analyzeShell({ text: body }).registryRunners)
+                hits.push({ runner, viaScript: ref.name });
+        }
+    }
+    return hits;
+};
+/** True when the text reads any secret other than the workflow's own `GITHUB_TOKEN`. */
+const readsSecret = (text) => secretReferences(text).some((name) => name.toUpperCase() !== 'GITHUB_TOKEN');
+/**
+ * Whether a job holds a credential for this rule. Wider than the publishing-credential test the other
+ * rules use: a registry fetch beside any secret (a deploy token, say) runs unvetted code with it, so
+ * any secret except `GITHUB_TOKEN` counts, wherever the job references it: `env`, a `with:` value,
+ * `run:` text, or `secrets:` on a reusable-workflow call (`inherit`, or any named secret).
+ */
+const holdsCredential = ({ job, info }) => info?.holdsPublishCredential === true ||
+    job.secrets.inherit ||
+    job.secrets.names.length > 0 ||
+    [...job.envSecretRefs, ...job.steps.flatMap((step) => step.envSecretRefs)].some(({ expression }) => readsSecret(expression)) ||
+    Object.values(job.withValues).some(readsSecret) ||
+    job.steps.some((step) => (step.run !== undefined && readsSecret(step.run)) ||
+        Object.values(step.with).some(readsSecret));
+/**
+ * The credential-free case is a notice for now (the checker has only `error` and `notice`): reported,
+ * never failing the run. The credentialed id is always an error.
+ */
+const severityFor = (credential) => (credential ? 'error' : 'notice');
+const messageFor = ({ hit, credential }) => {
+    const how = hit.viaScript === undefined
+        ? `\`${hit.runner}\``
+        : `\`${hit.runner}\` (in package script \`${hit.viaScript}\`)`;
+    return `${how} fetches a package from the registry at run time, so the lockfile does not cover what runs${credential ? ' in a job that holds a credential' : ''}; add the tool as a dependency and run it with \`pnpm exec\`.`;
+};
+/** Repository-relative action directory a local `uses:` reaches, or undefined when it is outside the action tree. */
+const actionDirectory = ({ path, calleeContext }) => {
+    let relative = external_node_path_namespaceObject.posix.normalize(path.replace(/^\.\//, ''));
+    if (calleeContext && relative.startsWith(registry_runner_CALLEE_CHECKOUT_PREFIX))
+        relative = relative.slice(registry_runner_CALLEE_CHECKOUT_PREFIX.length);
+    return relative.startsWith(`${ACTIONS_DIR}/`) ? relative : undefined;
+};
+/** Directories under `.github/actions` that hold an action file, without following links. */
+const listActionDirectories = (root) => {
+    if (linkedParent({ root, relative: ACTIONS_DIR }) !== undefined)
+        return [];
+    const found = [];
+    let visited = 0;
+    const walk = (dir, depth) => {
+        if (visited >= MAX_ACTION_DIRECTORIES)
+            return;
+        visited += 1;
+        let entries;
+        try {
+            entries = (0,external_node_fs_namespaceObject.readdirSync)((0,external_node_path_namespaceObject.join)(root, dir), { withFileTypes: true });
+        }
+        catch {
+            return;
+        }
+        if (entries.some((e) => e.isFile() && /^action\.ya?ml$/.test(e.name)))
+            found.push(dir);
+        if (depth >= MAX_ACTION_DEPTH)
+            return;
+        for (const entry of entries.sort((a, b) => (a.name < b.name ? -1 : 1)))
+            if (entry.isDirectory() && entry.name !== 'node_modules')
+                walk(external_node_path_namespaceObject.posix.join(dir, entry.name), depth + 1);
+    };
+    walk(ACTIONS_DIR, 0);
+    return found;
+};
+const lineOf = ({ text, snippet }) => {
+    const first = snippet
+        .split('\n')
+        .map((l) => l.trim())
+        .find((l) => l !== '');
+    const at = first === undefined ? -1 : text.indexOf(first);
+    if (at < 0)
+        return 1;
+    let line = 1;
+    for (let i = 0; i < at; i++)
+        if (text.charCodeAt(i) === 10)
+            line++;
+    return line;
+};
+/** A stand-in for an action file, so a marker comment in it is read like one in a workflow. */
+const actionAsFile = ({ file, text }) => ({
+    model: {
+        file,
+        text,
+        events: [],
+        permissions: { present: false, scopes: {}, line: 0 },
+        jobs: []
+    },
+    class: 'not-in-scope',
+    jobs: [],
+    entryEvents: [],
+    localCallers: []
+});
+/**
+ * `runner/registry-fetch`: no registry-fetching runner (`npx`, `pnpx`, `bunx`, `bun x`, `npm exec`,
+ * `npm x`, `pnpm dlx`, `yarn dlx`) in any workflow step or `with:` string, in a composite action of the
+ * repository, or in a package script a command runs. It reads every workflow, not only the release ones:
+ * a fetch at run time bypasses the lockfile wherever it happens. `pnpm exec` resolves from the lockfile
+ * and is allowed. In a job that holds a credential the finding carries the never-waivable id;
+ * a composite action counts as credentialed when any job that holds one uses it.
+ */
+const checkRegistryRunners = ({ scan, repository }) => {
+    const reader = createScriptReader(scan.root);
+    const findings = [];
+    const credentialedActions = new Set();
+    const ruleFor = (credential) => credential ? REGISTRY_RUNNER_CREDENTIAL_RULE : REGISTRY_RUNNER_RULE;
+    for (const file of scan.files) {
+        if (file.class === 'unparseable')
+            continue;
+        const { model } = file;
+        const calleeContext = model.file === CALLEE_PATH && sameRepository({ a: repository, b: CALLEE_REPOSITORY });
+        const report = ({ hits, line, credential }) => {
+            for (const hit of hits)
+                findings.push({
+                    ruleId: ruleFor(credential),
+                    file: model.file,
+                    line,
+                    message: messageFor({ hit, credential }),
+                    severity: severityFor(credential)
+                });
+        };
+        for (const job of model.jobs) {
+            const credential = holdsCredential({
+                job,
+                info: file.jobs.find((candidate) => candidate.jobId === job.id)
+            });
+            const jobDirs = job.workingDirectory === undefined ? [] : [job.workingDirectory];
+            for (const value of Object.values(job.withValues))
+                report({
+                    hits: runnersIn({ text: value, baseDirs: jobDirs, reader }),
+                    line: job.line,
+                    credential
+                });
+            for (const step of job.steps) {
+                const dir = step.workingDirectory ?? job.workingDirectory;
+                const baseDirs = dir === undefined ? [] : [dir];
+                if (step.run !== undefined)
+                    report({
+                        hits: runnersIn({ text: step.run, baseDirs, reader }),
+                        line: step.line,
+                        credential
+                    });
+                if (step.uses === undefined)
+                    continue;
+                for (const value of Object.values(step.with))
+                    report({
+                        hits: runnersIn({ text: value, baseDirs, reader }),
+                        line: step.line,
+                        credential
+                    });
+                if (credential && step.uses.local) {
+                    const directory = actionDirectory({ path: step.uses.path, calleeContext });
+                    if (directory !== undefined)
+                        credentialedActions.add(directory);
+                }
+            }
+        }
+    }
+    const actionFiles = [];
+    for (const directory of listActionDirectories(scan.root)) {
+        const read = readLocalAction({ root: scan.root, path: directory, calleeContext: false });
+        const { steps, text } = read;
+        if (steps === undefined || text === undefined)
+            continue;
+        const credential = credentialedActions.has(directory);
+        const file = `${directory}/action.yml`;
+        actionFiles.push(actionAsFile({ file, text }));
+        for (const step of steps) {
+            const texts = [
+                ...(step.run === undefined ? [] : [step.run]),
+                ...(step.uses === undefined ? [] : Object.values(step.with))
+            ];
+            for (const value of texts)
+                for (const hit of runnersIn({ text: value, baseDirs: [], reader }))
+                    findings.push({
+                        ruleId: ruleFor(credential),
+                        file,
+                        line: lineOf({ text, snippet: value }),
+                        message: messageFor({ hit, credential }),
+                        severity: severityFor(credential)
+                    });
+        }
+    }
+    return { findings, actionFiles };
+};
+
 ;// CONCATENATED MODULE: ./packages/release-conformance/src/rules/shared-caller.ts
 
 
@@ -10967,6 +11221,7 @@ const checkSharedCaller = ({ model, scan, profile, context }) => {
 
 
 
+
 /** An unreadable file is only a failure when it could be a release workflow; otherwise it is a notice. */
 const unparseableFinding = (file) => {
     const { model } = file;
@@ -11034,7 +11289,15 @@ const runChecks = ({ root, profile, context }) => {
             findings.push(...checkUnclassifiedJobs(params));
         }
     }
-    const applied = applyExceptions({ findings, files: scan.files, today: context.today });
+    // Every workflow and composite action is read, not only the release files: a run-time registry fetch
+    // bypasses the lockfile wherever it runs.
+    const runners = checkRegistryRunners({ scan, repository: context.repository });
+    findings.push(...runners.findings);
+    const applied = applyExceptions({
+        findings,
+        files: [...scan.files, ...runners.actionFiles],
+        today: context.today
+    });
     return {
         findings: unique(downgradeCanonicalCalleeFindings({
             findings: applied.findings,

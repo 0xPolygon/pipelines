@@ -52,7 +52,14 @@ const errorIds = (command: string): string[] => {
     profile,
     context: { defaultBranch: 'main', repository: 'acme/widget', today: '2026-11-16' }
   });
-  return [...new Set(result.findings.filter((f) => f.severity === 'error').map((f) => f.ruleId))];
+  // The runner rules have their own tests; these probe the publish rules.
+  return [
+    ...new Set(
+      result.findings
+        .filter((f) => f.severity === 'error' && !f.ruleId.startsWith('runner/'))
+        .map((f) => f.ruleId)
+    )
+  ];
 };
 
 void describe('a tool named with a version or tag is still the tool', () => {

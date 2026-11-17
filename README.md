@@ -366,6 +366,25 @@ Rules for bespoke publishers:
 | `publisher/unreadable-local-action` | A job that holds a publishing credential does not use a local action the check cannot read: one outside `.github/actions/`, missing, not a composite action, or using a further local action |
 | `publisher/possible-publish` | A job that holds `id-token: write` names a package publish only in text that may not run one: an `echo` or `printf` argument that is not piped or substituted, or a word between `pnpm`, `yarn` or `bun` and `publish` that no `package.json` script explains (`pnpm wrangler publish`). Any other `<tool> [flags] publish` (`npm`, `pnpm`, `yarn`, `lerna`, `bun`, `changeset`), in a command, a quoted string or an action input, is a publish, not this finding. A code-owner-reviewed marker may waive this one |
 
+A rule that applies to every workflow and composite action, not only release
+files:
+
+| Rule | Requirement |
+|------|-------------|
+| `runner/registry-fetch` | No runner that downloads and runs a package at run time: `npx`, `pnpx`, `bunx`, `bun x`, `npm exec`, `npm x`, `pnpm dlx`, `yarn dlx`. It reads workflow `run:` text (including `sh -c "…"` strings and wrappers such as `env`, `xargs`, `sudo`, `time`), `with:` strings, the `run:` and `with:` of composite actions under `.github/actions/`, and the body of a package script a command runs (one level). READMEs and docs are not read |
+| `runner/registry-fetch-with-credential` | The same condition in a job that holds `id-token: write`, an npm token, or any secret other than `GITHUB_TOKEN` (read in `env`, a `with:` value, `run:` text, or `secrets:` on a reusable-workflow call, including `secrets: inherit`), or in a composite action such a job uses. It cannot be waived |
+
+A registry fetch at run time bypasses the lockfile: the version and integrity
+hashes the repository reviewed do not cover the code that runs. Add the tool
+as a dependency and run it with `pnpm exec <tool>`, which resolves from the
+lockfile and is allowed. A published command-line tool that a README tells end
+users to run with `npx` is outside this rule. The credential-free rule is reported as a
+notice for now: it is listed but does not fail the check, and a valid marker in
+the file that holds the command still suppresses it. It becomes a waivable
+error once the repositories that use runners have moved to `pnpm exec`.
+Because it reads every workflow, a repository with no release workflow can
+still fail it even though the summary lists nothing in scope.
+
 Three further results are informational: `publisher/unclassified-id-token`
 and `publisher/unclassified-npm-token` (notices for a job that holds
 `id-token: write` or an npm token but is not recognised as a release job;
@@ -395,8 +414,8 @@ expired marker is itself an error (`exception/invalid`). Active exceptions
 and their end dates are listed in the job summary. The rules behind
 `caller/secrets-inherit`, `caller/pull-request-target`,
 `caller/publish-permission-scope`, `publisher/pull-request-target`,
-`publisher/id-token-with-code` and `publisher/token-with-code` cannot be
-waived.
+`publisher/id-token-with-code`, `publisher/token-with-code` and
+`runner/registry-fetch-with-credential` cannot be waived.
 
 #### Calling the check from a repository
 

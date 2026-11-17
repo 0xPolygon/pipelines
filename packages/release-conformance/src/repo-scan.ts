@@ -245,7 +245,7 @@ export const isSharedCallee = (uses: UsesRef): boolean => {
   );
 };
 
-interface CompositeStep {
+export interface CompositeStep {
   run?: string;
   uses?: string;
   local: boolean;
@@ -254,7 +254,9 @@ interface CompositeStep {
   actionPathVars: string[];
 }
 
-type ActionRead = { ok: true; steps: CompositeStep[] } | { ok: false; reason: string };
+export type ActionRead =
+  | { ok: true; steps: CompositeStep[]; text: string }
+  | { ok: false; reason: string; steps?: CompositeStep[]; text?: string };
 
 /**
  * Reads one local composite action: only under `.github/actions/`, which the
@@ -262,7 +264,7 @@ type ActionRead = { ok: true; steps: CompositeStep[] } | { ok: false; reason: st
  * elsewhere, a missing file, a node or docker action, a second level of local
  * action) is reported as unreadable rather than assumed harmless.
  */
-const readLocalAction = ({
+export const readLocalAction = ({
   root,
   path,
   calleeContext
@@ -325,9 +327,11 @@ const readLocalAction = ({
       if (steps.some((step) => step.local))
         return {
           ok: false,
-          reason: 'it uses a further local action, which the check does not follow'
+          reason: 'it uses a further local action, which the check does not follow',
+          steps,
+          text
         };
-      return { ok: true, steps };
+      return { ok: true, steps, text };
     } catch {
       return { ok: false, reason: 'it could not be parsed' };
     }

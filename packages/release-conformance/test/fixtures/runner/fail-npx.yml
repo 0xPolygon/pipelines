@@ -1,0 +1,12 @@
+name: runs a tool fetched at run time
+on:
+  push:
+    branches: [main]
+permissions: {}
+jobs:
+  lint:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    steps:
+      - run: npx prettier --check .

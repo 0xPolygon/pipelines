@@ -1,0 +1,13 @@
+name: tools run from the lockfile
+on:
+  push:
+    branches: [main]
+permissions: {}
+jobs:
+  lint:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    steps:
+      - run: pnpm install --frozen-lockfile
+      - run: pnpm exec prettier --check .

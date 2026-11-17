@@ -71,6 +71,11 @@ export interface ShellFacts {
   /** Installs dependencies or runs a build, test or lint step, or runs a tool from the repository. */
   runsCode: boolean;
   scripts: ScriptRef[];
+  /**
+   * Runners that fetch a package from the registry at run time and run it (`npx`, `pnpm dlx`, `npm exec`),
+   * named as written. `pnpm exec` is not one: it resolves from the lockfile.
+   */
+  registryRunners: string[];
   /** A command nests wrappers deeper than the parser follows; it is treated as publishing and running code. */
   tooDeep?: boolean;
 }
@@ -103,13 +108,19 @@ export const stripVersion = (word: string): string => {
   return at > 0 ? word.slice(0, at) : word;
 };
 
-const noFacts = (): ShellFacts => ({ publishes: false, runsCode: false, scripts: [] });
+const noFacts = (): ShellFacts => ({
+  publishes: false,
+  runsCode: false,
+  scripts: [],
+  registryRunners: []
+});
 
 const merge = (into: ShellFacts, from: ShellFacts): void => {
   if (from.publishes) into.publishes = true;
   if (from.runsCode) into.runsCode = true;
   if (from.tooDeep) into.tooDeep = true;
   into.scripts.push(...from.scripts);
+  into.registryRunners.push(...from.registryRunners);
 };
 
 const PACKAGE_MANAGERS = new Set(['npm', 'pnpm', 'yarn', 'bun', 'lerna']);
@@ -131,6 +142,19 @@ const CODE_SUBCOMMANDS = new Set([
 const CODE_SCRIPTS = /^(?:build|test|lint|prepublishOnly|prepublish|prepare|prepack)(?::.*)?$/;
 const RUN_SUBCOMMANDS = new Set(['run', 'run-script']);
 const EXEC_SUBCOMMANDS = new Set(['exec', 'dlx', 'x']);
+
+/**
+ * The runner name when `<manager> <sub>` fetches from the registry at run time, else undefined.
+ * npm resolves any unambiguous prefix of a command name and `exe` is the only abbreviation of `exec`
+ * (`ex` also starts `explain` and `explore`); `x` is npm's and bun's alias. `pnpm exec` and `yarn exec`
+ * run what the lockfile installed, so they are not registry runners.
+ */
+const registryRunner = ({ manager, sub }: { manager: string; sub: string }): string | undefined => {
+  if (manager === 'npm' && (sub === 'exec' || sub === 'exe' || sub === 'x')) return `npm ${sub}`;
+  if (manager === 'bun' && sub === 'x') return 'bun x';
+  if ((manager === 'pnpm' || manager === 'yarn') && sub === 'dlx') return `${manager} dlx`;
+  return undefined;
+};
 /** Subcommands that wrap another command whose own words follow (`npm stage publish`, `yarn npm publish`). */
 const WRAPPING_SUBCOMMANDS = new Set([
   'stage',
@@ -368,6 +392,7 @@ const tooDeepFacts = (): ShellFacts => ({
   publishes: true,
   runsCode: true,
   scripts: [],
+  registryRunners: [],
   tooDeep: true
 });
 
@@ -432,7 +457,7 @@ const classify = ({
   const inner = (next: string[]): ShellFacts =>
     next.length === 0 ? noFacts() : classify({ words: next, dirs, depth: depth + 1 });
   if (PACKAGE_MANAGERS.has(name)) return classifyManager({ manager: name, rest, dirs, depth });
-  if (BINARY_RUNNERS.has(name)) return classifyExec({ rest, dirs, depth });
+  if (BINARY_RUNNERS.has(name)) return classifyExec({ rest, dirs, depth, runner: name });
   if (name === 'changeset' || name === 'changesets' || CHANGESETS_CLI.test(first)) {
     return { ...noFacts(), publishes: isPublishWord(firstWord(rest) ?? '') };
   }
@@ -483,12 +508,16 @@ const firstWord = (tokens: string[]): string | undefined => tokens.find((t) => !
 const classifyExec = ({
   rest,
   dirs,
-  depth
+  depth,
+  runner
 }: {
   rest: string[];
   dirs: string[];
   depth: number;
+  /** Set when this runner fetches from the registry; unset for `pnpm exec`, which resolves from the lockfile. */
+  runner?: string;
 }): ShellFacts => {
+  const own = runner === undefined ? [] : [runner];
   let index = 0;
   while (index < rest.length) {
     const token = rest[index] ?? '';
@@ -500,12 +529,13 @@ const classifyExec = ({
     index += token === '--package' || token === '-p' ? 2 : 1;
   }
   const inner = rest.slice(index);
-  if (inner.length === 0) return { ...noFacts(), runsCode: true };
+  if (inner.length === 0) return { ...noFacts(), runsCode: true, registryRunners: own };
   const facts = classify({ words: inner, dirs, depth: depth + 1 });
   return {
     publishes: facts.publishes,
     runsCode: !facts.publishes || facts.tooDeep === true,
     scripts: facts.scripts,
+    registryRunners: [...own, ...facts.registryRunners],
     ...(facts.tooDeep ? { tooDeep: true } : {})
   };
 };
@@ -576,8 +606,14 @@ const classifyManager = ({
     facts.runsCode = CODE_SCRIPTS.test(third);
     return facts;
   }
-  if (EXEC_SUBCOMMANDS.has(sub)) {
-    return classifyExec({ rest: rest.slice(subIndex + 1), dirs: where, depth });
+  if (EXEC_SUBCOMMANDS.has(sub) || (manager === 'npm' && sub === 'exe')) {
+    const runner = registryRunner({ manager, sub });
+    return classifyExec({
+      rest: rest.slice(subIndex + 1),
+      dirs: where,
+      depth,
+      ...(runner === undefined ? {} : { runner })
+    });
   }
   if (sub === 'global') return facts;
   if (CODE_SUBCOMMANDS.has(sub) || CODE_SCRIPTS.test(sub)) {
@@ -607,6 +643,7 @@ const classifyManager = ({
     facts.scripts.push({ name: sub, dirs: where, wide });
     const ran = classify({ words, dirs: where, depth: depth + 1 });
     if (ran.publishes) facts.publishes = true;
+    facts.registryRunners.push(...ran.registryRunners);
     if (ran.tooDeep) {
       facts.tooDeep = true;
       facts.runsCode = true;
