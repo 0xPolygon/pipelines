@@ -16,6 +16,7 @@
   "withKeys": [
     "snapshot_tag"
   ],
+  "optInWithKeys": [],
   "floor": {
     "contents": "write",
     "pull-requests": "write",

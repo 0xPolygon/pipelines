@@ -8598,6 +8598,13 @@ const normalizeWorkflowTarget = (target) => {
     const [owner = '', repo = '', ...rest] = target.split('/');
     return [owner.toLowerCase(), repo.toLowerCase(), ...rest].join('/');
 };
+/**
+ * `with` keys a caller may pass even though the canonical trigger does not. Each is an
+ * opt-in input of the shared release workflow that stays off unless the caller sets it:
+ * `version_script` lets a repository run its own `ci:version` script. A key here is only
+ * allowed while the release workflow still declares it as a `workflow_call` input.
+ */
+const ALLOWED_OPT_IN_WITH_KEYS = ['version_script'];
 /** Fixed settings: the most a caller may grant, and the refs it may use. */
 const FIXED_CEILING = {
     contents: 'write',
@@ -8638,10 +8645,12 @@ const deriveProfile = ({ trigger, release }) => {
     for (const event of trigger.events)
         allowedEvents[event.name] = { inputs: [...event.inputs] };
     const caller = trigger.jobs.find((job) => job.uses !== undefined);
+    const declaredInputs = release.events.find((event) => event.name === 'workflow_call')?.inputs ?? [];
     return {
         allowedEvents,
         secretNames: caller ? [...caller.secrets.names] : [],
         withKeys: caller ? [...caller.withKeys] : [],
+        optInWithKeys: ALLOWED_OPT_IN_WITH_KEYS.filter((key) => declaredInputs.includes(key)),
         floor: deriveFloor(release),
         ceiling: { ...FIXED_CEILING },
         allowedRefs: [...FIXED_ALLOWED_REFS],
@@ -9624,6 +9633,16 @@ const toStringMap = (value) => {
     }
     return out;
 };
+const toTypeMap = (value) => {
+    const out = {};
+    if (isRecord(value)) {
+        for (const [key, entry] of Object.entries(value)) {
+            out[key] =
+                typeof entry === 'boolean' ? 'boolean' : typeof entry === 'string' ? 'string' : 'other';
+        }
+    }
+    return out;
+};
 const emptyPermissions = () => ({ present: false, scopes: {}, line: 0 });
 /**
  * GitHub resolves owner and repository names case-insensitively, so identity is
@@ -9810,6 +9829,7 @@ const parseJobs = ({ raw, topLevel, topLevelEnv, topLevelDirectory, lines }) => 
             },
             withKeys: isRecord(job['with']) ? Object.keys(job['with']) : [],
             withValues: toStringMap(job['with']),
+            withTypes: toTypeMap(job['with']),
             // Workflow-level `env` reaches every job, so its secret references are held by each of them.
             envSecretRefs: [...topLevelEnv, ...envSecretRefs(job['env'])],
             steps: parseSteps({ raw: job['steps'], lines, jobId: id })
@@ -10764,6 +10784,16 @@ const checkBespokePublisher = (params) => {
 ;// CONCATENATED MODULE: ./packages/release-conformance/src/rules/shared-caller.ts
 
 
+/**
+ * Exactly one expression: no nested opener or closer, so `${{ a }} x ${{ b }}` and `${{ a }}}}` fail.
+ * Not trimmed, so padding or a block scalar's trailing newline fails too.
+ */
+const SINGLE_EXPRESSION = /^\$\{\{(?:(?!\$\{\{|\}\})[\s\S])+\}\}$/;
+/**
+ * An opt-in input takes a YAML boolean scalar or one expression. Decided on the YAML type, not
+ * the text: a quoted `'false'` is a string, which GitHub would not treat as the boolean `false`.
+ */
+const isOptInValue = ({ type, value }) => type === 'boolean' || (type === 'string' && SINGLE_EXPRESSION.test(value));
 const levelOf = ({ permissions, scope }) => {
     if (permissions.all === 'write-all')
         return 'write';
@@ -10949,13 +10979,24 @@ const checkSharedCaller = ({ model, scan, profile, context }) => {
             }
         }
         for (const key of job.withKeys) {
-            if (!profile.withKeys.includes(key)) {
-                add({
-                    ruleId: 'caller/inputs',
-                    line: job.line,
-                    message: `\`with\` key \`${key}\` is not one the canonical trigger passes (${profile.withKeys.join(', ')}).`
-                });
+            if (profile.withKeys.includes(key))
+                continue;
+            if (profile.optInWithKeys.includes(key)) {
+                const value = job.withValues[key] ?? '';
+                if (!isOptInValue({ type: job.withTypes[key], value })) {
+                    add({
+                        ruleId: 'caller/inputs',
+                        line: job.line,
+                        message: `\`with\` key \`${key}\` must be an unquoted \`true\` or \`false\`, or one \`\${{ ... }}\` expression, not \`${value}\`.`
+                    });
+                }
+                continue;
             }
+            add({
+                ruleId: 'caller/inputs',
+                line: job.line,
+                message: `\`with\` key \`${key}\` is not allowed. The canonical trigger passes: ${profile.withKeys.join(', ') || '(none)'}. Allowed opt-ins: ${profile.optInWithKeys.join(', ') || '(none)'}.`
+            });
         }
     }
     return findings;

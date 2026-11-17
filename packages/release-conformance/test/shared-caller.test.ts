@@ -1,5 +1,5 @@
 import { strict as assert } from 'node:assert';
-import { cpSync, mkdirSync, mkdtempSync, readFileSync, rmSync } from 'node:fs';
+import { cpSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { after, describe, it } from 'node:test';
@@ -22,7 +22,7 @@ const test = (name: string, body: () => void): void => {
 const fixtures = join(import.meta.dirname, 'fixtures');
 const callerDir = join(fixtures, 'shared-caller');
 
-const loadProfile = (shape: 'pr1' | 'pr2'): Profile => {
+const loadProfile = (shape: 'pr1' | 'pr2' | 'pr3'): Profile => {
   const read = (name: string) =>
     parseWorkflow({
       file: name,
@@ -35,6 +35,7 @@ const loadProfile = (shape: 'pr1' | 'pr2'): Profile => {
 };
 const pr1 = loadProfile('pr1');
 const pr2 = loadProfile('pr2');
+const pr3 = loadProfile('pr3');
 
 const context: RuleContext = {
   defaultBranch: 'main',
@@ -178,5 +179,94 @@ suite('failing callers: each fixture fails exactly the intended rule', () => {
   test('the message names the offending key', () => {
     const findings = runRule({ dir: callerDir, name: 'fail-inputs-extra.yml', profile: pr2 });
     assert.ok(findings[0]?.message.includes('extra_key'));
+  });
+});
+
+suite('shared caller: allowed opt-in inputs', () => {
+  for (const name of [
+    'pass-opt-in-version-script-true.yml',
+    'pass-opt-in-version-script-false.yml',
+    'pass-opt-in-version-script-expression.yml'
+  ]) {
+    test(`${name} passes when the release workflow declares the input`, () => {
+      assert.deepEqual(runRule({ dir: callerDir, name, profile: pr3 }), []);
+    });
+  }
+
+  test('a non-boolean, non-expression value fails caller/inputs', () => {
+    const findings = runRule({
+      dir: callerDir,
+      name: 'fail-opt-in-version-script-string.yml',
+      profile: pr3
+    });
+    assert.deepEqual(ruleIds(findings), ['caller/inputs']);
+    assert.ok(findings[0]?.message.includes('version_script'));
+  });
+
+  for (const name of [
+    'fail-opt-in-version-script-quoted-false.yml',
+    'fail-opt-in-version-script-quoted-true.yml'
+  ]) {
+    test(`${name}: a quoted string is not a boolean`, () => {
+      const findings = runRule({ dir: callerDir, name, profile: pr3 });
+      assert.deepEqual(ruleIds(findings), ['caller/inputs']);
+    });
+  }
+
+  /** The base fixture with its `version_script:` line replaced by the given YAML (one or more lines). */
+  const runValue = (yaml: string): Finding[] => {
+    const dir = mkdtempSync(join(tmpdir(), 'caller-value-'));
+    scratch.push(dir);
+    const base = readFileSync(join(callerDir, 'pass-opt-in-version-script-true.yml'), 'utf8');
+    const text = base.replace('      version_script: true\n', `${yaml}\n`);
+    assert.notEqual(text, base, 'the fixture line to replace moved');
+    writeFileSync(join(dir, 'case.yml'), text);
+    return runRule({ dir, name: 'case.yml', profile: pr3 });
+  };
+
+  const rejectedValues: [string, string][] = [
+    ['!!str true', '      version_script: !!str true'],
+    ['a trailing space inside quotes', '      version_script: "true "'],
+    ['a block scalar', '      version_script: |\n        true']
+  ];
+  for (const [label, yaml] of rejectedValues) {
+    test(`${label} is not a boolean`, () => {
+      assert.deepEqual(ruleIds(runValue(yaml)), ['caller/inputs']);
+    });
+  }
+
+  const rejectedExpressions = [
+    '${{ a }} junk ${{ b }}',
+    '${{ true }}${{ false }}',
+    '${{}}',
+    '${{ a }}}}'
+  ];
+  for (const expression of rejectedExpressions) {
+    test(`the value ${expression} is not exactly one expression`, () => {
+      assert.deepEqual(ruleIds(runValue(`      version_script: ${expression}`)), ['caller/inputs']);
+    });
+  }
+
+  test('one expression passes', () => {
+    assert.deepEqual(runValue('      version_script: ${{ inputs.x }}'), []);
+  });
+
+  test('an unknown key still fails and the message lists the opt-ins', () => {
+    const findings = runRule({ dir: callerDir, name: 'fail-inputs-unknown-key.yml', profile: pr3 });
+    assert.deepEqual(ruleIds(findings), ['caller/inputs']);
+    assert.ok(findings[0]?.message.includes('foo'));
+    assert.ok(findings[0]?.message.includes('Allowed opt-ins: version_script'));
+    assert.ok(findings[0]?.message.includes('snapshot_tag'));
+  });
+
+  test('the opt-in fails when the release workflow does not declare the input', () => {
+    assert.deepEqual(pr2.optInWithKeys, []);
+    const findings = runRule({
+      dir: callerDir,
+      name: 'pass-opt-in-version-script-true.yml',
+      profile: pr2
+    });
+    assert.deepEqual(ruleIds(findings), ['caller/inputs']);
+    assert.ok(findings[0]?.message.includes('version_script'));
   });
 });

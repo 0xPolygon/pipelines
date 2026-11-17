@@ -81,6 +81,8 @@ export interface JobModel {
   secrets: { inherit: boolean; names: string[] };
   withKeys: string[];
   withValues: Record<string, string>;
+  /** YAML type of each `with` value: a quoted `'true'` is a string, an unquoted `true` a boolean. */
+  withTypes: Record<string, 'boolean' | 'string' | 'other'>;
   envSecretRefs: EnvSecretRef[];
   /** Literal `defaults.run.working-directory` of the job or the workflow, when set. */
   workingDirectory?: string;
@@ -144,6 +146,8 @@ export interface Profile {
   allowedEvents: Record<string, { inputs: string[] }>;
   secretNames: string[];
   withKeys: string[];
+  /** Opt-in `with` keys a caller may pass: the allowed opt-ins the release workflow declares as `workflow_call` inputs. */
+  optInWithKeys: string[];
   /** Highest level per scope across the callee's jobs. */
   floor: Record<string, PermissionLevel>;
   ceiling: Record<string, PermissionLevel>;

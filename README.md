@@ -349,7 +349,7 @@ Rules for shared callers:
 | `caller/publish-permission-scope` | `id-token: write` is held only by the job that calls the release workflow |
 | `caller/secrets-inherit` | No `secrets: inherit` |
 | `caller/secrets` | Secret names are a subset of the canonical's |
-| `caller/inputs` | `with:` keys are a subset of the canonical's |
+| `caller/inputs` | `with:` keys are a subset of the canonical's, plus an allowed opt-in list (`version_script`, which lets a repository run its own `ci:version` script and is off unless the caller passes it). An opt-in key is allowed only while the release workflow declares it as an input, and its value must be an unquoted `true` or `false`, or exactly one `${{ }}` expression (a quoted `'true'` is a string and fails) |
 
 Rules for bespoke publishers:
 

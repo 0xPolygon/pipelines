@@ -15,6 +15,19 @@ import {
 } from '../canonical.ts';
 import { isSharedCallee } from '../repo-scan.ts';
 
+/**
+ * Exactly one expression: no nested opener or closer, so `${{ a }} x ${{ b }}` and `${{ a }}}}` fail.
+ * Not trimmed, so padding or a block scalar's trailing newline fails too.
+ */
+const SINGLE_EXPRESSION = /^\$\{\{(?:(?!\$\{\{|\}\})[\s\S])+\}\}$/;
+
+/**
+ * An opt-in input takes a YAML boolean scalar or one expression. Decided on the YAML type, not
+ * the text: a quoted `'false'` is a string, which GitHub would not treat as the boolean `false`.
+ */
+const isOptInValue = ({ type, value }: { type: string | undefined; value: string }): boolean =>
+  type === 'boolean' || (type === 'string' && SINGLE_EXPRESSION.test(value));
+
 const levelOf = ({
   permissions,
   scope
@@ -215,13 +228,23 @@ export const checkSharedCaller: Rule = ({ model, scan, profile, context }) => {
       }
     }
     for (const key of job.withKeys) {
-      if (!profile.withKeys.includes(key)) {
-        add({
-          ruleId: 'caller/inputs',
-          line: job.line,
-          message: `\`with\` key \`${key}\` is not one the canonical trigger passes (${profile.withKeys.join(', ')}).`
-        });
+      if (profile.withKeys.includes(key)) continue;
+      if (profile.optInWithKeys.includes(key)) {
+        const value = job.withValues[key] ?? '';
+        if (!isOptInValue({ type: job.withTypes[key], value })) {
+          add({
+            ruleId: 'caller/inputs',
+            line: job.line,
+            message: `\`with\` key \`${key}\` must be an unquoted \`true\` or \`false\`, or one \`\${{ ... }}\` expression, not \`${value}\`.`
+          });
+        }
+        continue;
       }
+      add({
+        ruleId: 'caller/inputs',
+        line: job.line,
+        message: `\`with\` key \`${key}\` is not allowed. The canonical trigger passes: ${profile.withKeys.join(', ') || '(none)'}. Allowed opt-ins: ${profile.optInWithKeys.join(', ') || '(none)'}.`
+      });
     }
   }
 
