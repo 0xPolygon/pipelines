@@ -2,17 +2,19 @@ name: Check release tags
 description: >
   Confirms the end state of a release run on either @changesets/cli major.
   Everything the run had to tag is checked: each package in
-  `<directory>/manifest.json` (when given) and each tag pointing at the local
-  clone's HEAD. Each needs a git tag on the remote repository (for a tag from
+  `<directory>/manifest.json` (when given) and each tag the run created (on 2.x
+  the tags pointing at the local clone's HEAD, on 3.x the `tags` list of the
+  tags file). Each needs a git tag on the remote repository (for a tag from
   the clone, at the run's commit) and a GitHub Release when changelogs are
   enabled and the package has a CHANGELOG.md, read through the GitHub REST
   API. A manifest tag is accepted as `<name>@<version>`, or as `v<version>`
   when the manifest has one entry and it is the repository's root package. A
   run with nothing to tag passes, whether or not a publish ran. Fails with one
   error listing what is missing. Safe to re-run: it only reads. On
-  @changesets/cli 3.x it also checks the expected-tags list the tagging step
-  wrote (the tag every non-ignored package's current version should have),
-  validating it strictly and failing on any malformed entry or missing tag.
+  @changesets/cli 3.x it reads the tags file the tagging job wrote and also
+  checks its `expected` list (the tag every non-ignored package's current
+  version should have), failing on any malformed entry or missing tag; no
+  repository code runs in that arm.
 
 inputs:
   directory:
@@ -23,15 +25,16 @@ inputs:
     default: ''
   major:
     description: >
-      The resolved @changesets/cli major ('2' or '3'). On '3' the expected-tags
-      list is read from `expected-tags-file` and required. Empty or '2' checks
+      The resolved @changesets/cli major ('2' or '3'). On '3' the created and
+      expected tags are read from `tags-file` (required). Empty or '2' checks
       the manifest and the tags at HEAD only.
     required: false
     default: ''
-  expected-tags-file:
+  tags-file:
     description: >
-      JSON file written by the 3.x tagging step, holding the `expected` list.
-      Read as data only. Required when `major` is '3'.
+      JSON file written by the 3.x tagging job and validated by the finalize
+      job, holding the `tags` and `expected` lists. Read as data only. Required
+      when `major` is '3'.
     required: false
     default: ''
   token:
@@ -50,5 +53,5 @@ runs:
         TARBALL_DIRECTORY: ${{ inputs.directory }}
         GITHUB_TOKEN: ${{ inputs.token }}
         CLI_MAJOR: ${{ inputs.major }}
-        EXPECTED_TAGS_FILE: ${{ inputs.expected-tags-file }}
+        TAGS_FILE: ${{ inputs.tags-file }}
       run: node "$ACTION_PATH/check-release-tags.mjs"

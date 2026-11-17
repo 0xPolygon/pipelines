@@ -1,10 +1,12 @@
 // Checks the end state of a release run with the GitHub REST API: everything
 // the run had to tag has a tag on the remote, and a Release where one is due.
 // "Had something to tag" is the union of the publish manifest (when a
-// directory with a manifest.json is given) and the tags pointing at the
-// local clone's HEAD, which both @changesets/cli majors create before this
-// runs. A tag from the clone must point at the run's commit on the remote. A
-// run with nothing to tag passes, whether or not anything was published.
+// directory with a manifest.json is given) and the tags the run created: on
+// @changesets/cli 2.x the tags pointing at the local clone's HEAD, on 3.x the
+// `tags` and `expected` lists of the validated tags artifact (the 3.x tagging
+// runs in an earlier job, so the finalize clone has no local tags). A created
+// tag must point at the run's commit on the remote. A run with nothing to tag
+// passes, whether or not anything was published.
 //
 // changesets names a tag `<name>@<version>` in a multi-package repo and
 // `v<version>` for the root package of a single-package repo. The `v` form is
@@ -16,13 +18,14 @@
 // is never read as "missing". Only reads, so a re-run after the tags and
 // Releases exist succeeds.
 //
-// On @changesets/cli 3.x the set to check also includes an expected list: the
-// tags the repository's current package versions should have, written by the
-// tagging step from the repository's config (see collect-tags.mjs), so a CLI
-// that tagged nothing cannot pass as "nothing to tag". The list is read as
-// data and validated strictly; any malformed entry fails the check. Each
-// expected tag must exist on the remote, at any commit: a package released in
-// an earlier run keeps its earlier tag. The 2.x arm is unchanged.
+// On @changesets/cli 3.x the `expected` list is the tags the repository's
+// current package versions should have, written by the tagging job from the
+// repository's config (see collect-tags.mjs), so a CLI that tagged nothing
+// cannot pass as "nothing to tag". The file is read as data and its shape is
+// checked again here; the finalize job has already validated it against the
+// checkout. Each expected tag must exist on the remote, at any commit: a
+// package released in an earlier run keeps its earlier tag. The 2.x arm is
+// unchanged.
 
 import { spawnSync } from 'node:child_process';
 import { existsSync, readFileSync } from 'node:fs';
@@ -148,48 +151,55 @@ export async function findMissing({
 const NPM_NAME = /^(?:@[a-z0-9~-][a-z0-9._~-]*\/)?[a-z0-9~-][a-z0-9._~-]*$/;
 const SEMVER =
   /^(0|[1-9]\d*)\.(0|[1-9]\d*)\.(0|[1-9]\d*)(?:-(?:0|[1-9]\d*|\d*[a-zA-Z-][0-9a-zA-Z-]*)(?:\.(?:0|[1-9]\d*|\d*[a-zA-Z-][0-9a-zA-Z-]*))*)?(?:\+[0-9a-zA-Z-]+(?:\.[0-9a-zA-Z-]+)*)?$/;
-const EXPECTED_KEYS = ['directory', 'name', 'tag', 'version'];
-const MAX_EXPECTED = 5000;
+const TAG_KEYS = ['commit', 'directory', 'packageName', 'tag'];
+const EXPECTED_KEYS = ['directory', 'packageName', 'tag'];
+const MAX_ENTRIES = 5000;
 
-/**
- * Reads the expected-tags list from the tags file written by the tagging step
- * and validates every entry: exactly `name`, `version`, `tag` and `directory`;
- * an npm package name, a semver version, a tag that is `<name>@<version>` or
- * `v<version>`, and no duplicate tag. Throws on anything else, including a
- * missing file or list.
- */
-export function readExpectedTags(file) {
-  let parsed;
-  try {
-    parsed = JSON.parse(readFileSync(resolve(file), 'utf8'));
-  } catch (err) {
-    throw new Error(`Could not read the expected tags file: ${err.message}`);
-  }
-  const list = parsed?.expected;
-  if (!Array.isArray(list) || list.length > MAX_EXPECTED) {
-    throw new Error('The expected tags file has no valid "expected" list.');
+function readEntries({ list, keys, name }) {
+  if (!Array.isArray(list) || list.length > MAX_ENTRIES) {
+    throw new Error(`The tags file has no valid "${name}" list.`);
   }
   const seen = new Set();
   for (const entry of list) {
-    const keys =
+    const entryKeys =
       entry !== null && typeof entry === 'object' && !Array.isArray(entry)
         ? Object.keys(entry).sort()
         : [];
     const valid =
-      keys.join() === EXPECTED_KEYS.join() &&
-      EXPECTED_KEYS.every((key) => typeof entry[key] === 'string') &&
-      entry.name.length <= 214 &&
-      NPM_NAME.test(entry.name) &&
-      SEMVER.test(entry.version) &&
-      (entry.tag === `${entry.name}@${entry.version}` || entry.tag === `v${entry.version}`) &&
+      entryKeys.join() === keys.join() &&
+      keys.every((key) => typeof entry[key] === 'string') &&
+      entry.packageName.length <= 214 &&
+      NPM_NAME.test(entry.packageName) &&
+      (!('commit' in entry) || /^[0-9a-f]{40}$/.test(entry.commit)) &&
+      /^(?:@[^@\s]+\/)?[^@\s]+@[^@\s]+$|^v[^@\s]+$/.test(entry.tag) &&
       entry.directory !== '' &&
       !seen.has(entry.tag);
     if (!valid) {
-      throw new Error(`The expected tags file has a malformed entry: ${JSON.stringify(entry)}`);
+      throw new Error(`The tags file has a malformed ${name} entry: ${JSON.stringify(entry)}`);
     }
     seen.add(entry.tag);
   }
   return list;
+}
+
+/**
+ * Reads the tags file written by the tagging job (and validated against the
+ * checkout by the finalize job) and checks the shape of every entry: exactly
+ * `tag`, `packageName`, `directory` (and `commit` for created tags), an npm
+ * package name and no duplicate tag in a list. Throws on anything else,
+ * including a missing file or list.
+ */
+export function readReleaseArtifact(file) {
+  let parsed;
+  try {
+    parsed = JSON.parse(readFileSync(resolve(file), 'utf8'));
+  } catch (err) {
+    throw new Error(`Could not read the tags file: ${err.message}`);
+  }
+  return {
+    tags: readEntries({ list: parsed?.tags, keys: TAG_KEYS, name: 'tags' }),
+    expected: readEntries({ list: parsed?.expected, keys: EXPECTED_KEYS, name: 'expected' })
+  };
 }
 
 /** Expected tags with no tag on the remote (at any commit). */
@@ -319,21 +329,36 @@ export async function main({
     return 1;
   }
   try {
-    const expected = major === '3' ? readExpectedTags(env.EXPECTED_TAGS_FILE ?? '') : [];
+    const artifact = major === '3' ? readReleaseArtifact(env.TAGS_FILE ?? '') : undefined;
+    const expected = artifact?.expected ?? [];
     const workspace = env.GITHUB_WORKSPACE || process.cwd();
     const manifest =
       directory && existsSync(resolve(directory, 'manifest.json')) ? readManifest(directory) : [];
-    const { head, tags: localTags } = localTagsAtHead({ workspace, run });
-    const packages = localTags.length > 0 ? workspacePackages({ workspace, run }) : [];
-    // A tag at HEAD that names no workspace package is not ours to check.
-    const tags = localTags.flatMap((tag) => {
-      const pkg = packageForTag({ tag, packages });
-      return pkg === undefined
-        ? []
-        : [{ tag, entry: { name: pkg.name, directory: pkg.directory } }];
-    });
+    let head;
+    let tags;
+    if (artifact === undefined) {
+      const local = localTagsAtHead({ workspace, run });
+      head = local.head;
+      const packages = local.tags.length > 0 ? workspacePackages({ workspace, run }) : [];
+      // A tag at HEAD that names no workspace package is not ours to check.
+      tags = local.tags.flatMap((tag) => {
+        const pkg = packageForTag({ tag, packages });
+        return pkg === undefined
+          ? []
+          : [{ tag, entry: { name: pkg.name, directory: pkg.directory } }];
+      });
+    } else {
+      // The tagging job ran in another clone, so the run's commit comes from
+      // the environment and no repository code (pnpm) runs here.
+      head = env.GITHUB_SHA;
+      if (!head) throw new Error('GITHUB_SHA is not set');
+      tags = artifact.tags.map(({ tag, packageName, directory }) => ({
+        tag,
+        entry: { name: packageName, directory }
+      }));
+    }
     if (manifest.length === 0 && tags.length === 0 && expected.length === 0) {
-      log('Nothing to tag: no published packages and no tags at HEAD');
+      log('Nothing to tag: no published packages and no tags created by this run');
       return 0;
     }
     const enabled = changelogsEnabled(workspace);
@@ -378,7 +403,7 @@ export async function main({
       return 1;
     }
     log(
-      `All ${manifest.length} published package(s), ${tags.length} tag(s) at HEAD and ${expected.length} expected tag(s) have a release tag (and a GitHub Release where a changelog exists)`
+      `All ${manifest.length} published package(s), ${tags.length} created tag(s) and ${expected.length} expected tag(s) have a release tag (and a GitHub Release where a changelog exists)`
     );
     return 0;
   } catch (err) {

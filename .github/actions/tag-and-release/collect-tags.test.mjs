@@ -11,6 +11,7 @@ after(() => rmSync(scratch, { recursive: true, force: true }));
 let counter = 0;
 const ndjson = () => join(scratch, `out${counter++}.ndjson`);
 
+const COMMIT = 'a'.repeat(40);
 const line = (tag, packageName) => JSON.stringify({ type: 'git-tag', tag, packageName });
 
 /**
@@ -30,6 +31,7 @@ function fakeRun({
   const run = (command, args, options = {}) => {
     calls.push({ command, args, env: options.env });
     if (args.includes('--version')) return { status: 0, stdout: `${version}\n`, stderr: '' };
+    if (args[0] === 'rev-parse') return { status: 0, stdout: `${COMMIT}\n`, stderr: '' };
     if (command === 'git') return { status: 0, stdout: tags.join('\n'), stderr: '' };
     if (args[0] === 'ls') return { status: 0, stdout: JSON.stringify(projects), stderr: '' };
     writeFileSync(
@@ -60,8 +62,8 @@ describe('collect-tags', () => {
     });
     assert.deepEqual(collectTags({ run, ndjsonPath: ndjson(), root }), {
       tags: [
-        { tag: '@s/pub@1.0.0', packageName: '@s/pub', directory: 'packages/pub' },
-        { tag: '@s/priv@2.0.0', packageName: '@s/priv', directory: 'packages/priv' }
+        { tag: '@s/pub@1.0.0', packageName: '@s/pub', directory: 'packages/pub', commit: COMMIT },
+        { tag: '@s/priv@2.0.0', packageName: '@s/priv', directory: 'packages/priv', commit: COMMIT }
       ]
     });
   });
@@ -96,7 +98,7 @@ describe('collect-tags', () => {
   it('a single-package v<version> tag is collected for the root package', () => {
     const { run } = fakeRun({ created: [['v1.2.3', 'root']], projects });
     assert.deepEqual(collectTags({ run, ndjsonPath: ndjson(), root }), {
-      tags: [{ tag: 'v1.2.3', packageName: 'root', directory: '.' }]
+      tags: [{ tag: 'v1.2.3', packageName: 'root', directory: '.', commit: COMMIT }]
     });
   });
 
@@ -113,6 +115,13 @@ describe('collect-tags', () => {
     assert.equal(seen, '');
     const cli = calls.find((c) => c.args[0] === 'exec');
     assert.deepEqual(cli.env, { CHANGESETS_OUTPUT: path, GIT_TERMINAL_PROMPT: '0' });
+  });
+
+  it('a HEAD that cannot be resolved fails', () => {
+    const { run } = fakeRun({ projects });
+    const noHead = (command, args, options) =>
+      args[0] === 'rev-parse' ? { status: 1, stdout: '', stderr: '' } : run(command, args, options);
+    assert.throws(() => collectTags({ run: noHead, ndjsonPath: ndjson(), root }), /resolve HEAD/);
   });
 
   it('a tag for a package missing from the workspace fails', () => {
@@ -132,10 +141,12 @@ describe('collect-tags', () => {
     assert.ok(existsSync(tagsFile));
     const written = JSON.parse(readFileSync(tagsFile, 'utf8'));
     assert.equal(written.tags[0].tag, 'v1.0.0');
+    assert.equal(written.tags[0].commit, COMMIT);
     assert.deepEqual(
-      written.expected.map((e) => e.tag),
-      ['@s/pub@1.0.0']
+      written.expected.map(({ tag, packageName }) => ({ tag, packageName })),
+      [{ tag: '@s/pub@1.0.0', packageName: '@s/pub' }]
     );
+    assert.deepEqual(Object.keys(written.expected[0]).sort(), ['directory', 'packageName', 'tag']);
     assert.equal(await main({ env: {}, run, log: (m) => logs.push(m) }), 1);
   });
 
@@ -180,13 +191,15 @@ describe('expectedTagsFor', () => {
       root: '/repo'
     });
     assert.deepEqual(out, [
-      { name: '@s/pub', version: '1.0.0', tag: '@s/pub@1.0.0', directory: 'packages/pub' }
+      { tag: '@s/pub@1.0.0', packageName: '@s/pub', directory: 'packages/pub' }
     ]);
   });
 
   it('expects a private package only when privatePackages.tag is true', () => {
     const names = (cfg) =>
-      expectedTagsFor({ packages: workspace(all), config: cfg, root: '/repo' }).map((e) => e.name);
+      expectedTagsFor({ packages: workspace(all), config: cfg, root: '/repo' }).map(
+        (e) => e.packageName
+      );
     assert.deepEqual(names(config({ ignore: ['@s/ign'] })), ['@s/pub']);
     assert.deepEqual(names(config({ ignore: ['@s/ign'], tag: true })), ['@s/pub', '@s/priv']);
   });
@@ -202,7 +215,7 @@ describe('expectedTagsFor', () => {
     ];
     const names = (ignore) =>
       expectedTagsFor({ packages: workspace(four), config: config({ ignore }), root: '/repo' }).map(
-        (e) => e.name
+        (e) => e.packageName
       );
     assert.deepEqual(names(['@s/alpha', '@s/keep']), ['@t/gamma', 'delta']);
     assert.deepEqual(names(['@s/alpha']), ['@s/keep', '@t/gamma', 'delta']);
@@ -218,7 +231,7 @@ describe('expectedTagsFor', () => {
       config: config(),
       root: '/repo'
     });
-    assert.deepEqual(out, [{ name: 'root', version: '1.2.3', tag: 'v1.2.3', directory: '.' }]);
+    assert.deepEqual(out, [{ tag: 'v1.2.3', packageName: 'root', directory: '.' }]);
   });
 });
 

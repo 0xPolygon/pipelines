@@ -31,7 +31,7 @@ in its own separate GitHub Actions job with its own runner.
 | `apps-ci.yml` | Lint, typecheck, and test on PRs | _(none)_ |
 | `apps-changeset-check.yml` | PR gate: requires a changeset (posts/deletes instructions comment) and that intra-workspace dependencies use `workspace:` | _(none)_ |
 | `apps-codegen-drift-check.yml` | PR gate: runs `pnpm -r --include-workspace-root run --if-present codegen-drift-check` (no-op when no package defines the script) | _(none)_ |
-| `apps-npm-release.yml` | Changesets release pipeline in jobs `version` (release PR), `build` (pack tarballs), `publish` (approval-gated npm publish via the `npm-publish` environment), `finalize` (git tags and GitHub Releases), plus on-demand snapshot publish via the `snapshot_tag` input and an opt-in `version_script` input. See [npm release](#npm-release-what-a-consuming-repository-must-configure) | `CHANGESET_RELEASE_BOT_APP_ID`, `CHANGESET_RELEASE_BOT_APP_PRIVATE_KEY` |
+| `apps-npm-release.yml` | Changesets release pipeline in jobs `version` (release PR), `build` (pack tarballs), `publish` (approval-gated npm publish via the `npm-publish` environment), `collect-tags` (3.x only: create the local tags with no write token), `finalize` (git tags and GitHub Releases), plus on-demand snapshot publish via the `snapshot_tag` input and an opt-in `version_script` input. See [npm release](#npm-release-what-a-consuming-repository-must-configure) | `CHANGESET_RELEASE_BOT_APP_ID`, `CHANGESET_RELEASE_BOT_APP_PRIVATE_KEY` |
 | `apps-release-conformance.yml` | PR and merge-queue gate: checks that a repository's npm release workflows follow the shared release standard. Also callable with `workflow_call`. See [Release workflow conformance](#release-workflow-conformance) | _(none)_ |
 | `apps-docker-release.yml` | GCP image push on version tag (delegates to `gcp_pipeline_release_image.yaml`) | `build_params_gh_secret_keys` |
 | `apps-pr-labeler.yml` | Labels `.github/`-only PRs as `do-not-notify`; removes label when non-`.github/` changes are added | _(none)_ |
@@ -59,7 +59,7 @@ system state automatically.
 | `actions/npm-pack` | Pack every public workspace package whose version is not on npm into tarballs and write `manifest.json`; holds no publish credential | No — dependency-free Node script |
 | `actions/npm-publish-tarballs` | Publish the tarballs listed in `manifest.json` after checking each file's SHA-256 and the npm client version, then verify every publish by reading all versions back from the registry (staged publishing is not supported yet), so tags and GitHub Releases are created only after the version is readable from the registry; needs no checkout or install | No — dependency-free Node script |
 | `actions/check-changesets-cli` | Fail unless the repository's resolved `@changesets/cli` is 2.x or 3.x, report which, and on 3.x require an explicit `privatePackages` setting when private packages exist | No — dependency-free Node script |
-| `actions/tag-and-release` | `@changesets/cli` 3.x: run `changeset git-tag` with no token, then push the created tags and create a GitHub Release for each; holds no publish credential | No — dependency-free Node script |
+| `actions/tag-and-release` | `@changesets/cli` 3.x: run `changeset git-tag` with no token in the `collect-tags` job, validate the resulting tags file with plain Node, then push the tags and create a GitHub Release for each in `finalize`; holds no publish credential | No — dependency-free Node script |
 | `actions/check-version-script` | When the version hook is enabled, fail unless the root `package.json` defines `ci:version` | No — dependency-free Node script |
 | `actions/release-guard` | Fail unless the run is a push to the repository's default branch | No — dependency-free Node script |
 | `actions/check-release-tags` | Confirm every package in `manifest.json` has a git tag and a GitHub Release, read through the GitHub REST API | No — dependency-free Node script |
@@ -183,7 +183,7 @@ directory rather than as a compiled bundle.
 
 `apps-npm-release.yml` runs from a push to the default branch only; any other
 event with an empty `snapshot_tag` fails. Its jobs are `version`, `build`,
-`publish` and `finalize` (formerly a single `release` job, so anything keyed
+`collect-tags` (3.x only), `publish` and `finalize` (formerly a single `release` job, so anything keyed
 on the old job name needs updating). A repository with only private packages
 skips `publish` and is tagged by `finalize` without any approval.
 
@@ -323,9 +323,10 @@ CLI, so a repository moves by changing its own dependencies and config.
 - A push whose pending changesets are all empty opens no release PR on 3.x.
   The empty changesets are consumed with the next real one.
 - A peer-dependency bump is a patch bump for the dependents.
-- The tag command is `changeset git-tag`; the `finalize` job runs it with no
-  token, then `actions/tag-and-release` pushes the tags and creates the
-  GitHub Releases.
+- The tag command is `changeset git-tag`; the `collect-tags` job runs it with
+  a read-only token and uploads the tags it created. The `finalize` job
+  validates that file against the checkout with plain Node, then
+  `actions/tag-and-release` pushes the tags and creates the GitHub Releases.
 
 ### Release workflow conformance
 

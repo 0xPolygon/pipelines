@@ -2,8 +2,9 @@ name: Collect release tags (3.x)
 description: >
   Runs `changeset git-tag` (@changesets/cli 3.x) in the checked-out
   repository to create the local git tags, and writes the tags it created to a
-  JSON file for the step that pushes them and creates the GitHub Releases
-  (`tag-and-release.cjs`, loaded from actions/github-script). Holds no token:
+  JSON file for the job that pushes them and creates the GitHub Releases
+  (`validate-tags.mjs` checks the file first, then `tag-and-release.cjs`,
+  loaded from actions/github-script, uses it). Holds no token:
   it removes the `.pipelines` checkout of this repository from the workspace
   before the CLI runs, because the CLI executes the repository's own
   dependencies. Fails when the tags the CLI reports differ from the tags it
@@ -13,6 +14,7 @@ outputs:
   tags-file:
     description: >
       Path of the JSON file listing the created tags: an object with a `tags`
+      list of tag, packageName, directory and commit entries, and an `expected`
       list of tag, packageName and directory entries.
     value: ${{ steps.collect.outputs.tags-file }}
 

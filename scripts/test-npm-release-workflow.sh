@@ -11,11 +11,11 @@
 set -uo pipefail
 
 # --- Expected shape. Change these in one place when jobs are added. ---
-EXPECTED_JOBS="version build publish finalize snapshot"
+EXPECTED_JOBS="version build collect-tags publish finalize snapshot"
 # Jobs that may hold `id-token: write`, sorted, space separated.
 EXPECTED_ID_TOKEN_JOBS="publish snapshot"
 # Jobs that must run release-guard, and jobs that must not.
-GUARDED_JOBS="version publish finalize"
+GUARDED_JOBS="version collect-tags publish finalize"
 UNGUARDED_JOBS="snapshot"
 
 REPO_ROOT="$(cd "$(dirname "$0")/.." && pwd)"
@@ -180,14 +180,16 @@ const expectedIf = {
   version: "inputs.snapshot_tag == ''",
   build: "inputs.snapshot_tag == '' && needs.version.outputs.has_changesets == 'false'",
   publish: "inputs.snapshot_tag == '' && needs.build.outputs.has_tarballs == 'true'",
+  'collect-tags':
+    "inputs.snapshot_tag == '' && needs.version.outputs.has_changesets == 'false' && needs.version.outputs.cli_major == '3'",
   finalize:
-    "always() && inputs.snapshot_tag == '' && needs.version.outputs.has_changesets == 'false' && needs.build.result == 'success' && (needs.publish.result == 'success' || (needs.publish.result == 'skipped' && needs.build.outputs.has_tarballs == 'false'))",
+    "always() && inputs.snapshot_tag == '' && needs.version.outputs.has_changesets == 'false' && needs.build.result == 'success' && (needs.collect-tags.result == 'success' || needs.version.outputs.cli_major != '3') && (needs.publish.result == 'success' || (needs.publish.result == 'skipped' && needs.build.outputs.has_tarballs == 'false'))",
   snapshot: "inputs.snapshot_tag != ''"
 };
 for (const [name, want] of Object.entries(expectedIf)) {
   check(`${name} if: is exactly the expected condition`, norm(jobs[name]?.if) === want, norm(jobs[name]?.if));
 }
-const expectedNeeds = { version: [], build: ['version'], publish: ['version', 'build'], finalize: ['version', 'build', 'publish'], snapshot: [] };
+const expectedNeeds = { version: [], build: ['version'], 'collect-tags': ['version', 'build'], publish: ['version', 'build'], finalize: ['version', 'build', 'collect-tags', 'publish'], snapshot: [] };
 for (const [name, want] of Object.entries(expectedNeeds)) {
   const have = [].concat(jobs[name]?.needs ?? []);
   check(`${name} needs: [${want.join(', ')}]`, json(have) === json(want), json(have));
@@ -218,12 +220,12 @@ const keyJobs = Object.entries(jobs)
   .sort()
   .join(' ');
 check('app private key and token minting only in: finalize version', keyJobs === 'finalize version', keyJobs);
-const secretJobs = ['build', 'publish', 'snapshot'].filter((n) => /secrets\./.test(json(jobs[n])));
-check('build, publish and snapshot reference no secrets.*', secretJobs.length === 0, secretJobs.join(' '));
+const secretJobs = ['build', 'collect-tags', 'publish', 'snapshot'].filter((n) => /secrets\./.test(json(jobs[n])));
+check('build, collect-tags, publish and snapshot reference no secrets.*', secretJobs.length === 0, secretJobs.join(' '));
 check('no job-level or step-level env in build and publish', ['build', 'publish'].every((n) => !('env' in (jobs[n] ?? {})) && (jobs[n]?.steps ?? []).every((st) => !('env' in st))));
 
 // Guard: first release-guard step precedes anything that mints a token or publishes.
-for (const name of ['version', 'publish', 'finalize']) {
+for (const name of ['version', 'collect-tags', 'publish', 'finalize']) {
   const steps = jobs[name]?.steps ?? [];
   const g = steps.findIndex((st) => stepUses(st)?.endsWith('/release-guard'));
   const risky = steps.findIndex((st) =>
@@ -297,7 +299,7 @@ check('build runs npm-pack after the install', pk > buildSteps.findIndex((st) =>
 const fin = jobs.finalize?.steps ?? [];
 const cli = fin.findIndex((st) => stepUses(st)?.endsWith('/check-changesets-cli'));
 const act = fin.findIndex((st) => stepUses(st) === 'changesets/action');
-check('finalize checks @changesets/cli before changesets/action, unconditionally', cli >= 0 && act > cli && !('if' in fin[cli]));
+check('finalize detects @changesets/cli before changesets/action, on the 2.x arm only (the detector runs the installed CLI)', cli >= 0 && act > cli && norm(fin[cli]?.if) === "needs.version.outputs.cli_major == '2'", norm(fin[cli]?.if));
 // Ordered publishes: the lock is on the publish job only.
 const conc = jobs.publish?.concurrency;
 check('publish concurrency: group per repository and ref', conc?.group === 'npm-publish-${{ github.repository }}-${{ github.ref }}', json(conc));
@@ -316,16 +318,44 @@ check('finalize passes the recorded Latest to the correction through env, not th
 check('both Latest github-script steps retry transient API errors', fin[rec]?.with?.retries === 3 && fin[fix]?.with?.retries === 3, json([fin[rec]?.with?.retries, fin[fix]?.with?.retries]));
 check('the Latest record step is unconditional', !('if' in fin[rec]));
 const tagColl = fin.findIndex((st) => stepUses(st)?.endsWith('/tag-and-release'));
+const ct = jobs['collect-tags']?.steps ?? [];
+const ctInst = ct.findIndex((st) => /^pnpm install/.test(norm(st.run ?? '')));
+const ctDet = ct.findIndex((st) => stepUses(st)?.endsWith('/check-changesets-cli'));
+const ctColl = ct.findIndex((st) => stepUses(st)?.endsWith('/tag-and-release'));
+const ctUp = ct.findIndex((st) => stepUses(st) === 'actions/upload-artifact');
 const tagRel = fin.findIndex((st) => isScript(st, 'tagAndRelease'));
 const mint = fin.findIndex((st) => stepUses(st) === 'actions/create-github-app-token');
 check('the Latest correction runs when changesets/action reports a new tag (published) or the 3.x tag-and-release step created a Release', fin[fix]?.if === "steps.changesets.outputs.published == 'true' || steps.tag-and-release.outputs.releases-created == 'true'" && fin[act]?.id === 'changesets' && fin[tagRel]?.id === 'tag-and-release', json(fin[fix]?.if));
-check('finalize has exactly one changesets/action step, pinned to v1.9.0 and only on major 2', fin.filter((st) => stepUses(st) === 'changesets/action').length === 1 && fin[act]?.uses === 'changesets/action@a45c4d594aa4e2c509dc14a9f2b3b67ba3780d0d' && norm(fin[act]?.if) === "steps.cli.outputs.major == '2'", json([fin[act]?.uses, fin[act]?.if]));
-check('git-tag runs before the app token is minted, only on major 3, after the cli check and Latest record', tagColl > rec && mint > tagColl && norm(fin[tagColl]?.if) === "steps.cli.outputs.major == '3'" && fin[tagColl]?.id === 'tag-collect', `record ${rec} collect ${tagColl} mint ${mint}`);
-check('the git-tag step holds no secret or app token in env or with', !/secrets\.|app-token/.test(json([fin[tagColl]?.env, fin[tagColl]?.with])), json([fin[tagColl]?.env, fin[tagColl]?.with]));
-check('the tag-and-release step runs only on major 3, after the token mint and before the tag check and the Latest correction, with its inputs through env', tagRel > mint && tagRel > act && norm(fin[tagRel]?.if) === "steps.cli.outputs.major == '3'" && fin[tagRel]?.with?.['github-token'] === '${{ steps.app-token.outputs.token }}' && fin[tagRel]?.with?.retries === 3 && !/\$\{\{/.test(String(fin[tagRel]?.with?.script ?? '')) && /tag-collect\.outputs\.tags-file/.test(fin[tagRel]?.env?.TAGS_FILE ?? ''), json(fin[tagRel]));
+check('finalize has exactly one changesets/action step, pinned to v1.9.0 and only on major 2', fin.filter((st) => stepUses(st) === 'changesets/action').length === 1 && fin[act]?.uses === 'changesets/action@a45c4d594aa4e2c509dc14a9f2b3b67ba3780d0d' && norm(fin[act]?.if) === "needs.version.outputs.cli_major == '2'", json([fin[act]?.uses, fin[act]?.if]));
+// finalize picks its arm from the version job's output (data), never from a
+// step that runs the repository's CLI. On major 3 no step may install, run
+// pnpm or changeset, or run the detector: those steps are all guarded to 2.
+const armGuard = "needs.version.outputs.cli_major == '2'";
+const codeSteps = fin.filter((st) => /pnpm (install|exec)|changeset(?!s)/.test(String(st.run ?? '')) || stepUses(st)?.endsWith('/check-changesets-cli') || stepUses(st) === 'changesets/action');
+check('finalize: every step that installs, runs pnpm or changeset, or detects the CLI runs only on the 2.x arm', codeSteps.length === 3 && codeSteps.every((st) => norm(st.if) === armGuard), json(codeSteps.map((st) => [st.name ?? st.uses ?? st.run, st.if])));
+check('finalize: arm conditions read needs.version.outputs.cli_major and no step output of the detector', !/steps\.cli\./.test(json(fin)) && !/steps\.cli\./.test(norm(jobs.finalize?.if)));
+const majorCheck = fin.findIndex((st) => /CLI_MAJOR/.test(json(st.env ?? {})));
+const finInstall = fin.findIndex((st) => /^pnpm install/.test(norm(st.run ?? '')));
+check('finalize: a plain run step rejects any major but 2 or 3 before the install, using no repository code', majorCheck >= 0 && majorCheck < finInstall && fin[majorCheck].env.CLI_MAJOR === '${{ needs.version.outputs.cli_major }}' && !/\b(pnpm|node|changeset)\b/.test(String(fin[majorCheck].run)) && /2\|3\)/.test(String(fin[majorCheck].run)), String(majorCheck));
+check('version job exposes cli_major from the detector', norm(jobs.version?.outputs?.cli_major) === '${{ steps.cli.outputs.major }}', norm(jobs.version?.outputs?.cli_major));
+check('collect-tags permissions are exactly contents: read', json(jobs['collect-tags']?.permissions) === json({ contents: 'read' }), json(jobs['collect-tags']?.permissions));
+check('collect-tags has no app token, no secret, no id-token and no env', !/create-github-app-token|secrets\.|id-token|app-token/.test(json(jobs['collect-tags'])) && !('env' in (jobs['collect-tags'] ?? {})) && ct.every((st) => !('env' in st)));
+check('collect-tags installs frozen with --ignore-scripts, then runs the detector, then the collect step, then uploads one artifact', ctInst >= 0 && norm(ct[ctInst]?.run) === 'pnpm install --frozen-lockfile --ignore-scripts' && ctDet > ctInst && ctColl > ctDet && ctUp > ctColl && norm(ct[ctColl]?.if) === "steps.cli.outputs.major == '3'" && ct[ctColl]?.id === 'tag-collect' && ct.filter((st) => stepUses(st) === 'actions/upload-artifact').length === 1 && /tag-collect\.outputs\.tags-file/.test(ct[ctUp]?.with?.path ?? ''), json([ctInst, ctDet, ctColl, ctUp]));
+check('collect-tags runs no changeset command of its own', !ct.some((st) => /changeset/.test(st.run ?? '')));
+const finalCollect = fin.filter((st) => stepUses(st)?.endsWith('/tag-and-release')).length;
+check('finalize runs no collect step and no changeset git-tag call', finalCollect === 0 && !/git-tag/.test(json(fin)) && !fin.some((st) => /changeset (git-)?tag/.test(String(st.run ?? ''))), json(fin.filter((st) => /git-tag/.test(json(st))).length));
+const tagDl3 = fin.findIndex((st) => stepUses(st) === 'actions/download-artifact' && st.with?.name === 'release-tags');
+const tagVal = fin.findIndex((st) => /validate-tags\.mjs/.test(String(st.run ?? '')));
+check('finalize downloads the tags artifact, then validates it with plain node, both before the app token is minted and only on major 3', tagDl3 > rec && tagVal > tagDl3 && mint > tagVal && norm(fin[tagDl3]?.if) === "needs.version.outputs.cli_major == '3'" && norm(fin[tagVal]?.if) === "needs.version.outputs.cli_major == '3'" && /^node \.\/\.pipelines\/\.github\/actions\/tag-and-release\/validate-tags\.mjs$/.test(norm(fin[tagVal]?.run)) && !/secrets\.|app-token/.test(json([fin[tagDl3], fin[tagVal]])), `download ${tagDl3} validate ${tagVal} mint ${mint}`);
+// After the app token exists, the 3.x arm runs nothing from the repository:
+// no run step, no pnpm exec, no changeset call. Steps of the frozen 2.x arm
+// (changesets/action runs `changeset tag`) are exempt by their major-2 guard.
+const after3 = fin.slice(mint + 1).filter((st) => !/needs\.version\.outputs\.cli_major == '2'/.test(String(st.if ?? '')));
+check('finalize (3.x arm) runs no run step, pnpm exec or changeset call after the app token is minted', after3.length > 0 && after3.every((st) => !('run' in st) && !/pnpm exec|changeset(?!s)|node_modules/.test(json(st))), json(after3.filter((st) => 'run' in st || /pnpm exec|changeset(?!s)|node_modules/.test(json(st))).map((st) => st.name ?? st.uses)));
+check('the tag-and-release step runs only on major 3, after the token mint and before the tag check and the Latest correction, with its inputs through env', tagRel > mint && tagRel > act && norm(fin[tagRel]?.if) === "needs.version.outputs.cli_major == '3'" && fin[tagRel]?.with?.['github-token'] === '${{ steps.app-token.outputs.token }}' && fin[tagRel]?.with?.retries === 3 && !/\$\{\{/.test(String(fin[tagRel]?.with?.script ?? '')) && fin[tagRel]?.env?.TAGS_FILE === '${{ runner.temp }}/release-tags/tags.json', json(fin[tagRel]));
 const tagCheck = fin.findIndex((st) => stepUses(st)?.endsWith('/check-release-tags'));
 check('finalize checks release tags after both tagging arms and before the Latest correction', tagCheck > act && tagCheck > tagRel && tagCheck < fix, `check-release-tags at ${tagCheck}, correction at ${fix}`);
-check('the tag check receives the detected major and the tagging step output as inputs, with no expression in a script', fin[tagCheck]?.with?.major === '${{ steps.cli.outputs.major }}' && /^\$\{\{ steps\.tag-collect\.outputs\.tags-file \}\}$/.test(String(fin[tagCheck]?.with?.['expected-tags-file'] ?? '')), json(fin[tagCheck]?.with));
+check('the tag check receives the detected major and the validated tags file as inputs, with no expression in a script', fin[tagCheck]?.with?.major === '${{ needs.version.outputs.cli_major }}' && /release-tags\/tags\.json/.test(String(fin[tagCheck]?.with?.['tags-file'] ?? '')) && /needs\.version\.outputs\.cli_major == '3'/.test(String(fin[tagCheck]?.with?.['tags-file'] ?? '')), json(fin[tagCheck]?.with));
 // The end-state check runs on every run; only the artifact download depends
 // on the publish job (the artifact exists only when publish ran).
 const tagDl = fin.map((st, i) => ({ st, i })).filter(({ st, i }) => stepUses(st) === 'actions/download-artifact' && i < tagCheck).pop();

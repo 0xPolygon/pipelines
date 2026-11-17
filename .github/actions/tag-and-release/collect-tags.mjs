@@ -1,9 +1,15 @@
-// Part A of the 3.x finalize tagging: creates the local git tags for every
-// package that needs one and writes the list of tags it created, for the step
-// that publishes them (tag-and-release.cjs). It also writes `expected`: the
-// tags the CLI should leave for the repository's current package versions,
-// derived from the repository's config without asking `git-tag`, so the end
-// state check can tell "tagged nothing" from "nothing to tag".
+// Part A of the 3.x tagging: creates the local git tags for every package that
+// needs one and writes the list of tags it created, for the step that pushes
+// them (tag-and-release.cjs). Each tag entry carries the commit it was created
+// at. It also writes `expected`: the tags the CLI should leave for the
+// repository's current package versions, derived from the repository's config
+// without asking `git-tag`, so the end state check can tell "tagged nothing"
+// from "nothing to tag".
+//
+// The artifact is `{ tags: [{ tag, packageName, directory, commit }],
+// expected: [{ tag, packageName, directory }] }`. The job that runs this holds
+// no token, and the job that consumes the artifact validates it with plain node
+// (validate-tags.mjs) before using it.
 //
 // This script runs with no token in its environment and never reads one: the
 // CLI it starts loads the repository's dependency code. It only runs
@@ -139,12 +145,17 @@ function packageDirectories({ run, root }) {
 }
 
 /**
- * Runs `changeset git-tag` and returns `{ tags: [{ tag, packageName, directory }] }`
- * for the tags it created. `ndjsonPath` must be a path the CLI may create; it
+ * Runs `changeset git-tag` and returns `{ tags: [{ tag, packageName, directory, commit }] }`
+ * for the tags it created, at the commit HEAD points to. `ndjsonPath` must be a path the CLI may create; it
  * is created empty first because the CLI appends and never truncates.
  */
 export function collectTags({ run = defaultRun, ndjsonPath, root = '.' }) {
   writeFileSync(ndjsonPath, '');
+  const head = run('git', ['rev-parse', 'HEAD']);
+  const commit = head.stdout.trim();
+  if (head.status !== 0 || !/^[0-9a-f]{40}$/.test(commit)) {
+    throw new Error('Could not resolve HEAD.');
+  }
   const before = tagsAtHead(run);
   const result = run('pnpm', ['exec', 'changeset', 'git-tag'], {
     env: { CHANGESETS_OUTPUT: ndjsonPath, GIT_TERMINAL_PROMPT: '0' }
@@ -174,7 +185,7 @@ export function collectTags({ run = defaultRun, ndjsonPath, root = '.' }) {
       if (directory === undefined) {
         throw new Error(`Package ${entry.packageName} (tag ${entry.tag}) is not in the workspace.`);
       }
-      return { ...entry, directory };
+      return { ...entry, directory, commit };
     })
   };
 }
@@ -199,9 +210,8 @@ export function expectedTagsFor({ packages, config, root = '.' }) {
     .map((pkg) => {
       const { name, version } = pkg.packageJson;
       return {
-        name,
-        version,
         tag: single ? `v${version}` : `${name}@${version}`,
+        packageName: name,
         directory: relative(resolve(root), resolve(pkg.dir)) || '.'
       };
     });
