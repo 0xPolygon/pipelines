@@ -332,6 +332,7 @@ const vsteps = jobs.version?.steps ?? [];
 const vguard = vsteps.findIndex((st) => stepUses(st)?.endsWith('/release-guard'));
 const vcheck = vsteps.findIndex((st) => stepUses(st)?.endsWith('/check-version-script'));
 const vact = vsteps.findIndex((st) => stepUses(st) === 'changesets/action');
+const vact3 = vsteps.findIndex((st, i) => i > vact && stepUses(st) === 'changesets/action');
 check('version job: hook check comes after release-guard and before changesets/action', vguard >= 0 && vcheck > vguard && vact > vcheck, 'guard ' + vguard + ' check ' + vcheck + ' action ' + vact);
 check('version job: hook check runs only when version_script is true', norm(vsteps[vcheck]?.if) === 'inputs.version_script' && vsteps[vcheck]?.with?.enabled === 'true', norm(vsteps[vcheck]?.if));
 const vhook = norm(vsteps[vact]?.with?.version);
@@ -354,6 +355,7 @@ const vwant = [
   './.pipelines/.github/actions/check-changesets-cli',
   'run:rm -rf .pipelines',
   'actions/create-github-app-token',
+  'changesets/action',
   'changesets/action'
 ];
 const vhave = vsteps.map(vsig);
@@ -362,7 +364,7 @@ check('version steps are exactly the allowlist, in order', json(vhave) === json(
 // job-level defaults, so the literal hook is also counted over the parsed
 // jobs (comments and the input's description are not occurrences).
 const hookCount = (json(jobs).match(/ci:version/g) ?? []).length;
-check('ci:version appears exactly once in the jobs, as the conditional version input of the version job changesets step', hookCount === 1 && /ci:version/.test(String(vsteps[vact]?.with?.version)), 'occurrences ' + hookCount);
+check('ci:version appears exactly twice in the jobs, once as the conditional version input of each version job changesets step', hookCount === 2 && /ci:version/.test(String(vsteps[vact]?.with?.version)) && /ci:version/.test(String(vsteps[vact3]?.with?.['version-script'])), 'occurrences ' + hookCount);
 // The version job detects the @changesets/cli major after the install, before
 // the token is minted and before any changesets step, on every run, and the
 // extra checkout is removed again before changesets/action.
@@ -377,6 +379,18 @@ check('version job has no job-level defaults', !('defaults' in (jobs.version ?? 
 check('version job: changesets/action version is pnpm run ci:version only under version_script', vhook === "${{ inputs.version_script && 'pnpm run ci:version' || '' }}", vhook);
 const vact_keys = Object.keys(vsteps[vact]?.with ?? {}).sort().join(' ');
 check('version job: changesets/action inputs are only title commit commitMode version publish', vact_keys === 'commit commitMode publish title version', vact_keys);
+const V1_SHA = 'a45c4d594aa4e2c509dc14a9f2b3b67ba3780d0d';
+const vacts = vsteps.filter((st) => stepUses(st) === 'changesets/action');
+check('version job: exactly two changesets/action steps, the 2.x arm first', vacts.length === 2 && vact >= 0 && vact3 > vact, json(vacts.map((st) => st.uses)));
+check('version job: the 2.x step is pinned to v1.9.0, runs only on major 2 and keeps id changesets', vsteps[vact]?.uses === `changesets/action@${V1_SHA}` && norm(vsteps[vact]?.if) === "steps.cli.outputs.major == '2'" && vsteps[vact]?.id === 'changesets', json([vsteps[vact]?.uses, vsteps[vact]?.if, vsteps[vact]?.id]));
+check('version job: the 3.x step is a v2 pin, runs only on major 3 and has id changesets3', /^changesets\/action@[0-9a-f]{40}$/.test(String(vsteps[vact3]?.uses)) && vsteps[vact3]?.uses !== vsteps[vact]?.uses && norm(vsteps[vact3]?.if) === "steps.cli.outputs.major == '3'" && vsteps[vact3]?.id === 'changesets3', json([vsteps[vact3]?.uses, vsteps[vact3]?.if, vsteps[vact3]?.id]));
+check('version job: 3.x version step has no env', isMap(vsteps[vact3]) && !('env' in vsteps[vact3]), json(vsteps[vact3]?.env));
+const v3_keys = Object.keys(vsteps[vact3]?.with ?? {}).sort().join(' ');
+check('version job: 3.x version step inputs are exactly the seven expected', v3_keys === 'commit-message create-github-releases github-token pr-title publish-script push-git-tags version-script', v3_keys);
+check('version job: 3.x version step turns tags and Releases off and has no commitMode', vsteps[vact3]?.with?.['create-github-releases'] === false && vsteps[vact3]?.with?.['push-git-tags'] === false && !json(vsteps[vact3]).includes('commitMode'), json(vsteps[vact3]?.with));
+const vh3 = norm(vsteps[vact3]?.with?.['version-script']);
+check('version job: 3.x version-script is pnpm run ci:version only under version_script', vh3 === "${{ inputs.version_script && 'pnpm run ci:version' || '' }}", vh3);
+check('version job: the has_changesets output reads both arms', norm(wf.jobs?.version?.outputs?.has_changesets) === "${{ steps.changesets.outputs.hasChangesets || steps.changesets3.outputs['has-changesets'] }}", norm(wf.jobs?.version?.outputs?.has_changesets));
 check('version job: no id-token permission', isMap(jobs.version?.permissions) && !('id-token' in jobs.version.permissions));
 check('version job: permissions are exactly contents: write and pull-requests: write', json(jobs.version?.permissions) === json({ contents: 'write', 'pull-requests': 'write' }), json(jobs.version?.permissions));
 console.log(out.join('\n'));

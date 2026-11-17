@@ -87,7 +87,7 @@ jobs:
       contents: write # release PR commits and branch
       pull-requests: write # the changesets Release / Deploy PR
     outputs:
-      has_changesets: ${{ steps.changesets.outputs.hasChangesets }}
+      has_changesets: ${{ steps.changesets.outputs.hasChangesets || steps.changesets3.outputs['has-changesets'] }}
     steps:
       # Fail before anything else runs unless this is a push to the default
       # branch. The guard comes from this workflow's own commit; the checkout
@@ -195,7 +195,9 @@ jobs:
           permission-contents: write
           permission-pull-requests: write
 
+      # Callers on @changesets/cli 2.x: the action's older major, unchanged.
       - uses: changesets/action@a45c4d594aa4e2c509dc14a9f2b3b67ba3780d0d # v1.9.0
+        if: steps.cli.outputs.major == '2'
         id: changesets
         with:
           title: 'changesets: Release / Deploy'
@@ -214,6 +216,23 @@ jobs:
           publish: echo "Publishing continues in the build, publish and finalize jobs"
         env:
           GITHUB_TOKEN: ${{ steps.app-token.outputs.token }}
+
+      # Callers on @changesets/cli 3.x. No `env` here: this major throws when
+      # a GITHUB_TOKEN in the environment differs from the `github-token`
+      # input. It commits through the API by default, so there is no
+      # commit-mode input. The publish script is the same no-op as above and
+      # tags and Releases are off: they are created after publish, not here.
+      - uses: changesets/action@ae32849d5ba541f9ae29e40e22a623bc13562f51 # v2.1.2
+        if: steps.cli.outputs.major == '3'
+        id: changesets3
+        with:
+          github-token: ${{ steps.app-token.outputs.token }}
+          pr-title: 'changesets: Release / Deploy'
+          commit-message: 'release: version packages'
+          version-script: ${{ inputs.version_script && 'pnpm run ci:version' || '' }}
+          publish-script: echo "Publishing continues in the build, publish and finalize jobs"
+          create-github-releases: false
+          push-git-tags: false
 
   build:
     # Runs once no changesets are pending (the push that merged the release
