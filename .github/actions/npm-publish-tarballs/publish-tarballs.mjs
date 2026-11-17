@@ -14,10 +14,11 @@
 // publish can be held for approval, or the registry can lag. So once every
 // package is published, each version document is read back from the public
 // registry, unauthenticated, against one shared deadline, and must show the
-// sha512 integrity of the tarball this run published. A version that never appears, or appears with different bytes,
-// fails the step, which keeps the release's tag and GitHub Release from being
-// created for a version consumers cannot install. Output showing a staged
-// publish also fails: staged publishing is not supported.
+// sha512 integrity of the tarball this run published. A version that never
+// appears, or appears with different bytes, fails the step, which keeps the
+// release's tag and GitHub Release from being created for a version consumers
+// cannot install. Output showing a staged publish also fails: staged
+// publishing is not supported.
 //
 // Each publish picks its dist-tag at publish time from the registry's current
 // `latest` (resolvePublishTag), so releases approved out of order never move
@@ -62,8 +63,8 @@ export function foreignRegistryKeys(publishConfig) {
 
 // Read-back schedule: npm validates a new version before listing it, which
 // can take minutes. Wait 15 s first, then 30 s between rounds, until the
-// elapsed time would pass the window (shared by all packages). The publish job's timeout-minutes must
-// stay comfortably above this window.
+// elapsed time would pass the window (shared by all packages). The publish
+// job's timeout-minutes must stay comfortably above this window.
 export const READ_BACK_WINDOW_MS = 10 * 60 * 1000;
 export const READ_BACK_INITIAL_DELAY_MS = 15 * 1000;
 export const READ_BACK_MAX_DELAY_MS = 30 * 1000;
@@ -85,7 +86,9 @@ export const isStagedOutput = (text) => STAGED_OUTPUT_PATTERN.test(String(text))
 export const defaultSleep = (ms) => new Promise((done) => setTimeout(done, ms));
 
 const NAME_PATTERN = /^(@[a-z0-9~][a-z0-9._~-]*\/)?[a-z0-9~][a-z0-9._~-]*$/;
-const VERSION_PATTERN = /^\d+\.\d+\.\d+(-[0-9A-Za-z.-]+)?(\+[0-9A-Za-z.-]+)?$/;
+// No build metadata (`+...`): npm drops it on publish, so the read-back would
+// look for a version the registry never lists.
+const VERSION_PATTERN = /^\d+\.\d+\.\d+(-[0-9A-Za-z.-]+)?$/;
 const TAG_PATTERN = /^[a-z][a-z0-9._-]*$/;
 
 const ENTRY_FIELDS = ['name', 'version', 'file', 'sha256', 'access', 'tag'];
@@ -492,7 +495,8 @@ export async function publishAll({
   windowMs,
   initialDelayMs,
   maxDelayMs,
-  timeoutMs
+  timeoutMs,
+  readBack = readBackAll
 }) {
   checkNpmVersion({ run });
   const manifest = readManifest(directory);
@@ -516,7 +520,8 @@ export async function publishAll({
         continue;
       }
       // Decided now, from the registry as it is now, so the order releases
-      // were approved in cannot move `latest` backwards. Always passed with
+      // were approved in does not move `latest` backwards unless the registry's
+      // document lags (see the header). Always passed with
       // --tag; no dist-tag is added or removed afterwards.
       const tag = resolvePublishTag({
         version: entry.version,
@@ -564,7 +569,7 @@ export async function publishAll({
     }
   }
 
-  const { confirmed, failed } = await readBackAll({
+  const { confirmed, failed } = await readBack({
     pending,
     fetchFn,
     sleep,
@@ -590,6 +595,11 @@ export async function publishAll({
         log(`Published ${id} with tag ${tags.get(id)}; read back from the registry`);
         published.push(id);
       }
+    } else {
+      // Neither confirmed nor failed should be unreachable; failing here makes
+      // an unaccounted package fail the step instead of passing unverified.
+      log(`::error::${id} was neither confirmed nor failed by the registry read-back`);
+      failures.push(id);
     }
   }
   return { published, skipped, failures };

@@ -9,6 +9,7 @@ import { afterEach, beforeEach, describe, it } from 'node:test';
 import {
   compareSemver,
   defaultRun,
+  FETCH_LATEST_RETRY_DELAYS_MS,
   fetchLatest,
   parseSemver,
   PREVIOUS_TAG,
@@ -900,10 +901,69 @@ describe('fetchLatest retries', () => {
   });
 });
 
+describe('publishAll accounting', () => {
+  it('fails a package the read-back neither confirmed nor failed', async () => {
+    writeManifest([entry('a')]);
+    const { run } = fakeRun();
+    const lines = [];
+    const result = await publishAll({
+      directory: dir,
+      ...net(),
+      run,
+      log: (line) => lines.push(line),
+      readBack: async () => ({ confirmed: [], failed: new Map() })
+    });
+    assert.deepEqual(result.failures, ['a@1.0.0']);
+    assert.deepEqual(result.published, []);
+    assert.deepEqual(result.skipped, []);
+    assert.match(lines.join('\n'), /neither confirmed nor failed/);
+  });
+});
+
+describe('fetchLatest answers that are not retried', () => {
+  // 403 and 429 are answers the registry gave on purpose. 429 is not retried
+  // either: the short waits here would not outlast a rate limit, and the
+  // package fails closed before `npm publish`, so a re-run is the safe retry.
+  for (const status of [403, 429]) {
+    it(`throws on ${status} after one attempt, without waiting`, async () => {
+      let calls = 0;
+      const waits = [];
+      const fetchFn = async () => {
+        calls++;
+        return { status, json: async () => ({}) };
+      };
+      await assert.rejects(
+        fetchLatest({ name: 'a', fetchFn, sleep: async (ms) => waits.push(ms) }),
+        new RegExp(`answered ${status}`)
+      );
+      assert.equal(calls, 1);
+      assert.deepEqual(waits, []);
+    });
+  }
+});
+
+describe('worst-case read wait', () => {
+  it('stays at 3 attempts of 30 s plus 2 s and 4 s waits, about 96 s', () => {
+    const attempts = FETCH_LATEST_RETRY_DELAYS_MS.length + 1;
+    const total =
+      attempts * READ_BACK_REQUEST_TIMEOUT_MS +
+      FETCH_LATEST_RETRY_DELAYS_MS.reduce((sum, ms) => sum + ms, 0);
+    assert.equal(total, 96 * 1000);
+  });
+});
+
 describe('readManifest preTag', () => {
   it('accepts a well-formed preTag and none', () => {
     writeManifest([entry('a', { preTag: 'beta' }), entry('b')]);
     assert.equal(readManifest(dir).length, 2);
+  });
+  it('rejects a version with build metadata, which npm drops on publish', () => {
+    for (const version of ['1.0.0+build', '1.0.0-rc.1+sha.5114f85']) {
+      writeManifest([entry('a', { version })]);
+      assert.throws(() => readManifest(dir), /version is not a semver version/, version);
+    }
+    writeManifest([entry('a', { version: '1.0.0-rc.1' })]);
+    assert.equal(readManifest(dir).length, 1);
   });
   it('rejects a preTag that is not a dist-tag name or reads as an option', () => {
     for (const preTag of ['--registry=evil', 'Beta', '', 7, null]) {
