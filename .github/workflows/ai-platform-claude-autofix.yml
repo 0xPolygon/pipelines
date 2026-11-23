@@ -466,6 +466,32 @@ jobs:
           case "$SHA" in ''|*[!0-9a-f]*) echo "::error::could not read the branch head"; exit 1;; esac
           echo "sha=$SHA" >> "$GITHUB_OUTPUT"
 
+      # In tag mode the agent action pins the PR branch with
+      # `git fetch origin <head sha>` BEFORE it installs its own credential
+      # (anthropics/claude-code-action, same pinned SHA:
+      # src/github/operations/branch.ts setupBranch runs before
+      # src/modes/tag/index.ts calls replaceCheckoutCredentials). The fetch
+      # always contacts the remote, even when the commit is already local.
+      # This job keeps no credential in git config, so on a private
+      # repository that fetch fails ("could not read Username"). The head
+      # commit is already in this checkout, so point origin at the local
+      # repository: the pin fetch then reads from disk and needs no
+      # credential. The action replaces origin with its own URL right after,
+      # and the hard gate resets origin before its own network calls. No
+      # credential is written to git config or put in the agent's
+      # environment by this step.
+      - name: Serve the PR head to the agent action from the checkout
+        if: >-
+          steps.attempts.outputs.proceed == 'true' &&
+          steps.policy.outputs.valid == 'true' &&
+          (steps.policy.outputs.enforce != 'true' || steps.before.outcome == 'success')
+        env:
+          HEAD_SHA: ${{ github.event.pull_request.head.sha }}
+        run: |
+          set -euo pipefail
+          git cat-file -e "${HEAD_SHA}^{commit}" || { echo "::error::the PR head commit is not in the checkout"; exit 1; }
+          git remote set-url origin "file://$(git rev-parse --show-toplevel)"
+
       - name: Fix review feedback
         # The trailing clause makes the gate coupling explicit: when the
         # policy is enforced, Claude must not run unless the pre-run head
