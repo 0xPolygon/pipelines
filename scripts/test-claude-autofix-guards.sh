@@ -116,6 +116,18 @@ check "G3 no bare git ls-remote / git fetch" 0 \
   "$(nc | cnt -E '(^|[^_[:alnum:]])git (ls-remote|fetch)( |$)')"
 check "G4 git network calls go through git_auth (ls-remote, fetch, definitions)" "4 2 4" \
   "$(nc | cnt 'git_auth ls-remote') $(nc | cnt 'git_auth fetch') $(nc | cnt '^ *git_auth() {')"
+# The agent action's tag-mode pin fetch runs before it installs its own
+# credential. On a private repository it only works because origin points at
+# the local checkout (see the step's comment), so origin must be switched
+# after the last authenticated pre-run call and before the agent starts.
+check "P1 origin pointed at the local checkout exactly once, with no credential" "1 0" \
+  "$(nc | cnt -F 'git remote set-url origin "file://') $(nc | grep -F 'git remote set-url origin "file://' | cnt -E 'token|AUTHORIZATION|@')"
+check_before "P1 review job: branch head recorded before origin points at the checkout" fix-review-feedback \
+  'name: Record branch head before autofix' 'name: Serve the PR head to the agent action from the checkout'
+check_before "P1 review job: origin points at the checkout before the agent step" fix-review-feedback \
+  'name: Serve the PR head to the agent action from the checkout' 'claude-code-action@'
+check_before "P1 review job: hard gate resets origin before its network calls" fix-review-feedback \
+  'git remote set-url origin "[$][{]GITHUB_SERVER_URL[}]' 'AFTER_SHA=[$][(]git_auth ls-remote'
 
 echo "Interpreter isolation"
 check "G5 every python3 invocation uses -P (invocations, with -P)" "8 8" \
