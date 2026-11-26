@@ -132,7 +132,7 @@ jobs:
           github_token: ${{ steps.reviewer-token.outputs.token }}
           allowed_bots: claude
           claude_args: |
-            --model claude-sonnet-4-6
+            --model claude-sonnet-5-5
             --max-turns 60
             --allowedTools "Read,Grep,Glob,Bash(gh pr diff:*),Bash(gh pr view:*),Bash(gh pr review:*),Bash(gh api:*)"
           prompt: ${{ env.REVIEW_PROMPT }}
@@ -149,7 +149,7 @@ jobs:
           anthropic_api_key: ${{ secrets.CLAUDE_API_KEY }}
           allowed_bots: claude
           claude_args: |
-            --model claude-sonnet-4-6
+            --model claude-sonnet-5-5
             --max-turns 60
             --allowedTools "Read,Grep,Glob,Bash(gh pr diff:*),Bash(gh pr view:*),Bash(gh pr review:*),Bash(gh api:*)"
           prompt: ${{ env.REVIEW_PROMPT }}
